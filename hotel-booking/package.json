@@ -1,0 +1,24 @@
+{
+  "name": "hotel-booking",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "dev:electron": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"wait-on http://localhost:5173 && cd electron && npm run dev\"",
+    "build": "npm run build:client && npm run build:electron",
+    "build:client": "cd client && npm run build",
+    "build:electron": "cd electron && npm run build",
+    "db:migrate": "cd server && npx prisma migrate dev",
+    "db:migrate:prod": "cd server && npx prisma migrate deploy",
+    "db:seed": "cd server && npm run seed",
+    "db:studio": "cd server && npx prisma studio",
+    "db:generate": "cd server && npx prisma generate",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install && cd ../electron && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "wait-on": "^7.2.0"
+  }
+}

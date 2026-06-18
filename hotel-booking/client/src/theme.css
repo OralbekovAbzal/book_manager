@@ -1,0 +1,168 @@
+/* ─── Tokens ─────────────────────────────────────────────────────────── */
+
+:root,
+:root[data-theme="light"] {
+  /* Surfaces */
+  --bg:              #ffffff;
+  --surface:         #f8f9fa;
+  --surface-2:       #f1f3f5;
+  --surface-3:       #e9ecef;
+  --surface-hover:   #f1f3f5;
+
+  /* Text — high contrast */
+  --text:            #111827;
+  --text-muted:      #374151;
+  --text-faint:      #6b7280;
+  --text-inverse:    #ffffff;
+
+  /* Borders */
+  --border:          #d1d5db;
+  --border-subtle:   #e5e7eb;
+  --border-strong:   #9ca3af;
+
+  /* Accent */
+  --accent:          #2563eb;
+  --accent-hover:    #1d4ed8;
+  --accent-bg:       #eff6ff;
+  --accent-text:     #1e40af;
+
+  /* Status colors */
+  --status-confirmed:    #2563eb;
+  --status-checked-in:   #16a34a;
+  --status-checked-out:  #ea580c;
+  --status-overdue:      #dc2626;
+  --status-maintenance:  #6b7280;
+  --status-no-show:      #9ca3af;
+
+  /* Calendar */
+  --today-bg:        #eff6ff;
+  --today-line:      #2563eb;
+  --weekend-bg:      #f9fafb;
+  --past-bg:         #f9fafb;
+
+  /* Shadows */
+  --shadow-sm:       0 1px 3px rgba(0,0,0,0.08);
+  --shadow-md:       0 2px 8px rgba(0,0,0,0.12);
+  --shadow-lg:       0 8px 32px rgba(0,0,0,0.16);
+}
+
+:root[data-theme="dark"] {
+  /* Surfaces */
+  --bg:              #0f0f11;
+  --surface:         #18181b;
+  --surface-2:       #222226;
+  --surface-3:       #2d2d32;
+  --surface-hover:   #2a2a2f;
+
+  /* Text — high contrast */
+  --text:            #f4f4f5;
+  --text-muted:      #d4d4d8;
+  --text-faint:      #a1a1aa;
+  --text-inverse:    #18181b;
+
+  /* Borders */
+  --border:          #3f3f46;
+  --border-subtle:   #2d2d33;
+  --border-strong:   #71717a;
+
+  /* Accent */
+  --accent:          #60a5fa;
+  --accent-hover:    #93c5fd;
+  --accent-bg:       rgba(59,130,246,0.15);
+  --accent-text:     #93c5fd;
+
+  /* Status colors */
+  --status-confirmed:    #60a5fa;
+  --status-checked-in:   #4ade80;
+  --status-checked-out:  #fb923c;
+  --status-overdue:      #f87171;
+  --status-maintenance:  #9ca3af;
+  --status-no-show:      #6b7280;
+
+  /* Calendar */
+  --today-bg:        rgba(59,130,246,0.12);
+  --today-line:      #60a5fa;
+  --weekend-bg:      #18181b;
+  --past-bg:         #111115;
+
+  /* Shadows */
+  --shadow-sm:       0 1px 3px rgba(0,0,0,0.5);
+  --shadow-md:       0 2px 8px rgba(0,0,0,0.6);
+  --shadow-lg:       0 8px 32px rgba(0,0,0,0.7);
+}
+
+/* ─── UI Scale vars (overridden by JS from visual settings) ───────── */
+:root {
+  --ui-font-size:  13px;
+  --ui-radius:     6px;
+}
+
+/* ─── Global ──────────────────────────────────────────────────────────── */
+
+html {
+  font-size: var(--ui-font-size);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, system-ui, sans-serif;
+  font-feature-settings: 'cv11', 'ss01';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+/* ─── Global element defaults ─────────────────────────────────────── */
+
+button {
+  font-family: inherit;
+  font-size: 1rem;
+  border-radius: var(--ui-radius);
+  color: inherit;
+}
+
+input, select, textarea {
+  font-family: inherit;
+  font-size: 1rem;
+  border-radius: var(--ui-radius);
+  color: inherit;
+}
+
+select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="tel"],
+input[type="date"],
+textarea {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+/* ─── Scrollbar ───────────────────────────────────────────────────────── */
+
+::-webkit-scrollbar       { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 4px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ─── Animations ──────────────────────────────────────────────────────── */
+
+@keyframes spin { to { transform: rotate(360deg); } }

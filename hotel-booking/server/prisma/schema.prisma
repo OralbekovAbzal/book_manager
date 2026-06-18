@@ -1,0 +1,219 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Room {
+  id         Int         @id @default(autoincrement())
+  number     String      @unique
+  categoryId Int
+  category   Category    @relation(fields: [categoryId], references: [id])
+  building   String
+  floor      Int
+  features   String[]
+  capacity   String      @default("")
+  isActive   Boolean     @default(true)
+  bookings   Booking[]
+  allotments Allotment[]
+  createdAt  DateTime    @default(now())
+
+  @@index([categoryId])
+  @@index([building, floor])
+  @@index([isActive, categoryId, building, floor])
+}
+
+model Category {
+  id          Int     @id @default(autoincrement())
+  name        String  @unique
+  color       String
+  description String?
+  rooms       Room[]
+}
+
+// Метки броней + их эффекты для алгоритма. Источник истины (раньше — localStorage).
+// `code` — стабильный идентификатор, который хранится в Booking.flags[].
+// `effects` — JSON { bufferAfter, bufferBefore, pin }.
+model BookingFlag {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  label     String
+  color     String?
+  effects   Json?
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+model Booking {
+  id                 Int           @id @default(autoincrement())
+  roomId             Int
+  room               Room          @relation(fields: [roomId], references: [id])
+  guestName          String
+  guestPhone         String?
+  checkIn            DateTime      @db.Date
+  checkOut           DateTime      @db.Date
+  status             BookingStatus @default(CONFIRMED)
+  source             String?
+  notes              String?
+  adultsWithMeals    Int           @default(0)
+  childrenWithMeals  Int           @default(0)
+  adultsNoMeals      Int           @default(0)
+  childrenNoMeals    Int           @default(0)
+  extraBedsWithMeals Int           @default(0)
+  extraBedsNoMeals   Int           @default(0)
+  disabledAdults     Int           @default(0)
+  disabledChildren   Int           @default(0)
+  discountPercent    Float         @default(0)
+  prepaymentPercent  Float         @default(50)
+  totalAmount        Float         @default(0)
+  prepaidAmount      Float         @default(0)
+  paidAmount         Float         @default(0)
+  flags              String[]      @default([])
+  partnerId          Int?
+  partner            Partner?      @relation(fields: [partnerId], references: [id])
+  shiftId            Int?
+  shift              Shift?        @relation(fields: [shiftId], references: [id])
+  adminId            Int
+  createdBy          Admin         @relation(fields: [adminId], references: [id])
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([roomId, checkIn, checkOut])
+  @@index([checkIn, checkOut])
+  @@index([checkIn, checkOut, status])
+  @@index([adminId])
+  @@index([status, checkIn])
+  @@index([shiftId])
+  @@index([partnerId])
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  NO_SHOW
+}
+
+model Admin {
+  id            Int       @id @default(autoincrement())
+  username      String    @unique
+  password      String
+  name          String
+  role          AdminRole @default(STAFF)
+  isActive      Boolean   @default(true)
+  bookings      Booking[]
+  shiftsCreated Shift[]   @relation("ShiftCreator")
+  snapshots     Snapshot[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+enum AdminRole {
+  SUPER_ADMIN
+  ADMIN
+  STAFF
+}
+
+model License {
+  id         Int      @id @default(1)
+  key        String
+  hardwareId String
+  expiresAt  DateTime
+  isActive   Boolean  @default(true)
+  updatedAt  DateTime @updatedAt
+}
+
+model Shift {
+  id          Int       @id @default(autoincrement())
+  date        DateTime  @db.Date
+  createdById Int
+  createdBy   Admin     @relation("ShiftCreator", fields: [createdById], references: [id])
+  bookings    Booking[]
+  createdAt   DateTime  @default(now())
+
+  @@unique([date])
+  @@index([date])
+}
+
+model BackupLog {
+  id        Int      @id @default(autoincrement())
+  path      String
+  size      Int
+  success   Boolean
+  error     String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+// Лёгкие снимки состояния броней для быстрого отката.
+// kind: 'auto' (после манипуляции), 'shift' (старт смены), 'manual' (вручную), 'safety' (перед откатом)
+model Snapshot {
+  id           Int      @id @default(autoincrement())
+  kind         String
+  label        String
+  bookingCount Int      @default(0)
+  data         Json
+  createdById  Int?
+  createdBy    Admin?   @relation(fields: [createdById], references: [id])
+  createdAt    DateTime @default(now())
+
+  @@index([kind, createdAt])
+  @@index([createdAt])
+}
+
+/// Партнёр / Бюро путешествий
+model Partner {
+  id                Int         @id @default(autoincrement())
+  name              String      @unique
+  color             String      @default("#6366f1")
+  defaultCheckInDay Int?        // 0=вс, 1=пн ... 6=сб (null = любой)
+  defaultNights     Int         @default(7)
+  commissionPercent Float?      // опционально
+  contactPerson     String?
+  contactPhone      String?
+  notes             String?
+  isActive          Boolean     @default(true)
+  allotments        Allotment[]
+  bookings          Booking[]
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+}
+
+/// Квота: партнёру выделен номер на конкретный период
+model Allotment {
+  id        Int       @id @default(autoincrement())
+  partnerId Int
+  partner   Partner   @relation(fields: [partnerId], references: [id], onDelete: Cascade)
+  roomId    Int
+  room      Room      @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  dateFrom  DateTime  @db.Date
+  dateTo    DateTime  @db.Date
+  notes     String?
+  releases  Release[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([roomId, dateFrom, dateTo])
+  @@index([partnerId])
+}
+
+/// Релиз: временное освобождение части аллокированного периода для прямой продажи
+model Release {
+  id          Int       @id @default(autoincrement())
+  allotmentId Int
+  allotment   Allotment @relation(fields: [allotmentId], references: [id], onDelete: Cascade)
+  dateFrom    DateTime  @db.Date
+  dateTo      DateTime  @db.Date
+  reason      String?
+  createdAt   DateTime  @default(now())
+
+  @@index([allotmentId, dateFrom, dateTo])
+}

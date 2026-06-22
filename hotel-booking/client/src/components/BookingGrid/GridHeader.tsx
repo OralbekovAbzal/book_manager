@@ -13,7 +13,7 @@ interface MonthGroup {
   count: number
 }
 
-const MONTH_ROW_H = 32
+const MONTH_ROW_H = 30
 
 export const GridHeader: React.FC<Props> = ({ dates, today }) => {
   const { DAY_WIDTH, ROOM_COL_WIDTH, HEADER_HEIGHT, FONT_SIZE } = useGridSettings()
@@ -156,7 +156,7 @@ export const GridHeader: React.FC<Props> = ({ dates, today }) => {
                 {format(d, 'EEE', { locale: ru })}
               </span>
 
-              <span style={{
+              <span className="mono" style={{
                 fontSize: isToday ? FONT_SIZE + 1 : FONT_SIZE,
                 fontWeight: isToday ? 700 : 500,
                 color: isToday ? 'var(--accent-text)' : isWeekend ? 'var(--text-faint)' : 'var(--text)',

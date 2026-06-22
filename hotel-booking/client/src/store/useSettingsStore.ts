@@ -12,6 +12,7 @@ export interface VisualSettings {
   uiRadius: number        // 0–20   — скругление кнопок / полей / карточек
   showFeatureIcons: boolean
   visibleDays: number     // 7–90   — дней в сетке
+  daysBeforeShift: number // 0–14   — сколько дней показывать слева ДО даты смены
   // roomColWidth удалён — вычисляется автоматически по fontSize
 }
 
@@ -24,6 +25,7 @@ export const VISUAL_DEFAULTS: VisualSettings = {
   uiRadius: 6,
   showFeatureIcons: true,
   visibleDays: 30,
+  daysBeforeShift: 3,
 }
 
 // ─── Room Fund types ───────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react'
+import React from 'react'
 import { format, parseISO, addDays } from 'date-fns'
 import { useGridStore, type RoomStatusFilter } from '../../store/useGridStore'
+import { useSettingsStore } from '../../store/useSettingsStore'
 
 interface FilterItem {
   key: RoomStatusFilter
@@ -10,161 +11,126 @@ interface FilterItem {
 
 const FILTERS: FilterItem[] = [
   { key: 'all',       label: 'Все' },
-  { key: 'living',    label: 'Проживают',  dotColor: 'var(--status-checked-in)' },
-  { key: 'departing', label: 'Выезжают',   dotColor: 'var(--status-checked-out)' },
-  { key: 'departed',  label: 'Выехали',    dotColor: 'var(--text-faint)' },
-  { key: 'arriving',  label: 'Заезжают',   dotColor: 'var(--status-confirmed)' },
-  { key: 'arrived',   label: 'Заехали',    dotColor: 'var(--status-checked-in)' },
-  { key: 'free',      label: 'Свободные',  dotColor: 'var(--text-faint)' },
+  { key: 'living',    label: 'Проживающие', dotColor: 'var(--s-in)' },
+  { key: 'departing', label: 'Выезжают',    dotColor: 'var(--s-out)' },
+  { key: 'departed',  label: 'Выбывшие',    dotColor: 'var(--text-faint)' },
+  { key: 'arriving',  label: 'Прибывающие', dotColor: 'var(--s-confirmed)' },
+  { key: 'arrived',   label: 'Прибывшие',   dotColor: 'var(--s-in)' },
+  { key: 'free',      label: 'Свободные',   dotColor: 'var(--text-faint)' },
 ]
 
-export const TodayStats: React.FC = () => {
+// Иконки навигации по датам (chevron, Lucide-стиль)
+const chevLeft   = <path d="m15 18-6-6 6-6" />
+const chevRight  = <path d="m9 18 6-6-6-6" />
+const chevLeft2  = <path d="m11 17-5-5 5-5M18 17l-5-5 5-5" />
+const chevRight2 = <path d="m6 17 5-5-5-5M13 17l5-5-5-5" />
+
+interface Props {
+  filtersOpen: boolean
+  onToggleFilters: () => void
+}
+
+export const TodayStats: React.FC<Props> = ({ filtersOpen, onToggleFilters }) => {
   const { roomStatusFilter, setRoomStatusFilter, fetchShiftDate, navigate, jumpToDate, data, shiftDate } = useGridStore()
 
-  useEffect(() => { fetchShiftDate() }, [])
+  React.useEffect(() => { fetchShiftDate() }, [])
 
-  // Перейти к рабочему дню: он будет ≈ в 3-х днях от начала видимого диапазона
+  // Перейти к рабочему дню: смена будет в daysBeforeShift днях от левого края
   const goToToday = () => {
     const anchorDate = shiftDate ?? data?.today
     if (!anchorDate) return
-    jumpToDate(format(addDays(parseISO(anchorDate), -3), 'yyyy-MM-dd'))
+    const before = useSettingsStore.getState().visual.daysBeforeShift ?? 3
+    jumpToDate(format(addDays(parseISO(anchorDate), -before), 'yyyy-MM-dd'))
   }
 
   return (
     <div style={{
-      display: 'flex',
-      alignItems: 'center',
-      gap: 6,
-      padding: '10px 20px',
-      background: 'var(--bg)',
-      borderBottom: '1px solid var(--border)',
-      flexWrap: 'wrap',
+      display: 'flex', alignItems: 'center', gap: 12,
+      height: 52, flexShrink: 0, padding: '0 16px',
+      background: 'var(--bg)', borderBottom: '1px solid var(--border-subtle)',
     }}>
-      {FILTERS.map(f => {
-        const active = roomStatusFilter === f.key
-        return (
-          <FilterButton
+      {/* Filter rail toggle */}
+      <button
+        onClick={onToggleFilters}
+        title={filtersOpen ? 'Скрыть фильтры' : 'Показать фильтры'}
+        className="tb-btn"
+        style={{
+          width: 34, height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8,
+          color: 'var(--text-muted)', cursor: 'pointer', transition: 'background 0.12s',
+        }}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          {filtersOpen ? chevLeft2 : chevRight2}
+        </svg>
+      </button>
+
+      {/* Room-status pills — общий серый контейнер, активная белая */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap',
+        padding: 4, background: 'var(--surface-2)',
+        border: '1px solid var(--border-subtle)', borderRadius: 10,
+      }}>
+        {FILTERS.map(f => (
+          <FilterPill
             key={f.key}
-            active={active}
+            active={roomStatusFilter === f.key}
             label={f.label}
             dotColor={f.dotColor}
             onClick={() => setRoomStatusFilter(f.key)}
           />
-        )
-      })}
+        ))}
+      </div>
 
-      {/* Навигация по датам — прижата к правому краю */}
-      <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 3 }}>
-        <NavBtn onClick={() => navigate(-7)} title="−7 дней">‹‹</NavBtn>
-        <NavBtn onClick={() => navigate(-1)} title="−1 день">‹</NavBtn>
-        <TodayBtn onClick={goToToday} />
-        <NavBtn onClick={() => navigate(1)} title="+1 день">›</NavBtn>
-        <NavBtn onClick={() => navigate(7)} title="+7 дней">››</NavBtn>
+      <div style={{ flex: 1 }} />
+
+      {/* Date navigation — icon buttons */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+        <NavBtn onClick={() => navigate(-7)} title="−7 дней" icon={chevLeft2} />
+        <NavBtn onClick={() => navigate(-1)} title="−1 день" icon={chevLeft} />
+        <button onClick={goToToday} title="Перейти к рабочему дню" className="tb-today" style={{
+          height: 30, padding: '0 14px', background: 'var(--bg)',
+          border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)',
+          cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.86rem', fontWeight: 600,
+          whiteSpace: 'nowrap', transition: 'background 0.12s, border-color 0.12s',
+        }}>Сегодня</button>
+        <NavBtn onClick={() => navigate(1)} title="+1 день" icon={chevRight} />
+        <NavBtn onClick={() => navigate(7)} title="+7 дней" icon={chevRight2} />
       </div>
     </div>
   )
 }
 
-// ─── Navigation buttons ─────────────────────────────────────────────────────────
+const NavBtn: React.FC<{ onClick: () => void; title: string; icon: React.ReactNode }> = ({ onClick, title, icon }) => (
+  <button onClick={onClick} title={title} className="tb-btn" style={{
+    width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7,
+    color: 'var(--text-muted)', cursor: 'pointer', transition: 'background 0.12s',
+  }}>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
+  </button>
+)
 
-const NavBtn: React.FC<{
-  onClick: () => void
-  title: string
-  children: React.ReactNode
-}> = ({ onClick, title, children }) => {
-  const [hover, setHover] = React.useState(false)
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        background: hover ? 'var(--surface-3)' : 'var(--surface-2)',
-        border: '1px solid var(--border)',
-        cursor: 'pointer',
-        padding: '6px 10px',
-        fontSize: '1rem',
-        color: 'var(--text)',
-        borderRadius: 'var(--ui-radius)',
-        lineHeight: 1,
-        fontWeight: 700,
-        transition: 'background 0.1s',
-        minWidth: 30,
-        textAlign: 'center',
-      }}
-    >
-      {children}
-    </button>
-  )
-}
-
-const TodayBtn: React.FC<{ onClick: () => void }> = ({ onClick }) => {
-  const [hover, setHover] = React.useState(false)
-  return (
-    <button
-      onClick={onClick}
-      title="Перейти к рабочему дню"
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        background: hover ? 'var(--accent-bg)' : 'var(--surface)',
-        border: `1px solid ${hover ? 'var(--accent)' : 'var(--border)'}`,
-        cursor: 'pointer',
-        padding: '6px 14px',
-        fontSize: 'inherit',
-        color: hover ? 'var(--accent-text)' : 'var(--text-muted)',
-        borderRadius: 'var(--ui-radius)',
-        lineHeight: 1,
-        fontWeight: 700,
-        transition: 'all 0.12s',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      Сегодня
-    </button>
-  )
-}
-
-const FilterButton: React.FC<{
+const FilterPill: React.FC<{
   active: boolean
   label: string
   dotColor?: string
   onClick: () => void
-}> = ({ active, label, dotColor, onClick }) => {
-  const [hover, setHover] = React.useState(false)
-  return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 7,
-        padding: '6px 12px',
-        borderRadius: 'var(--ui-radius)',
-        background: active
-          ? 'var(--accent-bg)'
-          : hover
-          ? 'var(--surface-2)'
-          : 'var(--surface)',
-        border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-        fontSize: 'inherit',
-        fontWeight: active ? 700 : 500,
-        color: active ? 'var(--accent-text)' : 'var(--text)',
-        cursor: 'pointer',
-        transition: 'all 0.12s',
-        lineHeight: 1,
-      }}
-    >
-      {dotColor && (
-        <span style={{
-          width: 6, height: 6, borderRadius: '50%',
-          background: dotColor, flexShrink: 0,
-        }} />
-      )}
-      {label}
-    </button>
-  )
-}
+}> = ({ active, label, dotColor, onClick }) => (
+  <button
+    onClick={onClick}
+    style={{
+      display: 'flex', alignItems: 'center', gap: 7, height: 28, padding: '0 12px',
+      borderRadius: 7, fontFamily: 'inherit', fontSize: '0.88rem',
+      cursor: 'pointer', whiteSpace: 'nowrap', border: 'none',
+      background: active ? 'var(--bg)' : 'transparent',
+      color: active ? 'var(--text)' : 'var(--text-muted)',
+      fontWeight: active ? 600 : 500,
+      boxShadow: active ? 'var(--shadow-sm)' : 'none',
+      transition: 'background 0.12s',
+    }}
+  >
+    {dotColor && <span style={{ width: 7, height: 7, borderRadius: '50%', background: dotColor, flexShrink: 0 }} />}
+    {label}
+  </button>
+)

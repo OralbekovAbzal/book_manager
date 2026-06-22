@@ -15,6 +15,13 @@ function errorHandler(err, req, res, _next) {
     return res.status(404).json({ error: 'Запись не найдена' })
   }
 
+  // Exclusion-constraint двойного бронирования (race condition): два админа одновременно
+  // забронировали один номер на пересекающиеся даты — БД отклонила второй INSERT/UPDATE.
+  const m = String(err && err.message || '')
+  if (err.code === 'P2004' || m.includes('booking_no_overlap') || m.includes('23P01') || m.includes('exclusion constraint')) {
+    return res.status(409).json({ error: 'Номер уже занят на выбранные даты (одновременное бронирование). Обновите сетку и попробуйте снова.' })
+  }
+
   const status = err.status || 500
   const message = status < 500 ? err.message : 'Внутренняя ошибка сервера'
   res.status(status).json({ error: message })

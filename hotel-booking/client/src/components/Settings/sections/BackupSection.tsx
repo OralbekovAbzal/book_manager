@@ -3,6 +3,7 @@ import { useSettingsStore } from '../../../store/useSettingsStore'
 import { fetchCategories, createCategory } from '../../../api/categories'
 import { fetchAllRooms, createRoom } from '../../../api/roomsAdmin'
 import type { RoomFundConfig } from '../../../store/useSettingsStore'
+import { SectionHeader } from './sectionUi'
 
 interface Bundle {
   type: 'room-fund-backup'
@@ -121,17 +122,11 @@ export const BackupSection: React.FC = () => {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 22, maxWidth: 600 }}>
-      <header>
-        <div style={{ fontSize: '1.38rem', fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.01em' }}>
-          Резервная копия фонда
-        </div>
-        <div style={{ fontSize: '1rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
-          Сохраните весь номерной фонд в один файл: категории, номера, корпуса, этажи,
-          особенности, вместимость и метки. В случае чего — восстановите за пару секунд,
-          не вводя всё заново.
-        </div>
-      </header>
+    <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <SectionHeader
+        title="Резервная копия фонда"
+        subtitle="Весь номерной фонд в одном файле: категории, номера, корпуса, особенности, метки."
+      />
 
       {/* Экспорт */}
       <div style={cardStyle}>
@@ -177,10 +172,10 @@ export const BackupSection: React.FC = () => {
 
       {status && (
         <div style={{
-          padding: '10px 14px', borderRadius: 8, fontSize: '0.95rem', lineHeight: 1.5,
-          background: status.kind === 'ok' ? '#ecfdf5' : '#fef2f2',
-          color: status.kind === 'ok' ? '#047857' : '#dc2626',
-          border: `1px solid ${status.kind === 'ok' ? '#a7f3d0' : '#fecaca'}`,
+          padding: '10px 14px', borderRadius: 8, fontSize: '0.9rem', lineHeight: 1.5,
+          background: status.kind === 'ok' ? 'var(--accent-bg)' : 'var(--surface-2)',
+          color: status.kind === 'ok' ? 'var(--s-in)' : 'var(--s-overdue)',
+          border: `1px solid ${status.kind === 'ok' ? 'var(--s-in)' : 'var(--s-overdue)'}`,
         }}>
           {status.text}
         </div>

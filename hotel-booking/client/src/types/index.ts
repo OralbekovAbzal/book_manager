@@ -187,6 +187,7 @@ export interface Admin {
 // Flat row types for grid virtualization
 export type FlatRow =
   | { type: 'room'; room: GridRoom; categoryColor: string; categoryName: string }
+  | { type: 'category'; id: number; name: string; color: string; total: number; occupied: number }
 
 // Modal state
 export interface ModalState {

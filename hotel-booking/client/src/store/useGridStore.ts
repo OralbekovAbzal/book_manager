@@ -15,6 +15,8 @@ export type RoomStatusFilter =
   | 'free'        // свободные на сегодняшнюю дату
 
 const getVisibleDays = () => useSettingsStore.getState().visual.visibleDays ?? 30
+// Сколько дней показывать слева ДО даты смены (настраивается во «Внешнем виде»)
+const getDaysBefore = () => useSettingsStore.getState().visual.daysBeforeShift ?? 3
 
 // Use UTC midnight so dateFrom/dateTo strings match the UTC-based dates
 // returned by the server. Local setHours(0,0,0,0) in UTC+5 would be
@@ -47,11 +49,13 @@ interface GridStore {
   deleteTarget: GridBooking | null
   shiftDate: string | null              // YYYY-MM-DD текущей открытой смены
   roomStatusFilter: RoomStatusFilter
+  hiddenCategoryIds: number[]           // клиентский фильтр категорий (чекбоксы в панели)
 
   fetchGrid: () => Promise<void>
   fetchToday: () => Promise<void>
   fetchShiftDate: () => Promise<void>
   setRoomStatusFilter: (f: RoomStatusFilter) => void
+  toggleCategoryVisible: (id: number) => void
   navigate: (days: number) => void
   syncDateRange: () => void
   setFilter: (key: keyof GridFilters, value: string) => void   // обновляет state БЕЗ fetch
@@ -81,8 +85,8 @@ export const useGridStore = create<GridStore>((set, get) => ({
   loading: false,
   error: null,
   // dateTo всегда = dateFrom + visibleDays, чтобы дни точно вмещались в окно
-  dateFrom: format(addDays(today, -3), 'yyyy-MM-dd'),
-  dateTo:   format(addDays(today, -3 + getVisibleDays()), 'yyyy-MM-dd'),
+  dateFrom: format(addDays(today, -getDaysBefore()), 'yyyy-MM-dd'),
+  dateTo:   format(addDays(today, -getDaysBefore() + getVisibleDays()), 'yyyy-MM-dd'),
   filters: loadFilters(),
   guestSearch: '',
   modal: { open: false, mode: 'create' },
@@ -90,6 +94,7 @@ export const useGridStore = create<GridStore>((set, get) => ({
   deleteTarget: null,
   shiftDate: null,
   roomStatusFilter: 'all',
+  hiddenCategoryIds: [],
 
   fetchGrid: async () => {
     const { dateFrom, dateTo, filters, guestSearch } = get()
@@ -116,9 +121,8 @@ export const useGridStore = create<GridStore>((set, get) => ({
     try {
       const shift = await fetchCurrentShift()
       const shiftDate = shift.date.slice(0, 10)
-      // Центрируем сетку на рабочем дне (смене), а не на дате устройства:
-      // -3 дня от смены + visibleDays вперёд.
-      const newFrom = format(addDays(parseISO(shiftDate), -3), 'yyyy-MM-dd')
+      // Центрируем сетку на рабочем дне (смене): daysBeforeShift дней слева + visibleDays вперёд.
+      const newFrom = format(addDays(parseISO(shiftDate), -getDaysBefore()), 'yyyy-MM-dd')
       const newTo = format(addDays(parseISO(newFrom), getVisibleDays()), 'yyyy-MM-dd')
       set({ shiftDate, dateFrom: newFrom, dateTo: newTo })
       get().fetchGrid()
@@ -128,6 +132,12 @@ export const useGridStore = create<GridStore>((set, get) => ({
   },
 
   setRoomStatusFilter: (f) => set({ roomStatusFilter: f }),
+
+  toggleCategoryVisible: (id) => set((s) => ({
+    hiddenCategoryIds: s.hiddenCategoryIds.includes(id)
+      ? s.hiddenCategoryIds.filter((x) => x !== id)
+      : [...s.hiddenCategoryIds, id],
+  })),
 
   navigate: (days) => {
     const { dateFrom } = get()

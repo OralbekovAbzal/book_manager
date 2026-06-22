@@ -12,12 +12,15 @@ export interface GridConstants {
   SHOW_FEATURE_ICONS: boolean
 }
 
-const MIN_DAY_WIDTH = 24
+// Базовые значения из дизайн-хендоффа (GRID в buildGrid.ts) — 1:1 с демо.
+// DAY_WIDTH ниже — это МИНИМУМ; реальная ширина дня растягивается, чтобы
+// видимые дни (visibleDays) точно заполняли контейнер без хвоста и без обрезки.
+const MIN_DAY_WIDTH = 46
 
 const DEFAULT: GridConstants = {
-  DAY_WIDTH: 44,
+  DAY_WIDTH: MIN_DAY_WIDTH,
   ROW_HEIGHT: 44,
-  ROOM_COL_WIDTH: 192,
+  ROOM_COL_WIDTH: 208,
   HEADER_HEIGHT: 48,
   BLOCK_PADDING: 2,
   BLOCK_RADIUS: 6,
@@ -35,24 +38,19 @@ interface Props {
 
 export const GridSettingsProvider: React.FC<Props> = ({ children, containerWidth }) => {
   const { visual } = useSettingsStore()
-
-  // Ширина колонки «Номер» вычисляется автоматически по размеру шрифта.
-  // При fontSize=13 (стандарт) ≈ 143px, при fontSize=11 (компактный) ≈ 121px
-  const ROOM_COL_WIDTH = Math.max(104, Math.round(visual.fontSize * 11))
-
-  // DAY_WIDTH вычисляется по реальной ширине контейнера, а не window.innerWidth
-  const availableWidth = Math.max(0, containerWidth - ROOM_COL_WIDTH)
-  const computedDayWidth = Math.max(
-    MIN_DAY_WIDTH,
-    Math.floor(availableWidth / Math.max(1, visual.visibleDays))
-  )
+  // Колонка «Номер» фиксирована под демо; ширина дня растягивается так, чтобы
+  // ровно visibleDays дней заполнили контейнер без пустого хвоста и без обрезки
+  // (но не уже MIN_DAY_WIDTH — тогда появляется горизонтальный скролл).
+  const availableWidth = Math.max(0, containerWidth - DEFAULT.ROOM_COL_WIDTH)
+  const fitWidth = Math.floor(availableWidth / Math.max(1, visual.visibleDays))
+  const DAY_WIDTH = Math.max(MIN_DAY_WIDTH, fitWidth)
 
   const value: GridConstants = {
-    DAY_WIDTH:          computedDayWidth,
+    DAY_WIDTH,
+    ROOM_COL_WIDTH:     DEFAULT.ROOM_COL_WIDTH,
+    BLOCK_PADDING:      DEFAULT.BLOCK_PADDING,
     ROW_HEIGHT:         visual.rowHeight,
-    ROOM_COL_WIDTH:     ROOM_COL_WIDTH,
     HEADER_HEIGHT:      visual.headerHeight,
-    BLOCK_PADDING:      2,
     BLOCK_RADIUS:       visual.blockRadius,
     FONT_SIZE:          visual.fontSize,
     SHOW_FEATURE_ICONS: visual.showFeatureIcons,

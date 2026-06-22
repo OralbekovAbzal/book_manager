@@ -345,8 +345,8 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
     )
   }
 
-  // Треугольные мысы по краям — наглядно показывают начало и конец брони
-  const taperPx = Math.min(8, Math.max(4, Math.floor(width * 0.1)))
+  // Треугольные мысы по краям — фиксированные 7px (1:1 с дизайн-хендоффом)
+  const taperPx = 7
   const clipPath = `polygon(${taperPx}px 0, calc(100% - ${taperPx}px) 0, 100% 50%, calc(100% - ${taperPx}px) 100%, ${taperPx}px 100%, 0 50%)`
   // padding учитывает обрезаемые мысы — текст не должен наезжать на скос
   const padX = taperPx + 6

@@ -11,8 +11,8 @@ html, body, #root {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
-  font-size: 14px;
+  /* Шрифт и базовый размер задаёт theme.css (Geist Variable, root 13px).
+     Здесь их НЕ переопределяем, иначе Geist подменяется системным шрифтом. */
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;

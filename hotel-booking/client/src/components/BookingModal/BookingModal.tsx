@@ -65,31 +65,45 @@ const counterBtnStyle: React.CSSProperties = {
 }
 
 const GuestCounter: React.FC<{ label: string; value: number; onChange: (v: number) => void }> = ({ label, value, onChange }) => (
-  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 0' }}>
-    <span style={{ fontSize: '1rem', color: '#374151' }}>{label}</span>
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 4px' }}>
+    <span style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>{label}</span>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
       <button type="button" onClick={() => onChange(Math.max(0, value - 1))} style={counterBtnStyle}>−</button>
-      <span style={{ width: 24, textAlign: 'center', fontSize: '1.08rem', fontWeight: 600 }}>{value}</span>
+      <span className="mono" style={{ minWidth: 22, textAlign: 'center', fontSize: '0.95rem', fontWeight: 600 }}>{value}</span>
       <button type="button" onClick={() => onChange(value + 1)} style={counterBtnStyle}>+</button>
     </div>
   </div>
 )
 
-const CalcSection: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-  <div style={{ marginBottom: 16 }}>
-    <div style={{
-      fontSize: '0.85rem',
-      fontWeight: 700,
-      color: '#9ca3af',
-      textTransform: 'uppercase' as const,
-      letterSpacing: '0.06em',
-      marginBottom: 8,
-    }}>{title}</div>
-    <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '4px 16px' }}>
-      {children}
+// Сворачиваемая секция (прогрессивное раскрытие) — по дизайну «Бронь».
+// Редко используемые группы свёрнуты по умолчанию; в свёрнутом виде показывают итог.
+const CalcSection: React.FC<{ title: string; defaultOpen?: boolean; badge?: number; children: React.ReactNode }> = ({ title, defaultOpen = true, badge, children }) => {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
+      <button type="button" onClick={() => setOpen(o => !o)} style={{
+        width: '100%', display: 'flex', alignItems: 'center', gap: 10, height: 44, padding: '0 14px',
+        background: 'var(--surface)', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
+      }}>
+        <span style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text)' }}>{title}</span>
+        <span style={{ flex: 1 }} />
+        {!open && badge ? (
+          <span className="mono" style={{ fontSize: '0.82rem', color: 'var(--text-faint)' }}>{badge}</span>
+        ) : null}
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="2"
+          strokeLinecap="round" strokeLinejoin="round"
+          style={{ transform: open ? 'none' : 'rotate(-90deg)', transition: 'transform 0.18s', flexShrink: 0 }}>
+          <path d="m6 9 6 6 6-6" />
+        </svg>
+      </button>
+      {open && (
+        <div style={{ padding: '4px 14px 8px', borderTop: '1px solid var(--border-subtle)' }}>
+          {children}
+        </div>
+      )}
     </div>
-  </div>
-)
+  )
+}
 
 const fmt = (n: number) => n.toLocaleString('ru-RU') + ' ₸'
 
@@ -476,65 +490,77 @@ export const BookingModal: React.FC = () => {
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'var(--bg)',
+        background: 'rgba(0,0,0,0.45)',
         zIndex: 100,
         display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'center',
+        padding: '28px 24px',
+        overflow: 'auto',
       }}
     >
       <div
         style={{
-          width: '100vw',
-          height: '100vh',
+          width: 960,
+          maxWidth: '100%',
+          maxHeight: 'calc(100vh - 56px)',
           background: 'var(--bg)',
+          border: '1px solid var(--border-subtle)',
+          borderRadius: 14,
+          boxShadow: 'var(--shadow-lg)',
           display: 'flex',
           overflow: 'hidden',
         }}
       >
-        {/* ── LEFT: Guest info (480px) ── */}
+        {/* ── LEFT: Guest info ── */}
         <div style={{
-          width: 480,
-          flexShrink: 0,
+          flex: 1,
+          minWidth: 0,
           display: 'flex',
           flexDirection: 'column',
-          borderRight: '1px solid var(--border)',
+          borderRight: '1px solid var(--border-subtle)',
           background: 'var(--bg)',
         }}>
           {/* Header */}
           <div style={{
-            padding: '20px 24px',
-            borderBottom: '1px solid var(--border)',
+            padding: '18px 22px',
+            borderBottom: '1px solid var(--border-subtle)',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
             flexShrink: 0,
           }}>
-            <h2 style={{ margin: 0, fontSize: '1.38rem', fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.01em' }}>
-              {title}
-              {isEdit && booking && (
-                <span style={{
-                  marginLeft: 10,
-                  padding: '3px 10px',
-                  borderRadius: 12,
-                  fontSize: '0.85rem',
-                  background: 'var(--surface-2)',
-                  color: 'var(--text-muted)',
-                  fontWeight: 500,
-                }}>
-                  {STATUS_LABELS[booking.status]}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+              <div style={{
+                width: 34, height: 34, borderRadius: 9, background: 'var(--accent-bg)', flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--accent-text)',
+              }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 2v4M16 2v4" /><rect width="18" height="18" x="3" y="4" rx="2" /><path d="M3 10h18" />
+                </svg>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.3, minWidth: 0 }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '1rem', fontWeight: 600, color: 'var(--text)', letterSpacing: '-0.01em' }}>
+                  {title}
+                  {isEdit && booking && (
+                    <span style={{
+                      padding: '2px 9px', borderRadius: 6, fontSize: '0.72rem', fontWeight: 600,
+                      background: 'var(--surface-2)', color: 'var(--text-muted)',
+                    }}>{STATUS_LABELS[booking.status]}</span>
+                  )}
                 </span>
-              )}
-            </h2>
-            <button onClick={closeModal} style={{
-              background: 'transparent',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              cursor: 'pointer',
-              fontSize: '1.23rem',
-              color: 'var(--text-muted)',
-              padding: '4px 10px',
-              lineHeight: 1,
-              fontWeight: 500,
-            }}>Закрыть</button>
+                <span style={{ fontSize: '0.78rem', color: 'var(--text-faint)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {categoryName ? `${categoryName} · ` : ''}{nightsLabel}
+                </span>
+              </div>
+            </div>
+            <button onClick={closeModal} title="Закрыть" style={{
+              width: 32, height: 32, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              background: 'transparent', border: '1px solid var(--border-subtle)', borderRadius: 8,
+              color: 'var(--text-muted)', cursor: 'pointer',
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
+            </button>
           </div>
 
           {/* Form (scrollable) */}
@@ -543,6 +569,30 @@ export const BookingModal: React.FC = () => {
             onSubmit={handleSubmit(onSubmit)}
             style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}
           >
+            {/* Guest name / Reason — самым первым */}
+            <Field label={isMaintenance ? 'Причина' : 'Имя гостя'} error={errors.guestName?.message}>
+              <input
+                type="text"
+                placeholder={isMaintenance ? 'Ремонт, замена сантехники...' : 'Иванов Иван'}
+                {...register('guestName', { required: isMaintenance ? 'Укажите причину' : 'Укажите имя гостя' })}
+                disabled={isClosed}
+                style={inputStyle}
+              />
+            </Field>
+
+            {/* Phone — вторым */}
+            {!isMaintenance && (
+              <Field label="Телефон">
+                <input
+                  type="tel"
+                  placeholder="+7 (___) ___-__-__"
+                  {...register('guestPhone')}
+                  disabled={isClosed}
+                  style={inputStyle}
+                />
+              </Field>
+            )}
+
             {/* Room */}
             <Field label="Номер комнаты" error={errors.roomId?.message}>
               <Controller
@@ -618,29 +668,6 @@ export const BookingModal: React.FC = () => {
               </div>
             )}
 
-            {/* Guest name / Reason */}
-            <Field label={isMaintenance ? 'Причина' : 'Имя гостя'} error={errors.guestName?.message}>
-              <input
-                type="text"
-                placeholder={isMaintenance ? 'Ремонт, замена сантехники...' : 'Иванов Иван'}
-                {...register('guestName', { required: isMaintenance ? 'Укажите причину' : 'Укажите имя гостя' })}
-                disabled={isClosed}
-                style={inputStyle}
-              />
-            </Field>
-
-            {/* Phone */}
-            {!isMaintenance && (
-              <Field label="Телефон">
-                <input
-                  type="tel"
-                  placeholder="+7 (___) ___-__-__"
-                  {...register('guestPhone')}
-                  disabled={isClosed}
-                  style={inputStyle}
-                />
-              </Field>
-            )}
 
             {/* Source */}
             {!isMaintenance && (
@@ -866,7 +893,7 @@ export const BookingModal: React.FC = () => {
 
         {/* ── RIGHT: Calculator ── */}
         {!isMaintenance && (
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', background: 'var(--surface)', minWidth: 0 }}>
+          <div style={{ width: 340, flexShrink: 0, display: 'flex', flexDirection: 'column', background: 'var(--surface)', minWidth: 0 }}>
             {/* Header */}
             <div style={{
               padding: '20px 24px',
@@ -885,73 +912,68 @@ export const BookingModal: React.FC = () => {
             {/* Calculator form (scrollable) */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
 
-              <CalcSection title="Гости с питанием">
+              <CalcSection title="Гости с питанием" badge={adultsWithMeals + childrenWithMeals}>
                 <GuestCounter label="Взрослые" value={adultsWithMeals} onChange={setAdultsWithMeals} />
                 <GuestCounter label="Дети" value={childrenWithMeals} onChange={setChildrenWithMeals} />
               </CalcSection>
 
-              <CalcSection title="Гости без питания">
+              <CalcSection title="Гости без питания" defaultOpen={adultsNoMeals + childrenNoMeals > 0} badge={adultsNoMeals + childrenNoMeals}>
                 <GuestCounter label="Взрослые" value={adultsNoMeals} onChange={setAdultsNoMeals} />
                 <GuestCounter label="Дети" value={childrenNoMeals} onChange={setChildrenNoMeals} />
               </CalcSection>
 
               {hasExtraBeds && (
-                <CalcSection title="Дополнительные места">
+                <CalcSection title="Дополнительные места" defaultOpen={extraBedsWithMeals + extraBedsNoMeals > 0} badge={extraBedsWithMeals + extraBedsNoMeals}>
                   <GuestCounter label="С питанием" value={extraBedsWithMeals} onChange={setExtraBedsWithMeals} />
                   <GuestCounter label="Без питания" value={extraBedsNoMeals} onChange={setExtraBedsNoMeals} />
                 </CalcSection>
               )}
 
-              <CalcSection title="Гости с инвалидностью">
+              <CalcSection title="Гости с инвалидностью" defaultOpen={disabledAdults + disabledChildren > 0} badge={disabledAdults + disabledChildren}>
                 <GuestCounter label="Взрослые" value={disabledAdults} onChange={setDisabledAdults} />
                 <GuestCounter label="Дети" value={disabledChildren} onChange={setDisabledChildren} />
               </CalcSection>
 
               {/* Discount & Prepayment */}
-              <div style={{ marginBottom: 16 }}>
-                <div style={{
-                  fontSize: '0.85rem',
-                  fontWeight: 700,
-                  color: '#9ca3af',
-                  textTransform: 'uppercase' as const,
-                  letterSpacing: '0.06em',
-                  marginBottom: 8,
-                }}>Параметры оплаты</div>
-                <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 10, padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <CalcSection title="Параметры оплаты">
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, padding: '6px 0' }}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ fontSize: '1rem', color: '#374151' }}>Скидка (%)</label>
+                    <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Скидка (%)</label>
                     <input
                       type="number"
                       min={0}
                       max={100}
                       value={discountPercent}
                       onChange={e => setDiscountPercent(Math.min(100, Math.max(0, Number(e.target.value))))}
-                      style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+                      className="mono"
+                      style={{ ...inputStyle, width: 88, textAlign: 'right' }}
                     />
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ fontSize: '1rem', color: '#374151' }}>Предоплата (%)</label>
+                    <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Предоплата (%)</label>
                     <input
                       type="number"
                       min={0}
                       max={100}
                       value={prepaymentPercent}
                       onChange={e => setPrepaymentPercent(Math.min(100, Math.max(0, Number(e.target.value))))}
-                      style={{ ...inputStyle, width: 80, textAlign: 'right' }}
+                      className="mono"
+                      style={{ ...inputStyle, width: 88, textAlign: 'right' }}
                     />
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ fontSize: '1rem', color: '#374151' }}>Оплачено (₸)</label>
+                    <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Оплачено (₸)</label>
                     <input
                       type="number"
                       min={0}
                       value={paidAmount}
                       onChange={e => setPaidAmount(Math.max(0, Number(e.target.value)))}
-                      style={{ ...inputStyle, width: 120, textAlign: 'right' }}
+                      className="mono"
+                      style={{ ...inputStyle, width: 128, textAlign: 'right' }}
                     />
                   </div>
                 </div>
-              </div>
+              </CalcSection>
 
             </div>
 

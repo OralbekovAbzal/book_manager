@@ -5,6 +5,10 @@ import { fetchAllRooms, createRoom, updateRoom, deactivateRoom } from '../../../
 import { compareRooms, naturalCompare } from '../../../utils/sortRooms'
 import type { Room } from '../../../types'
 
+type Segment = 'all' | 'active' | 'hidden'
+
+const GRID_COLS = '80px 1fr 90px 1.5fr 120px 36px'
+
 export const RoomsSection: React.FC = () => {
   const { roomFund } = useSettingsStore()
   const { buildings, features, capacities } = roomFund
@@ -13,51 +17,37 @@ export const RoomsSection: React.FC = () => {
   const [cats, setCats] = useState<CategoryWithCount[]>([])
   const [loading, setLoading] = useState(true)
   const [editId, setEditId] = useState<number | 'new' | null>(null)
-  const [showInactive, setShowInactive] = useState(false)
+  const [seg, setSeg] = useState<Segment>('all')
+  const [search, setSearch] = useState('')
   const [form, setForm] = useState({
-    number: '',
-    categoryId: 0,
-    building: '',
-    floor: 1,
-    features: [] as string[],
-    capacity: '',
+    number: '', categoryId: 0, building: '', floor: 1, features: [] as string[], capacity: '',
   })
   const [error, setError] = useState('')
 
   const load = () => {
     setLoading(true)
-    Promise.all([
-      fetchAllRooms(showInactive ? {} : { isActive: true }),
-      fetchCategories(),
-    ])
+    Promise.all([fetchAllRooms({}), fetchCategories()])
       .then(([r, c]) => { setRooms(r); setCats(c); setLoading(false) })
       .catch(() => setLoading(false))
   }
 
-  useEffect(() => { load() }, [showInactive])
+  useEffect(() => { load() }, [])
 
   const startNew = () => {
     setEditId('new')
     setForm({
-      number: '',
-      categoryId: cats[0]?.id ?? 0,
-      building: buildings[0]?.name ?? '',
-      floor: 1,
-      features: [],
-      capacity: capacities[0]?.id ?? '',
+      number: '', categoryId: cats[0]?.id ?? 0, building: buildings[0]?.name ?? '',
+      floor: 1, features: [], capacity: capacities[0]?.id ?? '',
     })
     setError('')
   }
 
   const startEdit = (room: Room) => {
+    if (editId === room.id) { setEditId(null); return }
     setEditId(room.id)
     setForm({
-      number: room.number,
-      categoryId: room.category.id,
-      building: room.building,
-      floor: room.floor,
-      features: [...room.features],
-      capacity: room.capacity ?? '',
+      number: room.number, categoryId: room.category.id, building: room.building,
+      floor: room.floor, features: [...room.features], capacity: room.capacity ?? '',
     })
     setError('')
   }
@@ -67,25 +57,12 @@ export const RoomsSection: React.FC = () => {
     if (!form.building.trim()) { setError('Введите корпус'); return }
     if (!form.categoryId) { setError('Выберите категорию'); return }
     try {
-      if (editId === 'new') {
-        await createRoom({
-          number: form.number,
-          categoryId: form.categoryId,
-          building: form.building,
-          floor: form.floor,
-          features: form.features,
-          capacity: form.capacity,
-        })
-      } else if (editId) {
-        await updateRoom(editId as number, {
-          number: form.number,
-          categoryId: form.categoryId,
-          building: form.building,
-          floor: form.floor,
-          features: form.features,
-          capacity: form.capacity,
-        })
+      const payload = {
+        number: form.number, categoryId: form.categoryId, building: form.building,
+        floor: form.floor, features: form.features, capacity: form.capacity,
       }
+      if (editId === 'new') await createRoom(payload)
+      else if (editId) await updateRoom(editId as number, payload)
       setEditId(null)
       load()
     } catch (e: unknown) {
@@ -105,11 +82,8 @@ export const RoomsSection: React.FC = () => {
 
   const toggleActive = async (room: Room) => {
     try {
-      if (room.isActive) {
-        await deactivateRoom(room.id)
-      } else {
-        await updateRoom(room.id, { isActive: true })
-      }
+      if (room.isActive) await deactivateRoom(room.id)
+      else await updateRoom(room.id, { isActive: true })
       load()
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: string } } }
@@ -117,243 +91,267 @@ export const RoomsSection: React.FC = () => {
     }
   }
 
-  // Group rooms by building (натуральная сортировка корпусов)
   const buildingKeys = [...new Set(rooms.map(r => r.building))].sort(naturalCompare)
-
-  // Building options: from store + any existing in DB (to avoid data loss)
   const buildingOptions = [
     ...buildings.map(b => b.name),
     ...buildingKeys.filter(k => !buildings.find(b => b.name === k)),
   ]
 
-  const getFeatureEmoji = (featureName: string) => {
-    const found = features.find(f => f.name === featureName)
-    return found ? found.emoji : '✦'
-  }
+  const getCapacityLabel = (capacityId: string) => capacities.find(c => c.id === capacityId)?.label ?? capacityId
 
-  const getCapacityLabel = (capacityId: string) => {
-    const found = capacities.find(c => c.id === capacityId)
-    return found ? found.label : capacityId
-  }
+  // Фильтрация по сегменту + поиску
+  const q = search.trim().toLowerCase()
+  const visibleRooms = rooms.filter(r => {
+    if (seg === 'active' && !r.isActive) return false
+    if (seg === 'hidden' && r.isActive) return false
+    if (q && !(`${r.number} ${r.category.name}`.toLowerCase().includes(q))) return false
+    return true
+  })
 
   if (loading) {
-    return (
-      <div style={{ textAlign: 'center', padding: 24, color: '#9ca3af', fontSize: '1rem' }}>
-        Загрузка...
-      </div>
-    )
+    return <div style={{ textAlign: 'center', padding: 24, color: 'var(--text-faint)' }}>Загрузка…</div>
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div style={{ fontSize: '1.69rem', fontWeight: 700, color: '#111827', marginBottom: 4 }}>Номера</div>
-      <div style={{ fontSize: '1rem', color: '#6b7280', marginBottom: 16 }}>
-        Управление номерным фондом. Номера привязаны к корпусам, категориям, вместимости и особенностям.
+    <div style={{ maxWidth: 880, margin: '0 auto' }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+        <div>
+          <h1 style={{ margin: 0, fontSize: '1.5rem', fontWeight: 600, letterSpacing: '-0.02em', color: 'var(--text)' }}>Номера</h1>
+          <p style={{ margin: '5px 0 0', fontSize: '0.86rem', color: 'var(--text-faint)' }}>
+            Номерной фонд отеля · {rooms.length} номеров в {cats.length} категориях
+          </p>
+        </div>
+        <button onClick={startNew} style={{
+          display: 'flex', alignItems: 'center', gap: 7, height: 36, padding: '0 15px',
+          background: 'var(--accent)', border: 'none', borderRadius: 8, color: '#fff',
+          cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.86rem', fontWeight: 600,
+          whiteSpace: 'nowrap', boxShadow: 'var(--shadow-sm)',
+        }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M5 12h14M12 5v14" /></svg>
+          Добавить номер
+        </button>
       </div>
 
-      {/* Controls */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontSize: '0.92rem', color: '#6b7280' }}>Всего: {rooms.length} номеров</span>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.92rem', color: '#6b7280', cursor: 'pointer' }}>
-          <input type="checkbox" checked={showInactive} onChange={e => setShowInactive(e.target.checked)} />
-          Показать неактивные
-        </label>
+      {/* Toolbar: search + segment */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '18px 0 12px' }}>
+        <div style={{ position: 'relative', flex: 1 }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+            style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-faint)', pointerEvents: 'none' }}>
+            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
+          </svg>
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Поиск по номеру или категории…"
+            style={{
+              width: '100%', height: 34, padding: '0 12px 0 32px', background: 'var(--surface)',
+              border: '1px solid var(--border-subtle)', borderRadius: 8, fontFamily: 'inherit',
+              fontSize: '0.85rem', color: 'var(--text)', outline: 'none',
+            }}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: 2, padding: 3, background: 'var(--surface-2)', border: '1px solid var(--border-subtle)', borderRadius: 8 }}>
+          {([['all', 'Все'], ['active', 'Активные'], ['hidden', 'Скрытые']] as [Segment, string][]).map(([key, label]) => (
+            <button key={key} onClick={() => setSeg(key)} style={{
+              padding: '5px 11px', border: 'none', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit',
+              fontSize: '0.78rem', whiteSpace: 'nowrap',
+              background: seg === key ? 'var(--bg)' : 'transparent',
+              color: seg === key ? 'var(--text)' : 'var(--text-faint)',
+              fontWeight: seg === key ? 600 : 500,
+              boxShadow: seg === key ? 'var(--shadow-sm)' : 'none',
+            }}>{label}</button>
+          ))}
+        </div>
       </div>
 
-      {/* Room list grouped by building */}
-      {buildingKeys.map(building => {
-        const buildingRooms = rooms.filter(r => r.building === building).sort(compareRooms)
-        return (
-          <div key={building}>
-            <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
-              Корпус {building}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              {buildingRooms.map(room => (
-                <div key={room.id} style={{
-                  display: 'flex', alignItems: 'center', gap: 8,
-                  padding: '8px 10px', background: room.isActive ? '#f9fafb' : '#fafafa',
-                  borderRadius: 7, border: '1px solid #e5e7eb',
-                  opacity: room.isActive ? 1 : 0.5,
-                }}>
-                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: room.category.color, flexShrink: 0 }} />
-                  <span style={{ fontSize: '1rem', fontWeight: 600, color: '#111827', width: 60 }}>{room.number}</span>
-                  <span style={{ fontSize: '0.85rem', color: '#9ca3af', flex: 1 }}>
-                    {room.category.name} · эт. {room.floor}
-                    {room.capacity ? ` · ${getCapacityLabel(room.capacity)}` : ''}
-                  </span>
-                  {room.features.length > 0 && (
-                    <span style={{ fontSize: '0.92rem', color: '#9ca3af' }} title={room.features.join(', ')}>
-                      {room.features.map(f => getFeatureEmoji(f)).join('')}
+      {/* New-room form (вверху) */}
+      {editId === 'new' && <RoomForm {...{ form, setForm, cats, capacities, features, buildingOptions, error, save, toggleFeature, onCancel: () => setEditId(null), title: 'Новый номер' }} />}
+
+      {/* Table */}
+      <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{
+          display: 'grid', gridTemplateColumns: GRID_COLS, gap: 12, alignItems: 'center',
+          padding: '9px 16px', background: 'var(--surface)', borderBottom: '1px solid var(--border-subtle)',
+          fontSize: '0.66rem', fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-faint)',
+        }}>
+          <span>Номер</span><span>Категория</span><span>Вмест.</span><span>Особенности</span><span>Статус</span><span />
+        </div>
+
+        {cats.map(cat => {
+          const catRooms = visibleRooms.filter(r => r.category.id === cat.id).sort(compareRooms)
+          if (catRooms.length === 0) return null
+          return (
+            <div key={cat.id}>
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 9, padding: '8px 16px',
+                background: 'var(--surface-2)', borderBottom: '1px solid var(--border-subtle)',
+              }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: cat.color, flexShrink: 0 }} />
+                <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text)' }}>{cat.name}</span>
+                <span style={{ fontSize: '0.75rem', color: 'var(--text-faint)' }}>{catRooms.length}</span>
+              </div>
+
+              {catRooms.map(room => (
+                <div key={room.id}>
+                  <div
+                    onClick={() => startEdit(room)}
+                    style={{
+                      display: 'grid', gridTemplateColumns: GRID_COLS, gap: 12, alignItems: 'center',
+                      padding: '11px 16px', borderBottom: '1px solid var(--border-subtle)',
+                      cursor: 'pointer', opacity: room.isActive ? 1 : 0.55,
+                      background: editId === room.id ? 'var(--surface)' : 'transparent',
+                    }}
+                  >
+                    <span className="mono" style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text)' }}>{room.number}</span>
+                    <span style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>{room.category.name}</span>
+                    <span style={{ fontSize: '0.86rem', color: 'var(--text-muted)' }}>{room.capacity ? getCapacityLabel(room.capacity) : '—'}</span>
+                    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+                      {room.features.length === 0 ? <span style={{ color: 'var(--text-faint)' }}>—</span> :
+                        room.features.map(f => (
+                          <span key={f} style={{
+                            fontSize: '0.74rem', padding: '2px 8px', borderRadius: 5,
+                            background: 'var(--surface-2)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)',
+                          }}>{f}</span>
+                        ))}
                     </span>
+                    <span
+                      onClick={e => { e.stopPropagation(); toggleActive(room) }}
+                      title={room.isActive ? 'Скрыть номер' : 'Активировать'}
+                      style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.82rem', cursor: 'pointer', color: room.isActive ? 'var(--s-in)' : 'var(--text-faint)' }}
+                    >
+                      <span style={{ width: 7, height: 7, borderRadius: '50%', background: room.isActive ? 'var(--s-in)' : 'var(--text-faint)' }} />
+                      {room.isActive ? 'Активен' : 'Скрыт'}
+                    </span>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                      style={{ transform: editId === room.id ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s', justifySelf: 'center' }}>
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </div>
+                  {editId === room.id && (
+                    <div style={{ padding: '4px 16px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
+                      <RoomForm {...{ form, setForm, cats, capacities, features, buildingOptions, error, save, toggleFeature, onCancel: () => setEditId(null), title: '' }} />
+                    </div>
                   )}
-                  <button onClick={() => startEdit(room)} style={iconBtn}>✎</button>
-                  <button onClick={() => toggleActive(room)} style={{ ...iconBtn, color: room.isActive ? '#dc2626' : '#059669' }}>
-                    {room.isActive ? '⊗' : '✓'}
-                  </button>
                 </div>
               ))}
             </div>
+          )
+        })}
+
+        {visibleRooms.length === 0 && (
+          <div style={{ padding: 28, textAlign: 'center', color: 'var(--text-faint)', fontSize: '0.9rem' }}>
+            {rooms.length === 0 ? 'Номера не добавлены' : 'Ничего не найдено'}
           </div>
-        )
-      })}
-
-      {rooms.length === 0 && (
-        <div style={{ padding: '24px', textAlign: 'center', color: '#9ca3af', fontSize: '1rem', background: '#f9fafb', borderRadius: 8, border: '1px dashed #e5e7eb' }}>
-          Номера не добавлены
-        </div>
-      )}
-
-      {/* Form */}
-      {editId !== null && (
-        <div style={{
-          padding: 16, background: '#fff', border: '2px solid #6366f1',
-          borderRadius: 10, display: 'flex', flexDirection: 'column', gap: 12, marginTop: 4,
-        }}>
-          <div style={{ fontSize: '1rem', fontWeight: 700, color: '#374151' }}>
-            {editId === 'new' ? 'Новый номер' : 'Редактировать номер'}
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-            <div>
-              <label style={labelStyle}>Номер *</label>
-              <input
-                value={form.number}
-                onChange={e => setForm({ ...form, number: e.target.value })}
-                placeholder="А101"
-                style={inputStyle}
-                autoFocus
-              />
-            </div>
-            <div>
-              <label style={labelStyle}>Корпус *</label>
-              {buildingOptions.length > 0 ? (
-                <select
-                  value={form.building}
-                  onChange={e => setForm({ ...form, building: e.target.value })}
-                  style={inputStyle}
-                >
-                  <option value="">— выберите —</option>
-                  {buildingOptions.map(b => (
-                    <option key={b} value={b}>{b}</option>
-                  ))}
-                </select>
-              ) : (
-                <input
-                  value={form.building}
-                  onChange={e => setForm({ ...form, building: e.target.value })}
-                  placeholder="Введите корпус"
-                  style={inputStyle}
-                />
-              )}
-            </div>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 80px', gap: 8 }}>
-            <div>
-              <label style={labelStyle}>Категория *</label>
-              <select
-                value={form.categoryId}
-                onChange={e => setForm({ ...form, categoryId: Number(e.target.value) })}
-                style={inputStyle}
-              >
-                <option value={0}>— выберите —</option>
-                {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label style={labelStyle}>Вместимость</label>
-              <select
-                value={form.capacity}
-                onChange={e => setForm({ ...form, capacity: e.target.value })}
-                style={inputStyle}
-              >
-                <option value="">— не указано —</option>
-                {capacities.map(c => (
-                  <option key={c.id} value={c.id}>{c.label} ({c.value} чел.)</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label style={labelStyle}>Этаж</label>
-              <input
-                type="number"
-                min={1}
-                max={99}
-                value={form.floor}
-                onChange={e => setForm({ ...form, floor: Number(e.target.value) })}
-                style={inputStyle}
-              />
-            </div>
-          </div>
-
-          {features.length > 0 && (
-            <div>
-              <label style={labelStyle}>Особенности</label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
-                {features.map(f => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => toggleFeature(f.name)}
-                    style={{
-                      padding: '4px 10px', borderRadius: 20, fontSize: '0.92rem', cursor: 'pointer',
-                      border: '1px solid',
-                      borderColor: form.features.includes(f.name) ? '#6366f1' : '#e5e7eb',
-                      background: form.features.includes(f.name) ? '#eef2ff' : '#fff',
-                      color: form.features.includes(f.name) ? '#6366f1' : '#6b7280',
-                      fontWeight: form.features.includes(f.name) ? 600 : 400,
-                      display: 'flex', alignItems: 'center', gap: 4,
-                    }}
-                  >
-                    <span>{f.emoji}</span> {f.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {error && <div style={{ fontSize: '0.92rem', color: '#dc2626' }}>{error}</div>}
-
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button onClick={save} style={primaryBtn}>Сохранить</button>
-            <button onClick={() => setEditId(null)} style={secondaryBtn}>Отмена</button>
-          </div>
-        </div>
-      )}
-
-      <button onClick={startNew} style={dashedBtn}>
-        + Добавить номер
-      </button>
+        )}
+      </div>
     </div>
   )
 }
 
-const iconBtn: React.CSSProperties = {
-  background: 'none', border: 'none', cursor: 'pointer', fontSize: '1.08rem',
-  color: '#6b7280', padding: '2px 4px', borderRadius: 4, lineHeight: 1,
+// ─── Inline form ──────────────────────────────────────────────────────────────
+
+interface FormProps {
+  form: { number: string; categoryId: number; building: string; floor: number; features: string[]; capacity: string }
+  setForm: React.Dispatch<React.SetStateAction<FormProps['form']>>
+  cats: CategoryWithCount[]
+  capacities: { id: string; label: string; value: number }[]
+  features: { id: string; name: string; emoji: string }[]
+  buildingOptions: string[]
+  error: string
+  save: () => void
+  toggleFeature: (name: string) => void
+  onCancel: () => void
+  title: string
 }
+
+const RoomForm: React.FC<FormProps> = ({ form, setForm, cats, capacities, features, buildingOptions, error, save, toggleFeature, onCancel, title }) => (
+  <div style={{
+    padding: 16, background: 'var(--bg)', border: '1px solid var(--border)',
+    borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 14, marginBottom: title ? 12 : 0,
+  }}>
+    {title && <div style={{ fontSize: '0.95rem', fontWeight: 600, color: 'var(--text)' }}>{title}</div>}
+
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+      <Field label="Номер">
+        <input value={form.number} onChange={e => setForm(f => ({ ...f, number: e.target.value }))} placeholder="А101" style={inputStyle} autoFocus />
+      </Field>
+      <Field label="Категория">
+        <select value={form.categoryId} onChange={e => setForm(f => ({ ...f, categoryId: Number(e.target.value) }))} style={inputStyle}>
+          <option value={0}>— выберите —</option>
+          {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </Field>
+    </div>
+
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 90px', gap: 12 }}>
+      <Field label="Корпус">
+        {buildingOptions.length > 0 ? (
+          <select value={form.building} onChange={e => setForm(f => ({ ...f, building: e.target.value }))} style={inputStyle}>
+            <option value="">— выберите —</option>
+            {buildingOptions.map(b => <option key={b} value={b}>{b}</option>)}
+          </select>
+        ) : (
+          <input value={form.building} onChange={e => setForm(f => ({ ...f, building: e.target.value }))} placeholder="Корпус" style={inputStyle} />
+        )}
+      </Field>
+      <Field label="Вместимость">
+        <select value={form.capacity} onChange={e => setForm(f => ({ ...f, capacity: e.target.value }))} style={inputStyle}>
+          <option value="">— не указано —</option>
+          {capacities.map(c => <option key={c.id} value={c.id}>{c.label} ({c.value} чел.)</option>)}
+        </select>
+      </Field>
+      <Field label="Этаж">
+        <input type="number" min={1} max={99} value={form.floor} onChange={e => setForm(f => ({ ...f, floor: Number(e.target.value) }))} style={inputStyle} />
+      </Field>
+    </div>
+
+    {features.length > 0 && (
+      <Field label="Особенности">
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          {features.map(f => {
+            const on = form.features.includes(f.name)
+            return (
+              <button key={f.id} type="button" onClick={() => toggleFeature(f.name)} style={{
+                display: 'flex', alignItems: 'center', gap: 5, padding: '5px 11px', borderRadius: 7, cursor: 'pointer',
+                fontFamily: 'inherit', fontSize: '0.82rem',
+                border: `1px solid ${on ? 'var(--accent)' : 'var(--border-subtle)'}`,
+                background: on ? 'var(--accent-bg)' : 'var(--bg)',
+                color: on ? 'var(--accent-text)' : 'var(--text-muted)',
+                fontWeight: on ? 600 : 500,
+              }}>
+                <span>{f.emoji}</span> {f.name}
+              </button>
+            )
+          })}
+        </div>
+      </Field>
+    )}
+
+    {error && <div style={{ fontSize: '0.85rem', color: 'var(--s-overdue)' }}>{error}</div>}
+
+    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+      <button onClick={onCancel} style={{
+        height: 36, padding: '0 16px', background: 'var(--bg)', border: '1px solid var(--border)',
+        borderRadius: 8, fontFamily: 'inherit', fontSize: '0.86rem', color: 'var(--text)', cursor: 'pointer',
+      }}>Отмена</button>
+      <button onClick={save} style={{
+        height: 36, padding: '0 18px', background: 'var(--accent)', border: 'none',
+        borderRadius: 8, fontFamily: 'inherit', fontSize: '0.86rem', fontWeight: 600, color: '#fff', cursor: 'pointer',
+      }}>Сохранить</button>
+    </div>
+  </div>
+)
+
+const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+    <label style={{ fontSize: '0.78rem', fontWeight: 500, color: 'var(--text-muted)' }}>{label}</label>
+    {children}
+  </div>
+)
 
 const inputStyle: React.CSSProperties = {
-  width: '100%', padding: '8px 10px', border: '1px solid #e5e7eb',
-  borderRadius: 7, fontSize: '1rem', boxSizing: 'border-box', fontFamily: 'inherit', outline: 'none',
-}
-
-const labelStyle: React.CSSProperties = {
-  display: 'block', fontSize: '0.85rem', fontWeight: 600, color: '#6b7280', marginBottom: 4,
-}
-
-const primaryBtn: React.CSSProperties = {
-  flex: 1, padding: '8px 16px', background: '#6366f1', color: '#fff',
-  border: 'none', borderRadius: 7, fontSize: '1rem', fontWeight: 600, cursor: 'pointer',
-}
-
-const secondaryBtn: React.CSSProperties = {
-  padding: '8px 16px', background: 'none', border: '1px solid #e5e7eb',
-  borderRadius: 7, fontSize: '1rem', cursor: 'pointer', color: '#6b7280',
-}
-
-const dashedBtn: React.CSSProperties = {
-  padding: '9px 0', background: 'none', border: '1px dashed #6366f1',
-  borderRadius: 8, fontSize: '1rem', color: '#6366f1', cursor: 'pointer', fontWeight: 600,
+  width: '100%', height: 38, padding: '0 12px', border: '1px solid var(--border)',
+  borderRadius: 8, fontSize: '0.86rem', boxSizing: 'border-box', fontFamily: 'inherit',
+  outline: 'none', background: 'var(--bg)', color: 'var(--text)',
 }

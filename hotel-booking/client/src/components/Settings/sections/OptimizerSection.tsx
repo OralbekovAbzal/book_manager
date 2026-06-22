@@ -4,21 +4,17 @@ import {
   type CompatRule,
   type FloorRule,
 } from '../../../store/useSettingsStore'
+import { SectionHeader, secondaryBtn } from './sectionUi'
 
 export const OptimizerSection: React.FC = () => {
   const { optimizer, setOptimizer, resetOptimizer, roomFund } = useSettingsStore()
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 640 }}>
-      <header>
-        <div style={{ fontSize: '1.38rem', fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.01em' }}>
-          Оптимизатор распределения
-        </div>
-        <div style={{ fontSize: '1rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
-          Тонкая настройка алгоритма перераспределения броней. Влияет на то, какие
-          перемещения считаются допустимыми и насколько сильно штрафуются простои.
-        </div>
-      </header>
+    <div style={{ maxWidth: 640, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
+      <SectionHeader
+        title="Оптимизатор распределения"
+        subtitle="Какие перемещения броней допустимы и насколько сильно штрафуются простои."
+      />
 
       {/* ─── Правила совместимости ─── */}
       <Section
@@ -201,10 +197,7 @@ export const OptimizerSection: React.FC = () => {
         />
       </Section>
 
-      <button
-        onClick={resetOptimizer}
-        style={resetBtnStyle}
-      >
+      <button onClick={resetOptimizer} style={{ ...secondaryBtn, alignSelf: 'flex-start' }}>
         Сбросить настройки оптимизатора
       </button>
     </div>
@@ -433,13 +426,3 @@ const SegBtn: React.FC<{ label: string; active: boolean; onClick: () => void }> 
   </button>
 )
 
-const resetBtnStyle: React.CSSProperties = {
-  padding: '9px 0',
-  background: 'transparent',
-  border: '1px solid var(--border)',
-  borderRadius: 8,
-  fontSize: '1rem',
-  color: 'var(--text-muted)',
-  cursor: 'pointer',
-  fontWeight: 500,
-}

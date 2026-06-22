@@ -4,7 +4,10 @@ import { useSettingsStore } from '../../store/useSettingsStore'
 import { fetchCategories } from '../../api/rooms'
 import type { Category } from '../../types'
 
-const LS_COLLAPSED = 'filters_collapsed'
+interface Props {
+  /** Видимость панели управляется кнопкой в тулбаре (TodayStats). */
+  open: boolean
+}
 
 interface Draft {
   building:    string
@@ -16,16 +19,10 @@ interface Draft {
   jumpDate:    string
 }
 
-export const Filters: React.FC = () => {
-  const { filters, guestSearch, data, setFilter, setGuestSearch, applyFilters, jumpToDate } = useGridStore()
+export const Filters: React.FC<Props> = ({ open }) => {
+  const { filters, guestSearch, data, setFilter, setGuestSearch, applyFilters, jumpToDate, hiddenCategoryIds, toggleCategoryVisible } = useGridStore()
   const { filterSettings, roomFund } = useSettingsStore()
   const [categories, setCategories] = useState<Category[]>([])
-
-  const [collapsed, setCollapsed] = useState<boolean>(() => {
-    const saved = localStorage.getItem(LS_COLLAPSED)
-    if (saved !== null) return saved === '1'
-    return filterSettings.collapsedByDefault
-  })
 
   // Draft (локальные несохранённые значения)
   const [draft, setDraft] = useState<Draft>({
@@ -39,9 +36,6 @@ export const Filters: React.FC = () => {
   })
 
   useEffect(() => { fetchCategories().then(setCategories) }, [])
-  useEffect(() => {
-    localStorage.setItem(LS_COLLAPSED, collapsed ? '1' : '0')
-  }, [collapsed])
 
   // Sync draft when applied filters change externally (через сброс из родителя)
   useEffect(() => {
@@ -111,38 +105,9 @@ export const Filters: React.FC = () => {
     applyFilters()
   }
 
-  // ─── Свёрнутый вид ─────────────────────────────────────────────────
-  if (collapsed) {
-    return (
-      <aside style={{
-        width: 36, flexShrink: 0,
-        background: 'var(--surface)',
-        borderRight: '1px solid var(--border)',
-        display: 'flex', flexDirection: 'column',
-        alignItems: 'center', padding: '10px 0', gap: 10,
-      }}>
-        <button
-          onClick={() => setCollapsed(false)}
-          title="Показать фильтры"
-          style={iconBtnStyle}
-        >›</button>
-        <div style={{
-          writingMode: 'vertical-rl', transform: 'rotate(180deg)',
-          fontSize: '0.77rem', fontWeight: 700, color: 'var(--text-muted)',
-          letterSpacing: '0.12em', textTransform: 'uppercase', userSelect: 'none',
-        }}>Фильтры</div>
-        {activeCount > 0 && (
-          <div style={{
-            padding: '2px 6px', borderRadius: 8,
-            background: 'var(--accent)', color: '#fff',
-            fontSize: '0.77rem', fontWeight: 700,
-          }}>{activeCount}</div>
-        )}
-      </aside>
-    )
-  }
+  // Видимость управляется кнопкой в тулбаре (TodayStats)
+  if (!open) return null
 
-  // ─── Развёрнутый ───────────────────────────────────────────────────
   return (
     <aside style={{
       width: 240, flexShrink: 0,
@@ -157,10 +122,9 @@ export const Filters: React.FC = () => {
         padding: '12px 14px', borderBottom: '1px solid var(--border)',
       }}>
         <span style={{
-          fontSize: '0.85em', fontWeight: 700, color: 'var(--text)',
-          letterSpacing: '0.06em', textTransform: 'uppercase',
+          fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-faint)',
+          letterSpacing: '0.08em', textTransform: 'uppercase',
         }}>Фильтры</span>
-        <button onClick={() => setCollapsed(true)} title="Скрыть фильтры" style={iconBtnStyle}>‹</button>
       </div>
 
       {/* Body */}
@@ -169,18 +133,87 @@ export const Filters: React.FC = () => {
         display: 'flex', flexDirection: 'column', gap: 14,
       }}>
         {/* Search by name */}
-        <Field label="Поиск по имени">
+        <div style={{ position: 'relative' }}>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+            style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-faint)', pointerEvents: 'none' }}>
+            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" />
+          </svg>
           <input
             type="text"
             value={draft.guestSearch}
-            placeholder="Иванов"
+            placeholder="Гость, телефон…"
             onChange={e => setDraft({ ...draft, guestSearch: e.target.value })}
             onKeyDown={e => { if (e.key === 'Enter') onApply() }}
-            style={inputStyle}
+            style={{ ...inputStyle, paddingLeft: 32, height: 34, borderRadius: 8 }}
           />
-        </Field>
+        </div>
 
-        {/* Jump to date */}
+        {/* Категория — чекбоксы (мгновенный клиентский фильтр, как в демо) */}
+        {filterSettings.showCategory && categories.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <span style={{
+              fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-faint)',
+              letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 4,
+            }}>Категория</span>
+            {categories.map(c => {
+              const visible = !hiddenCategoryIds.includes(c.id)
+              return (
+                <label key={c.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 9, height: 30, cursor: 'pointer',
+                  fontSize: '0.86rem', color: 'var(--text-muted)',
+                }}>
+                  <input
+                    type="checkbox"
+                    checked={visible}
+                    onChange={() => toggleCategoryVisible(c.id)}
+                    style={{ width: 15, height: 15, accentColor: 'var(--accent)', cursor: 'pointer' }}
+                  />
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: c.color, flexShrink: 0 }} />
+                  {c.name}
+                </label>
+              )
+            })}
+          </div>
+        )}
+
+        {/* Корпус / Этаж / Вместимость / Особенности — все на виду, в едином стиле */}
+        {filterSettings.showBuilding && (
+          <Field label="Корпус">
+            <select value={draft.building} onChange={e => setDraft({ ...draft, building: e.target.value })} style={inputStyle}>
+              <option value="">Все корпуса</option>
+              {buildings.map(b => <option key={b} value={b}>Корпус {b}</option>)}
+            </select>
+          </Field>
+        )}
+
+        {filterSettings.showFloor && (
+          <Field label="Этаж">
+            <select value={draft.floor} onChange={e => setDraft({ ...draft, floor: e.target.value })} style={inputStyle}>
+              <option value="">Все этажи</option>
+              {floors.map(f => <option key={f} value={String(f)}>{f} этаж</option>)}
+            </select>
+          </Field>
+        )}
+
+        {filterSettings.showCapacity && roomFund.capacities.length > 0 && (
+          <Field label="Вместимость">
+            <select value={draft.capacity} onChange={e => setDraft({ ...draft, capacity: e.target.value })} style={inputStyle}>
+              <option value="">Любая</option>
+              {roomFund.capacities.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+          </Field>
+        )}
+
+        {filterSettings.showFeatures && roomFund.features.length > 0 && (
+          <Field label="Особенности">
+            <select value={draft.features} onChange={e => setDraft({ ...draft, features: e.target.value })} style={inputStyle}>
+              <option value="">Любые</option>
+              {roomFund.features.map(f => <option key={f.id} value={f.name}>{f.emoji} {f.name}</option>)}
+            </select>
+          </Field>
+        )}
+
         <Field label="Перейти к дате">
           <input
             type="date"
@@ -191,112 +224,20 @@ export const Filters: React.FC = () => {
           />
         </Field>
 
-        {filterSettings.showBuilding && (
-          <Field label="Корпус">
-            <select
-              value={draft.building}
-              onChange={e => setDraft({ ...draft, building: e.target.value })}
-              style={inputStyle}
-            >
-              <option value="">Все</option>
-              {buildings.map(b => <option key={b} value={b}>Корпус {b}</option>)}
-            </select>
-          </Field>
-        )}
-
-        {filterSettings.showCategory && (
-          <Field label="Категория">
-            <select
-              value={draft.categoryId}
-              onChange={e => setDraft({ ...draft, categoryId: e.target.value })}
-              style={inputStyle}
-            >
-              <option value="">Все</option>
-              {categories.map(c => (
-                <option key={c.id} value={String(c.id)}>{c.name}</option>
-              ))}
-            </select>
-          </Field>
-        )}
-
-        {filterSettings.showFloor && (
-          <Field label="Этаж">
-            <select
-              value={draft.floor}
-              onChange={e => setDraft({ ...draft, floor: e.target.value })}
-              style={inputStyle}
-            >
-              <option value="">Все</option>
-              {floors.map(f => <option key={f} value={String(f)}>{f} этаж</option>)}
-            </select>
-          </Field>
-        )}
-
-        {filterSettings.showCapacity && roomFund.capacities.length > 0 && (
-          <Field label="Вместимость">
-            <select
-              value={draft.capacity}
-              onChange={e => setDraft({ ...draft, capacity: e.target.value })}
-              style={inputStyle}
-            >
-              <option value="">Все</option>
-              {roomFund.capacities.map(c => (
-                <option key={c.id} value={c.id}>{c.label}</option>
-              ))}
-            </select>
-          </Field>
-        )}
-
-        {filterSettings.showFeatures && roomFund.features.length > 0 && (
-          <Field label="Особенности">
-            <select
-              value={draft.features}
-              onChange={e => setDraft({ ...draft, features: e.target.value })}
-              style={inputStyle}
-            >
-              <option value="">Все</option>
-              {roomFund.features.map(f => (
-                <option key={f.id} value={f.name}>{f.emoji} {f.name}</option>
-              ))}
-            </select>
-          </Field>
-        )}
-
-        {/* Action buttons */}
+        {/* Применить / Сбросить */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 4 }}>
-          <button
-            onClick={onApply}
-            disabled={!dirty}
-            style={{
-              padding: '8px 0',
-              background: dirty ? 'var(--accent)' : 'var(--surface-3)',
-              border: 'none',
-              borderRadius: 'var(--ui-radius)',
-              fontSize: 'inherit',
-              fontWeight: 600,
-              color: dirty ? '#ffffff' : 'var(--text-faint)',
-              cursor: dirty ? 'pointer' : 'not-allowed',
-              transition: 'background 0.12s',
-            }}
-          >
-            Применить
-          </button>
+          <button onClick={onApply} disabled={!dirty} style={{
+            height: 36, background: dirty ? 'var(--accent)' : 'var(--surface-3)', border: 'none',
+            borderRadius: 8, fontFamily: 'inherit', fontSize: '0.86rem', fontWeight: 600,
+            color: dirty ? '#fff' : 'var(--text-faint)', cursor: dirty ? 'pointer' : 'not-allowed',
+            transition: 'background 0.12s',
+          }}>Применить</button>
           {hasAppliedFilters && (
-            <button
-              onClick={onReset}
-              style={{
-                padding: '7px 0',
-                background: 'transparent',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--ui-radius)',
-                fontSize: 'inherit',
-                color: 'var(--text)',
-                cursor: 'pointer',
-                fontWeight: 500,
-              }}
-            >
-              Сбросить ({activeCount})
-            </button>
+            <button onClick={onReset} style={{
+              height: 34, background: 'transparent', border: '1px solid var(--border)',
+              borderRadius: 8, fontFamily: 'inherit', fontSize: '0.84rem', color: 'var(--text-muted)',
+              cursor: 'pointer', fontWeight: 500,
+            }}>Сбросить ({activeCount})</button>
           )}
         </div>
       </div>
@@ -328,11 +269,11 @@ function pluralRooms(n: number): string {
 }
 
 const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
-  <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
     <span style={{
-      fontSize: '0.77rem', fontWeight: 700,
+      fontSize: '0.7rem', fontWeight: 600,
       color: 'var(--text-faint)',
-      letterSpacing: '0.06em', textTransform: 'uppercase',
+      letterSpacing: '0.08em', textTransform: 'uppercase',
     }}>{label}</span>
     {children}
   </div>
@@ -340,24 +281,14 @@ const Field: React.FC<{ label: string; children: React.ReactNode }> = ({ label, 
 
 const inputStyle: React.CSSProperties = {
   width: '100%',
-  padding: '6px 8px',
+  height: 34,
+  padding: '0 10px',
   border: '1px solid var(--border)',
-  borderRadius: 'var(--ui-radius)',
-  fontSize: 'inherit',
+  borderRadius: 8,
+  fontSize: '0.86rem',
   background: 'var(--bg)',
   color: 'var(--text)',
   outline: 'none',
-  fontWeight: 500,
+  fontFamily: 'inherit',
 }
 
-const iconBtnStyle: React.CSSProperties = {
-  background: 'transparent',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--ui-radius)',
-  width: 24, height: 24,
-  cursor: 'pointer',
-  color: 'var(--text)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  fontSize: 'inherit', fontWeight: 700,
-  padding: 0,
-}

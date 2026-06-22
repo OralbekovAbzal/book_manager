@@ -26,12 +26,18 @@
   --accent-bg:       #eff6ff;
   --accent-text:     #1e40af;
 
-  /* Status colors */
-  --status-confirmed:    #2563eb;
-  --status-checked-in:   #16a34a;
-  --status-checked-out:  #ea580c;
-  --status-overdue:      #dc2626;
-  --status-maintenance:  #6b7280;
+  /* Status colors (design handoff — одинаковы в обеих темах) */
+  --s-confirmed:     #5B8DEF;
+  --s-in:            #22C55E;
+  --s-out:           #F59E0B;
+  --s-overdue:       #EF4444;
+  --s-maint:         #94A3B8;
+  /* Aliases — старые имена ссылаются на новую палитру (не ломаем существующий код) */
+  --status-confirmed:    var(--s-confirmed);
+  --status-checked-in:   var(--s-in);
+  --status-checked-out:  var(--s-out);
+  --status-overdue:      var(--s-overdue);
+  --status-maintenance:  var(--s-maint);
   --status-no-show:      #9ca3af;
 
   /* Calendar */
@@ -41,9 +47,9 @@
   --past-bg:         #f9fafb;
 
   /* Shadows */
-  --shadow-sm:       0 1px 3px rgba(0,0,0,0.08);
-  --shadow-md:       0 2px 8px rgba(0,0,0,0.12);
-  --shadow-lg:       0 8px 32px rgba(0,0,0,0.16);
+  --shadow-sm:       0 1px 2px rgba(0,0,0,0.06);
+  --shadow-md:       0 4px 16px rgba(0,0,0,0.10), 0 1px 3px rgba(0,0,0,0.06);
+  --shadow-lg:       0 16px 48px rgba(0,0,0,0.16), 0 4px 12px rgba(0,0,0,0.08);
 }
 
 :root[data-theme="dark"] {
@@ -71,12 +77,17 @@
   --accent-bg:       rgba(59,130,246,0.15);
   --accent-text:     #93c5fd;
 
-  /* Status colors */
-  --status-confirmed:    #60a5fa;
-  --status-checked-in:   #4ade80;
-  --status-checked-out:  #fb923c;
-  --status-overdue:      #f87171;
-  --status-maintenance:  #9ca3af;
+  /* Status colors (design handoff — те же hex, что и в светлой теме) */
+  --s-confirmed:     #5B8DEF;
+  --s-in:            #22C55E;
+  --s-out:           #F59E0B;
+  --s-overdue:       #EF4444;
+  --s-maint:         #94A3B8;
+  --status-confirmed:    var(--s-confirmed);
+  --status-checked-in:   var(--s-in);
+  --status-checked-out:  var(--s-out);
+  --status-overdue:      var(--s-overdue);
+  --status-maintenance:  var(--s-maint);
   --status-no-show:      #6b7280;
 
   /* Calendar */
@@ -86,9 +97,9 @@
   --past-bg:         #111115;
 
   /* Shadows */
-  --shadow-sm:       0 1px 3px rgba(0,0,0,0.5);
-  --shadow-md:       0 2px 8px rgba(0,0,0,0.6);
-  --shadow-lg:       0 8px 32px rgba(0,0,0,0.7);
+  --shadow-sm:       0 1px 2px rgba(0,0,0,0.5);
+  --shadow-md:       0 4px 16px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-lg:       0 16px 48px rgba(0,0,0,0.7), 0 4px 12px rgba(0,0,0,0.5);
 }
 
 /* ─── UI Scale vars (overridden by JS from visual settings) ───────── */
@@ -108,14 +119,20 @@ html, body {
   padding: 0;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, system-ui, sans-serif;
-  font-feature-settings: 'cv11', 'ss01';
+  font-family: 'Geist Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
 *, *::before, *::after {
   box-sizing: border-box;
+}
+
+/* Моноширинный числовой стиль — для дат, номеров комнат, счётчиков.
+   tabular-nums держит цифры выровненными по колонкам. */
+.mono {
+  font-family: 'Geist Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ─── Global element defaults ─────────────────────────────────────── */
@@ -165,4 +182,17 @@ textarea {
 
 /* ─── Animations ──────────────────────────────────────────────────────── */
 
+/* Nav drawer / context-menu hover states (заменяют ручной React-hover) */
+.nav-item-btn[data-active="false"]:hover,
+.nav-close-btn:hover { background: var(--surface-2); }
+
+/* Top-bar icon buttons */
+.chrome-icon-btn:hover { background: var(--surface-2); border-color: var(--border-subtle); }
+/* Toolbar nav / filter buttons */
+.tb-btn:hover { background: var(--surface-2); }
+.tb-today:hover { background: var(--accent-bg); border-color: var(--accent); }
+
 @keyframes spin { to { transform: rotate(360deg); } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes navIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }

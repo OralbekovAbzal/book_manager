@@ -4,6 +4,7 @@ import { parseISO, addDays, format } from 'date-fns'
 import { useGridStore, type RoomStatusFilter } from '../../store/useGridStore'
 import { GridHeader } from './GridHeader'
 import { GridRow } from './GridRow'
+import { DateSummary } from './DateSummary'
 import { GridSettingsProvider, useGridSettings } from './GridSettingsContext'
 import { compareRooms } from '../../utils/sortRooms'
 import type { FlatRow, GridBooking } from '../../types'
@@ -89,7 +90,7 @@ export const BookingGrid: React.FC = () => {
 }
 
 const BookingGridInner: React.FC = () => {
-  const { data, loading, error, dateFrom, dateTo, fetchGrid, roomStatusFilter, shiftDate } = useGridStore()
+  const { data, loading, error, dateFrom, dateTo, fetchGrid, roomStatusFilter, shiftDate, hiddenCategoryIds } = useGridStore()
   const { ROW_HEIGHT } = useGridSettings()
   const parentRef = useRef<HTMLDivElement>(null)
 
@@ -102,16 +103,25 @@ const BookingGridInner: React.FC = () => {
   // Здесь только клиентский фильтр по статусу комнаты.
   const flatRows = useMemo<FlatRow[]>(() => {
     if (!data) return []
+    const day = (s: string) => s.slice(0, 10)
+    const covers = (b: GridBooking) =>
+      b.status !== 'CANCELLED' && b.status !== 'NO_SHOW' &&
+      day(b.checkIn) <= filterDate && filterDate < day(b.checkOut)
+
     const rows: FlatRow[] = []
     for (const cat of data.categories) {
+      if (hiddenCategoryIds.includes(cat.id)) continue
       const sortedRooms = [...cat.rooms].sort(compareRooms)
-      for (const room of sortedRooms) {
-        if (!matchesStatusFilter(room.bookings, roomStatusFilter, filterDate)) continue
+      const visible = sortedRooms.filter(r => matchesStatusFilter(r.bookings, roomStatusFilter, filterDate))
+      if (visible.length === 0) continue
+      const occupied = cat.rooms.filter(r => r.bookings.some(covers)).length
+      rows.push({ type: 'category', id: cat.id, name: cat.name, color: cat.color, total: cat.rooms.length, occupied })
+      for (const room of visible) {
         rows.push({ type: 'room', room, categoryColor: cat.color, categoryName: cat.name })
       }
     }
     return rows
-  }, [data, roomStatusFilter, filterDate])
+  }, [data, roomStatusFilter, filterDate, hiddenCategoryIds])
 
   // Dates array for the header
   const dates = useMemo<string[]>(() => {
@@ -130,11 +140,15 @@ const BookingGridInner: React.FC = () => {
   const rowVirtualizer = useVirtualizer({
     count: flatRows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: (index) => flatRows[index]?.type === 'category' ? CATEGORY_ROW_H : ROW_HEIGHT,
     overscan: 8,
-    // Высота строк фиксированная — задаём её явно, чтобы виртуализатор не
+    // Высоты строк фиксированы по типу — задаём явно, чтобы виртуализатор не
     // перемерял каждую строку через ResizeObserver (это и вызывало рывки).
-    getItemKey: (index) => flatRows[index]?.room.id ?? index,
+    getItemKey: (index) => {
+      const r = flatRows[index]
+      if (!r) return index
+      return r.type === 'category' ? `cat-${r.id}` : `room-${r.room.id}`
+    },
   })
 
   if (error) {
@@ -178,6 +192,9 @@ const BookingGridInner: React.FC = () => {
           </div>
         )}
 
+        {/* Обёртка контента: min-height 100% — чтобы сводка всегда прижималась к низу */}
+        <div style={{ minHeight: '100%', minWidth: 'max-content', display: 'flex', flexDirection: 'column' }}>
+
         {/* Virtual rows container */}
         <div
           style={{
@@ -196,22 +213,28 @@ const BookingGridInner: React.FC = () => {
                   top: vRow.start,
                   left: 0,
                   right: 0,
-                  height: ROW_HEIGHT,
+                  height: vRow.size,
                   minWidth: 'max-content',
                   // NB: не используем transform на этой обёртке — иначе она станет
                   // containing block для position:fixed потомков (SelectionMenu,
                   // призрак перетаскивания брони, тултип) и они спозиционируются неверно.
                 }}
               >
-                <GridRow
-                  row={row}
-                  dates={dates}
-                  dateFrom={dateFrom}
-                  today={today}
-                />
+                {row.type === 'category'
+                  ? <CategoryRow row={row} dates={dates} />
+                  : <GridRow row={row} dates={dates} dateFrom={dateFrom} today={today} />}
               </div>
             )
           })}
+        </div>
+
+        {/* Спейсер — прижимает сводку к низу вьюпорта когда строк мало */}
+        <div style={{ flex: 1, minHeight: 0 }} />
+
+        {/* Feature 1 — Сводка по датам (sticky bottom, скроллится с сеткой) */}
+        {data && flatRows.length > 0 && (
+          <DateSummary data={data} dates={dates} today={today} />
+        )}
         </div>
 
         {/* Loading overlay when refreshing */}
@@ -232,6 +255,38 @@ const BookingGridInner: React.FC = () => {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+const CATEGORY_ROW_H = 30
+
+const CategoryRow: React.FC<{ row: Extract<FlatRow, { type: 'category' }>; dates: string[] }> = ({ row, dates }) => {
+  const { DAY_WIDTH, ROOM_COL_WIDTH } = useGridSettings()
+  return (
+    <div style={{
+      display: 'flex', height: CATEGORY_ROW_H, minWidth: 'max-content',
+      background: 'var(--surface-2)',
+      borderTop: '1px solid var(--border-subtle)',
+      borderBottom: '1px solid var(--border-subtle)',
+    }}>
+      <div style={{
+        position: 'sticky', left: 0, zIndex: 5,
+        width: ROOM_COL_WIDTH, flexShrink: 0,
+        background: 'var(--surface-2)',
+        borderRight: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', gap: 8, padding: '0 14px',
+      }}>
+        <span style={{ width: 8, height: 8, borderRadius: '50%', background: row.color, flexShrink: 0 }} />
+        <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text)' }}>{row.name}</span>
+        <span style={{ fontSize: '0.72rem', color: 'var(--text-faint)' }}>· {row.total} номеров</span>
+        <span className="mono" style={{
+          marginLeft: 'auto', fontSize: '0.72rem', fontWeight: 600,
+          color: 'var(--text-muted)', padding: '1px 6px', borderRadius: 4,
+          background: 'var(--bg)', border: '1px solid var(--border-subtle)',
+        }}>{row.occupied}/{row.total}</span>
+      </div>
+      <div style={{ width: dates.length * DAY_WIDTH, flexShrink: 0 }} />
     </div>
   )
 }

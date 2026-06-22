@@ -2,13 +2,13 @@ import React, { useCallback, useRef, useState, useEffect } from 'react'
 import { differenceInCalendarDays, parseISO, addDays, format } from 'date-fns'
 import { BookingBlock } from './BookingBlock'
 import { SelectionMenu } from './SelectionMenu'
-import { dateFromX } from './utils'
+import { dateFromX, nightFromX } from './utils'
 import { useGridSettings } from './GridSettingsContext'
 import { useGridStore } from '../../store/useGridStore'
 import type { FlatRow, GridBooking, GridAllotment } from '../../types'
 
 interface Props {
-  row: FlatRow
+  row: Extract<FlatRow, { type: 'room' }>
   dates: string[]
   dateFrom: string
   today: string
@@ -27,6 +27,10 @@ interface PendingMenu {
   screenY: number
 }
 
+// Порог движения мыши (px): выделение дат начинается только когда курсор сдвинулся
+// на столько от точки нажатия. Быстрый клик без движения ничего не выделяет.
+const SELECT_MOVE_THRESHOLD = 4
+
 const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
   const openViewModal = useGridStore(s => s.openViewModal)
   const openContextMenu = useGridStore(s => s.openContextMenu)
@@ -42,6 +46,11 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
   // document-обработчики всегда читали актуальное значение без пересоздания
   const dayWidthRef  = useRef(DAY_WIDTH)
   dayWidthRef.current = DAY_WIDTH
+  const downPos      = useRef<{ x: number; y: number } | null>(null)
+  // Брони комнаты — чтобы выделение упиралось в них день-в-день (без наложения).
+  // Через ref, чтобы document-обработчик всегда видел актуальный список.
+  const bookingsRef  = useRef(row.room.bookings)
+  bookingsRef.current = row.room.bookings
 
   const [selection,   setSelectionState] = useState<Selection | null>(null)
   const [pendingMenu, setPendingMenu]    = useState<PendingMenu | null>(null)
@@ -56,25 +65,50 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
   useEffect(() => {
     if (row.type !== 'room') return
 
+    const beginDrag = () => {
+      if (dragging.current || !dragAnchor.current) return
+      dragging.current = true
+      setSelection({ from: dragAnchor.current, to: dragAnchor.current })
+    }
+
     const onMove = (e: MouseEvent) => {
-      if (!dragging.current || !dragAnchor.current || !areaRef.current) return
+      // Ещё не выделяем: заметный сдвиг мыши = явное протягивание → стартуем сразу,
+      // не дожидаясь задержки удержания.
+      if (!dragging.current) {
+        if (downPos.current) {
+          const dist = Math.hypot(e.clientX - downPos.current.x, e.clientY - downPos.current.y)
+          if (dist > SELECT_MOVE_THRESHOLD) {
+            beginDrag()
+          }
+        }
+        if (!dragging.current) return
+      }
+      if (!dragAnchor.current || !areaRef.current) return
 
       // Пересчитываем rect на каждом шаге чтобы учесть горизонтальный скролл
       const rect = areaRef.current.getBoundingClientRect()
       const x    = Math.max(0, e.clientX - rect.left)
-      const date = dateFromX(x, dateFrom, dayWidthRef.current)
+      // Ночь по «полуячеечной» схеме (как рисуются блоки) + не левее видимого начала
+      let date = nightFromX(x, dateFrom, dayWidthRef.current)
+      if (date < dateFrom) date = dateFrom
 
-      const anchor = dragAnchor.current
-      const newSel: Selection = {
-        from: anchor <= date ? anchor : date,
-        to:   anchor <= date ? date   : anchor,
-      }
+      const anchor  = dragAnchor.current
+      const rawFrom = anchor <= date ? anchor : date
+      const rawTo   = anchor <= date ? date   : anchor
+      // Не даём выделению наехать на существующую бронь — упираем в неё день-в-день.
+      const newSel: Selection = clampToFreeGap(anchor, rawFrom, rawTo, bookingsRef.current)
       selectionRef.current = newSel
       setSelectionState(newSel)
     }
 
     const onUp = (e: MouseEvent) => {
-      if (!dragging.current) return
+      downPos.current = null
+
+      // Быстрый клик без удержания и без движения — выделение не началось, меню не показываем.
+      if (!dragging.current) {
+        dragAnchor.current = null
+        return
+      }
       dragging.current = false
 
       const sel    = selectionRef.current
@@ -107,12 +141,15 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
     roomIdRef.current = row.room.id
     const rect = e.currentTarget.getBoundingClientRect()
     const x    = Math.max(0, e.clientX - rect.left)
-    const date = dateFromX(x, dateFrom, dayWidthRef.current)
+    let date = nightFromX(x, dateFrom, dayWidthRef.current)
+    if (date < dateFrom) date = dateFrom
 
-    dragging.current   = true
+    dragging.current   = false
     dragAnchor.current = date
-    setSelection({ from: date, to: date })
+    downPos.current    = { x: e.clientX, y: e.clientY }
     setPendingMenu(null)
+    // Выделение начнётся только когда курсор сдвинётся (см. onMove).
+    // Быстрый клик без движения ничего не выделяет — нет ложных нажатий.
   }, [row, dateFrom, setSelection])
 
   // Determine cursor based on mouse position (past date → default, future → crosshair)
@@ -141,6 +178,8 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
   const selectionOverlay = selection ? (() => {
     const fromOffset = differenceInCalendarDays(parseISO(selection.from), parseISO(dateFrom))
     const nights     = differenceInCalendarDays(parseISO(selection.to), parseISO(selection.from)) + 1
+    // От СЕРЕДИНЫ стартовой ячейки до СЕРЕДИНЫ конечной (выезд) — половинки на концах,
+    // чтобы день-в-день стыковать выезд/заезд (на том же дне может начаться другая бронь).
     return { left: fromOffset * DAY_WIDTH + DAY_WIDTH / 2, width: nights * DAY_WIDTH }
   })() : null
 
@@ -166,7 +205,7 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
           background: categoryColor, flexShrink: 0,
         }} />
         <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', minWidth: 0, flex: 1 }}>
-          <span style={{ fontSize: FONT_SIZE, fontWeight: 600, color: 'var(--text)', lineHeight: 1.3, letterSpacing: '-0.01em' }}>
+          <span className="mono" style={{ fontSize: FONT_SIZE, fontWeight: 600, color: 'var(--text)', lineHeight: 1.3, letterSpacing: '-0.01em' }}>
             {room.number}
           </span>
           <span style={{
@@ -316,6 +355,44 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
 export const GridRow = React.memo(GridRowImpl)
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const dayStr = (s: string) => s.slice(0, 10)
+// Активные брони (как в findOverlap на сервере) — только они блокируют даты.
+const isBlocking = (st: string) => st === 'CONFIRMED' || st === 'CHECKED_IN'
+
+/**
+ * Ограничивает выделение свободным окном вокруг точки старта (anchor — всегда
+ * свободная ячейка). Выделение не может перекрыть активную бронь — упирается в
+ * неё день-в-день: справа — до дня заезда брони (становится выездом), слева —
+ * до дня выезда брони (становится заездом).
+ */
+function clampToFreeGap(
+  anchor: string,
+  rawFrom: string,
+  rawTo: string,
+  bookings: GridBooking[],
+): { from: string; to: string } {
+  let gapStart: string | null = null  // самая левая допустимая ячейка (выезд левой брони)
+  let gapEnd:   string | null = null  // первая ЗАНЯТАЯ ячейка справа (заезд правой брони)
+
+  for (const b of bookings) {
+    if (!isBlocking(b.status)) continue
+    const ci = dayStr(b.checkIn)
+    const co = dayStr(b.checkOut)   // бронь занимает ячейки-ночи [ci .. co-1]
+    if (co <= ci) continue          // нулевая длительность (точка) дат не блокирует
+    if (co <= anchor) {
+      if (gapStart === null || co > gapStart) gapStart = co
+    } else if (ci > anchor) {
+      if (gapEnd === null || ci < gapEnd) gapEnd = ci
+    }
+  }
+
+  let from = rawFrom
+  let to = rawTo
+  if (gapStart !== null && from < gapStart) from = gapStart
+  if (gapEnd !== null && to >= gapEnd) to = format(addDays(parseISO(gapEnd), -1), 'yyyy-MM-dd')
+  return { from, to }
+}
 
 /** Возвращает сегменты аллокации (после вычета релизов) в "днях от dateFrom". */
 function computeAllotmentSegments(

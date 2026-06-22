@@ -21,6 +21,11 @@ logs/
 backups/
 hotel-booking/.logs/
 
+# Design handoff artefacts (распакованные zip'ы и сами архивы — не часть приложения)
+_design_code/
+_design_import/
+*.zip
+
 # Prisma generated migrations (local)
 hotel-booking/server/prisma/migrations/
 

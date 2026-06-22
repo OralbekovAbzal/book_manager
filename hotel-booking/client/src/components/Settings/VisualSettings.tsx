@@ -1,6 +1,7 @@
 import React from 'react'
 import { useSettingsStore } from '../../store/useSettingsStore'
 import { useGridStore } from '../../store/useGridStore'
+import { SectionHeader, secondaryBtn } from './sections/sectionUi'
 
 // Пресеты затрагивают ВСЕ настройки масштаба разом
 const PRESETS = [
@@ -43,7 +44,11 @@ export const VisualSettings: React.FC = () => {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
+    <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 28 }}>
+      <SectionHeader
+        title="Внешний вид"
+        subtitle="Тема, плотность и размеры интерфейса. Применяется сразу."
+      />
 
       {/* Тема */}
       <Section title="Тема оформления">
@@ -91,54 +96,34 @@ export const VisualSettings: React.FC = () => {
         </div>
       </Section>
 
-      {/* Видимый диапазон */}
-      <Section title="Видимый диапазон">
-        <Slider
-          label="Дней в сетке"
-          unit=" дн."
-          min={7}
-          max={90}
-          value={visual.visibleDays}
-          onChange={setVisibleDays}
-        />
+      {/* Сетка */}
+      <Section title="Сетка" hint="Диапазон и размеры таблицы броней.">
+        <Slider label="Дней в сетке" unit=" дн." min={7} max={90} value={visual.visibleDays} onChange={setVisibleDays} />
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
           {DAY_PRESETS.map((days) => (
-            <button
-              key={days}
-              onClick={() => setVisibleDays(days)}
-              style={{
-                padding: '4px 12px',
-                border: '1px solid',
-                borderColor: visual.visibleDays === days ? 'var(--accent)' : 'var(--border)',
-                borderRadius: 20,
-                fontSize: '0.9em',
-                fontWeight: 600,
-                background: visual.visibleDays === days ? 'var(--accent-bg)' : 'var(--surface)',
-                color: visual.visibleDays === days ? 'var(--accent-text)' : 'var(--text-muted)',
-                cursor: 'pointer',
-                transition: 'all 0.15s',
-              }}
-            >
-              {days} дн.
-            </button>
+            <button key={days} onClick={() => setVisibleDays(days)} style={{
+              padding: '4px 12px', border: '1px solid',
+              borderColor: visual.visibleDays === days ? 'var(--accent)' : 'var(--border)',
+              borderRadius: 20, fontSize: '0.9em', fontWeight: 600,
+              background: visual.visibleDays === days ? 'var(--accent-bg)' : 'var(--surface)',
+              color: visual.visibleDays === days ? 'var(--accent-text)' : 'var(--text-muted)',
+              cursor: 'pointer', transition: 'all 0.15s',
+            }}>{days} дн.</button>
           ))}
         </div>
+        <Slider label="Отступ слева до даты смены" unit=" дн." min={0} max={14} value={visual.daysBeforeShift} onChange={v => setVisual('daysBeforeShift', v)} />
+        <div style={{ fontSize: '0.8em', color: 'var(--text-faint)', marginTop: -8 }}>
+          Сколько дней истории показывать слева от текущей смены. Применится при нажатии «Сегодня» или перезагрузке.
+        </div>
+        <Slider label="Высота строки" unit="px" min={28} max={80} value={visual.rowHeight} onChange={v => setVisual('rowHeight', v)} />
+        <Slider label="Высота заголовка дат" unit="px" min={32} max={72} value={visual.headerHeight} onChange={v => setVisual('headerHeight', v)} />
       </Section>
 
       {/* Шрифт и скругления */}
-      <Section title="Шрифт и скругления" hint="Влияют на все элементы интерфейса">
-        <Slider label="Размер шрифта" unit="px" min={10} max={22} value={visual.fontSize}  onChange={v => setVisual('fontSize', v)} />
+      <Section title="Шрифт и скругления" hint="Влияют на интерфейс и блоки броней.">
+        <Slider label="Размер шрифта" unit="px" min={10} max={22} value={visual.fontSize} onChange={v => setVisual('fontSize', v)} />
         <Slider label="Скругление кнопок и полей" unit="px" min={0} max={20} value={visual.uiRadius} onChange={v => setVisual('uiRadius', v)} />
-      </Section>
-
-      {/* Размеры сетки */}
-      <Section title="Размеры сетки" hint="Только таблица броней. Ширина колонки Номер вычисляется автоматически по размеру шрифта.">
-        <Slider label="Высота строки"           unit="px" min={28} max={80}  value={visual.rowHeight}    onChange={v => setVisual('rowHeight', v)} />        <Slider label="Высота заголовка дат"    unit="px" min={32} max={72}  value={visual.headerHeight} onChange={v => setVisual('headerHeight', v)} />
-      </Section>
-
-      {/* Блоки броней */}
-      <Section title="Блоки броней">
-        <Slider label="Скругление углов блоков" unit="px" min={0} max={20} value={visual.blockRadius} onChange={v => setVisual('blockRadius', v)} />
+        <Slider label="Скругление блоков броней" unit="px" min={0} max={20} value={visual.blockRadius} onChange={v => setVisual('blockRadius', v)} />
       </Section>
 
       {/* Отображение */}
@@ -152,19 +137,7 @@ export const VisualSettings: React.FC = () => {
       </Section>
 
       {/* Сброс */}
-      <button
-        onClick={resetVisual}
-        style={{
-          padding: '9px 0',
-          background: 'transparent',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--ui-radius)',
-          fontSize: 'inherit',
-          color: 'var(--text-muted)',
-          cursor: 'pointer',
-          fontWeight: 500,
-        }}
-      >
+      <button onClick={resetVisual} style={{ ...secondaryBtn, alignSelf: 'flex-start' }}>
         Сбросить по умолчанию
       </button>
     </div>

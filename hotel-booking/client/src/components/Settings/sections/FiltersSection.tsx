@@ -1,20 +1,16 @@
 import React from 'react'
 import { useSettingsStore } from '../../../store/useSettingsStore'
+import { SectionHeader, secondaryBtn } from './sectionUi'
 
 export const FiltersSection: React.FC = () => {
   const { filterSettings, setFilterSetting, resetFilterSettings } = useSettingsStore()
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 540 }}>
-      <header>
-        <div style={{ fontSize: '1.38rem', fontWeight: 700, color: 'var(--text)', letterSpacing: '-0.01em' }}>
-          Фильтры
-        </div>
-        <div style={{ fontSize: '1rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
-          Настройка панели фильтров над таблицей броней. Можно скрыть ненужные фильтры
-          или изменить поведение по умолчанию.
-        </div>
-      </header>
+    <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <SectionHeader
+        title="Фильтры"
+        subtitle="Какие фильтры показывать над сеткой и как они ведут себя по умолчанию."
+      />
 
       <Section title="Видимые фильтры">
         <Toggle
@@ -58,19 +54,7 @@ export const FiltersSection: React.FC = () => {
         />
       </Section>
 
-      <button
-        onClick={resetFilterSettings}
-        style={{
-          padding: '9px 0',
-          background: 'transparent',
-          border: '1px solid var(--border)',
-          borderRadius: 8,
-          fontSize: '1rem',
-          color: 'var(--text-muted)',
-          cursor: 'pointer',
-          fontWeight: 500,
-        }}
-      >
+      <button onClick={resetFilterSettings} style={{ ...secondaryBtn, alignSelf: 'flex-start' }}>
         Сбросить по умолчанию
       </button>
     </div>

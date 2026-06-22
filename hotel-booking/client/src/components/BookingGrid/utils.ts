@@ -69,3 +69,14 @@ export function dateFromX(x: number, dateFrom: string, dayWidth = DAY_WIDTH): st
   const dayOffset = Math.floor(x / dayWidth)
   return format(addDays(parseISO(dateFrom), dayOffset), 'yyyy-MM-dd')
 }
+
+/**
+ * Дата НОЧИ по x для выделения — с учётом «полуячеечного» рендера броней
+ * (блок рисуется от середины дня заезда до середины дня выезда). Левая половина
+ * ячейки X → ночь X-1, правая → ночь X. Так выделение совпадает с краями блоков
+ * и не попадает в визуально занятую часть соседней брони.
+ */
+export function nightFromX(x: number, dateFrom: string, dayWidth = DAY_WIDTH): string {
+  const dayOffset = Math.floor((x - dayWidth / 2) / dayWidth)
+  return format(addDays(parseISO(dateFrom), dayOffset), 'yyyy-MM-dd')
+}

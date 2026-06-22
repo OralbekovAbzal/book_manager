@@ -116,7 +116,16 @@ async function create(req, res, next) {
 
     // Допустимые начальные статусы
     const allowedStatuses = ['CONFIRMED', 'CHECKED_IN']
-    const initialStatus = allowedStatuses.includes(status) ? status : 'CONFIRMED'
+    let initialStatus = allowedStatuses.includes(status) ? status : 'CONFIRMED'
+
+    // Нельзя сразу пометить «заехал», если дата заезда ещё впереди (смена не дошла).
+    // Ремонт «заехавшим» быть не может в принципе.
+    if (initialStatus === 'CHECKED_IN') {
+      const checkInUTC = new Date(checkIn)
+      if (source === 'ремонт' || businessDate.getTime() < checkInUTC.getTime()) {
+        initialStatus = 'CONFIRMED'
+      }
+    }
 
     // Проверка номера
     const room = await prisma.room.findUnique({ where: { id: roomId } })
@@ -212,6 +221,15 @@ async function update(req, res, next) {
     // Для смены номера у CHECKED_IN — использовать endpoint /:id/move
     if (existing.status === 'CHECKED_IN' && newRoomId !== existing.roomId) {
       return next(createError('Для переезда заселившегося гостя используйте операцию «Переезд»', 400))
+    }
+
+    // Запрет переноса заезда на прошедшую дату (как в create). Только ремонт — задним числом.
+    if (newCheckIn.getTime() !== existing.checkIn.getTime() && existing.source !== 'ремонт') {
+      const businessDate = await getCurrentBusinessDate()
+      const newCiUTC = new Date(Date.UTC(newCheckIn.getUTCFullYear(), newCheckIn.getUTCMonth(), newCheckIn.getUTCDate()))
+      if (newCiUTC.getTime() < businessDate.getTime()) {
+        return next(createError('Нельзя перенести заезд на прошедшую дату.', 400))
+      }
     }
 
     if (newCheckOut <= newCheckIn) {
@@ -325,6 +343,22 @@ async function checkIn(req, res, next) {
     if (!existing) return next(createError('Бронь не найдена', 404))
     if (existing.status !== 'CONFIRMED') {
       return next(createError(`Нельзя отметить заезд: статус "${existing.status}"`, 400))
+    }
+    // Ремонт — это блок номера, а не гость; «заезд» к нему бессмыслен.
+    if (existing.source === 'ремонт') {
+      return next(createError('Нельзя отметить заезд для ремонтного блока', 400))
+    }
+
+    // Заезд нельзя отметить раньше даты заезда брони (сверяем с датой смены, не с устройством).
+    // Поздний заезд (смена уже прошла дату заезда) разрешён — гость мог приехать позже.
+    const businessDate = await getCurrentBusinessDate()
+    const checkInUTC = new Date(Date.UTC(
+      existing.checkIn.getUTCFullYear(),
+      existing.checkIn.getUTCMonth(),
+      existing.checkIn.getUTCDate(),
+    ))
+    if (businessDate.getTime() < checkInUTC.getTime()) {
+      return next(createError('Нельзя отметить заезд раньше даты заезда брони. Сначала перейдите к дню заезда.', 400))
     }
 
     const booking = await prisma.booking.update({

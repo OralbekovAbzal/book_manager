@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>Настройка подключения</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 26px; background: #f4f5f7; color: #1f2430; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.hint { font-size: 13px; color: #5b6472; margin: 0 0 18px; line-height: 1.5; }
+    .modes { display: flex; gap: 12px; margin-bottom: 18px; }
+    .mode {
+      flex: 1; border: 2px solid #d4dae3; border-radius: 12px; padding: 14px; cursor: pointer;
+      background: #fff; transition: all .15s;
+    }
+    .mode.active { border-color: #4c7ef3; background: #eef3fe; }
+    .mode .ttl { font-weight: 700; font-size: 14px; }
+    .mode .desc { font-size: 12px; color: #5b6472; margin-top: 6px; line-height: 1.4; }
+    label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+    input { width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid #c6ccd6; border-radius: 8px; outline: none; }
+    input:focus { border-color: #4c7ef3; box-shadow: 0 0 0 3px rgba(76,126,243,.15); }
+    .examples { font-size: 12px; color: #8a93a2; margin-top: 6px; }
+    .row { display: flex; gap: 10px; margin-top: 18px; }
+    button { flex: 1; padding: 11px 14px; font-size: 14px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; }
+    .test { background: #e7ebf2; color: #1f2430; }
+    .save { background: #4c7ef3; color: #fff; }
+    .save:disabled { opacity: .5; cursor: default; }
+    #status { margin-top: 12px; font-size: 13px; min-height: 18px; }
+    .ok { color: #1a8a4a; } .err { color: #d23b3b; }
+    #clientBox { display: none; }
+    #hostBox { display: none; font-size: 13px; color: #5b6472; line-height: 1.5;
+      background: #fff; border: 1px solid #e1e6ee; border-radius: 8px; padding: 12px; margin-top: 6px; }
+  </style>
+</head>
+<body>
+  <h1>Настройка подключения</h1>
+  <p class="hint">Выберите роль этого компьютера. Сменить можно позже: меню «Файл → Настройка подключения».</p>
+
+  <div class="modes">
+    <div class="mode" id="mHost" data-mode="host">
+      <div class="ttl">🖥️ Хост (сервер)</div>
+      <div class="desc">На этом ПК работает база и сервер. Остальные подключаются к нему.</div>
+    </div>
+    <div class="mode" id="mClient" data-mode="client">
+      <div class="ttl">💻 Клиент</div>
+      <div class="desc">Подключиться к компьютеру-хосту в локальной сети.</div>
+    </div>
+  </div>
+
+  <div id="hostBox">
+    Этот компьютер станет сервером. База данных запустится автоматически.
+    На других ноутбуках выберите «Клиент» и укажите адрес этого ПК
+    (его IP в локальной сети, порт 3001).
+  </div>
+
+  <div id="clientBox">
+    <label for="url">Адрес хоста</label>
+    <input id="url" type="text" placeholder="http://192.168.1.50:3001" />
+    <div class="examples">Пример: http://192.168.1.50:3001 — IP компьютера-хоста и порт 3001</div>
+  </div>
+
+  <div class="row">
+    <button class="test" id="test">Проверить</button>
+    <button class="save" id="save" disabled>Запустить</button>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    let mode = null
+    const $ = (id) => document.getElementById(id)
+    const setStatus = (t, c) => { $('status').textContent = t; $('status').className = c || '' }
+
+    function selectMode(m) {
+      mode = m
+      $('mHost').classList.toggle('active', m === 'host')
+      $('mClient').classList.toggle('active', m === 'client')
+      $('hostBox').style.display = m === 'host' ? 'block' : 'none'
+      $('clientBox').style.display = m === 'client' ? 'block' : 'none'
+      $('test').style.display = m === 'client' ? 'block' : 'none'
+      $('save').disabled = false
+      $('save').textContent = m === 'host' ? 'Запустить сервер' : 'Подключиться'
+      setStatus('')
+    }
+
+    $('mHost').onclick = () => selectMode('host')
+    $('mClient').onclick = () => selectMode('client')
+
+    window.settingsApi.get().then((cfg) => {
+      if (cfg && cfg.serverUrl) $('url').value = cfg.serverUrl
+      if (cfg && cfg.mode) selectMode(cfg.mode)
+    })
+
+    $('test').onclick = async () => {
+      const url = $('url').value.trim()
+      if (!url) return setStatus('Введите адрес', 'err')
+      setStatus('Проверяю…')
+      const r = await window.settingsApi.test(url)
+      if (r.ok) setStatus('✓ Сервер отвечает', 'ok')
+      else setStatus('✗ Недоступен: ' + (r.error || ('HTTP ' + r.status)), 'err')
+    }
+
+    $('save').onclick = async () => {
+      if (!mode) return
+      if (mode === 'client' && !$('url').value.trim()) return setStatus('Введите адрес хоста', 'err')
+      $('save').disabled = true
+      setStatus(mode === 'host' ? 'Запуск сервера…' : 'Подключение…')
+      await window.settingsApi.apply({ mode, serverUrl: $('url').value.trim() })
+    }
+
+    $('url') && ($('url').onkeydown = (e) => { if (e.key === 'Enter') $('save').click() })
+  </script>
+</body>
+</html>

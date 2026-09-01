@@ -1,132 +1,80 @@
-import React, { useEffect, useState } from 'react'
-import { useSettingsStore, BookingFlagItem, FlagEffects } from '../../../store/useSettingsStore'
-import { fetchBookingFlags, createBookingFlag, updateBookingFlag, deleteBookingFlag } from '../../../api/bookingFlags'
-import {
-  SectionHeader, AddButton, EmptyBox, iconBtn, listRow, itemTitle,
-  formCard, formTitle, inputStyle, labelStyle, errorStyle, primaryBtn, secondaryBtn,
-} from './sectionUi'
-
-const emptyEffects = (): FlagEffects => ({ bufferAfter: 0, bufferBefore: 0, pin: false })
+import React, { useEffect } from 'react'
+import { useSettingsStore, FlagEffects } from '../../../store/useSettingsStore'
+import { fetchBookingFlags } from '../../../api/bookingFlags'
+import { SectionHeader, EmptyBox } from './sectionUi'
 
 function effectsSummary(e?: FlagEffects): string {
-  if (!e) return ''
+  if (!e) return 'Только визуальная отметка'
   const parts: string[] = []
-  if (e.bufferAfter) parts.push(`буфер после ${e.bufferAfter} дн.`)
+  if (e.pin) parts.push('только этот номер')
+  if (e.lockFloor) parts.push('только свой этаж')
+  if (e.requireFeature) parts.push(`только: ${e.requireFeature}`)
+  if (e.bufferAfter) parts.push(`буфер после ${e.bufferAfter} дн.${e.bufferAfterExceptFlag ? ' (кроме позднего заезда)' : ''}`)
   if (e.bufferBefore) parts.push(`буфер до ${e.bufferBefore} дн.`)
-  if (e.pin) parts.push('не перемещать')
-  return parts.join(' · ')
+  return parts.join(' · ') || 'Только визуальная отметка'
 }
 
 export const BookingFlagsSection: React.FC = () => {
-  const { roomFund, setRoomFund } = useSettingsStore()
+  const { roomFund, setRoomFund, hiddenFlagCodes, toggleFlagHidden } = useSettingsStore()
   const flags = roomFund.bookingFlags ?? []
 
-  const [editId, setEditId] = useState<string | 'new' | null>(null)
-  const [label, setLabel] = useState('')
-  const [effects, setEffects] = useState<FlagEffects>(emptyEffects())
-  const [error, setError] = useState('')
-
-  const reload = () => fetchBookingFlags().then(bookingFlags => setRoomFund({ bookingFlags })).catch(() => {})
-  useEffect(() => { reload() }, [])
-
-  const startNew = () => { setEditId('new'); setLabel(''); setEffects(emptyEffects()); setError('') }
-  const startEdit = (f: BookingFlagItem) => { setEditId(f.id); setLabel(f.label); setEffects({ ...emptyEffects(), ...(f.effects ?? {}) }); setError('') }
-
-  const save = async () => {
-    if (!label.trim()) { setError('Введите название метки'); return }
-    const eff: FlagEffects = {}
-    if (effects.bufferAfter && effects.bufferAfter > 0) eff.bufferAfter = effects.bufferAfter
-    if (effects.bufferBefore && effects.bufferBefore > 0) eff.bufferBefore = effects.bufferBefore
-    if (effects.pin) eff.pin = true
-    try {
-      if (editId === 'new') await createBookingFlag({ label: label.trim(), effects: eff })
-      else if (editId) await updateBookingFlag(editId, { label: label.trim(), effects: eff })
-      setEditId(null)
-      await reload()
-    } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } }
-      setError(err?.response?.data?.error ?? 'Ошибка сохранения')
-    }
-  }
-
-  const remove = async (id: string) => {
-    if (!confirm('Удалить метку?')) return
-    try { await deleteBookingFlag(id); await reload() } catch { alert('Не удалось удалить метку') }
-  }
-
-  const Form = (
-    <>
-      <div>
-        <label style={labelStyle}>Название</label>
-        <input value={label} onChange={e => setLabel(e.target.value)} onKeyDown={e => e.key === 'Enter' && save()} placeholder="Например: Выезд до 17:00" style={inputStyle} autoFocus />
-      </div>
-
-      <div style={{ borderTop: '1px solid var(--border-subtle)', paddingTop: 12, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-          Эффект для алгоритма
-        </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-          <div>
-            <label style={labelStyle}>Зазор после, дн.</label>
-            <input type="number" min={0} max={14} value={effects.bufferAfter ?? 0} onChange={e => setEffects({ ...effects, bufferAfter: Math.max(0, Number(e.target.value) || 0) })} style={inputStyle} />
-          </div>
-          <div>
-            <label style={labelStyle}>Зазор до, дн.</label>
-            <input type="number" min={0} max={14} value={effects.bufferBefore ?? 0} onChange={e => setEffects({ ...effects, bufferBefore: Math.max(0, Number(e.target.value) || 0) })} style={inputStyle} />
-          </div>
-        </div>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: '0.88rem', color: 'var(--text)' }}>
-          <input type="checkbox" checked={!!effects.pin} onChange={e => setEffects({ ...effects, pin: e.target.checked })} style={{ width: 16, height: 16, cursor: 'pointer', accentColor: 'var(--accent)' }} />
-          Не перемещать оптимизатором (VIP / спец-условия)
-        </label>
-      </div>
-
-      {error && <div style={errorStyle}>{error}</div>}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-        <button onClick={() => setEditId(null)} style={secondaryBtn}>Отмена</button>
-        <button onClick={save} style={primaryBtn}>Сохранить</button>
-      </div>
-    </>
-  )
+  // Метки — готовая библиотека из БД, понимаемая алгоритмом. Здесь не редактируются.
+  useEffect(() => {
+    fetchBookingFlags().then(bookingFlags => setRoomFund({ bookingFlags })).catch(() => {})
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div style={{ maxWidth: 760, margin: '0 auto' }}>
       <SectionHeader
         title="Метки броней"
-        subtitle="Пометки для броней (поздний выезд, долг…). При наличии метки блок отображается со штриховкой."
-        action={<AddButton onClick={startNew} label="Добавить метку" />}
+        subtitle="Готовая библиотека меток, которые понимает алгоритм. Выберите, какие показывать в форме брони."
       />
 
-      {editId === 'new' && <div style={formCard}><div style={formTitle}>Новая метка</div>{Form}</div>}
-
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 12 }}>
-        {flags.length === 0 && <EmptyBox>Метки не добавлены</EmptyBox>}
+        {flags.length === 0 && <EmptyBox>Метки не загружены</EmptyBox>}
 
-        {flags.map((f, idx) => (
-          <div key={f.id}>
-            <div style={listRow}>
-              <span className="mono" style={{
-                width: 22, height: 22, borderRadius: 6, background: 'var(--surface-2)', border: '1px solid var(--border-subtle)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-faint)', flexShrink: 0,
-              }}>{idx + 1}</span>
+        {flags.map(f => {
+          const visible = !hiddenFlagCodes.includes(f.id)
+          return (
+            <div key={f.id} style={{
+              display: 'flex', alignItems: 'center', gap: 12, padding: '11px 14px',
+              background: 'var(--surface)', borderRadius: 10, border: '1px solid var(--border-subtle)',
+              opacity: visible ? 1 : 0.6,
+            }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={itemTitle}>{f.label}</div>
-                {effectsSummary(f.effects) && (
-                  <div style={{ fontSize: '0.78rem', color: 'var(--accent-text)', fontWeight: 500, marginTop: 2 }}>⚙ {effectsSummary(f.effects)}</div>
-                )}
+                <div style={{ fontSize: '0.92rem', fontWeight: 600, color: 'var(--text)' }}>{f.label}</div>
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 2 }}>
+                  {effectsSummary(f.effects)}
+                </div>
               </div>
-              <button onClick={() => startEdit(f)} style={iconBtn} title="Редактировать">✎</button>
-              <button onClick={() => remove(f.id)} style={{ ...iconBtn, color: 'var(--s-overdue)' }} title="Удалить">✕</button>
-            </div>
-            {editId === f.id && <div style={{ ...formCard, marginTop: 6 }}>{Form}</div>}
-          </div>
-        ))}
 
-        {/* Свободный текст — всегда последний слот */}
-        <div style={{ ...listRow, border: '1px dashed var(--border-subtle)', background: 'transparent', color: 'var(--text-faint)' }}>
-          <span style={{ width: 22, textAlign: 'center', flexShrink: 0 }}>✎</span>
-          <span style={{ fontSize: '0.84rem' }}>Произвольный текст — вводится от руки в карточке брони</span>
-        </div>
+              {/* Тоггл видимости в форме брони */}
+              <button
+                type="button"
+                onClick={() => toggleFlagHidden(f.id)}
+                title={visible ? 'Скрыть из формы брони' : 'Показывать в форме брони'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, height: 30, padding: '0 12px',
+                  borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.8rem', fontWeight: 500,
+                  border: `1px solid ${visible ? 'var(--accent)' : 'var(--border)'}`,
+                  background: visible ? 'var(--accent-bg)' : 'transparent',
+                  color: visible ? 'var(--accent-text)' : 'var(--text-faint)',
+                }}
+              >
+                {visible ? (
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" />
+                  </svg>
+                ) : (
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M9.9 4.2A10 10 0 0 1 12 4c6.5 0 10 7 10 7a13 13 0 0 1-2.3 3M6.6 6.6A13 13 0 0 0 2 11s3.5 7 10 7a10 10 0 0 0 3.4-.6M2 2l20 20" />
+                  </svg>
+                )}
+                {visible ? 'Видна' : 'Скрыта'}
+              </button>
+            </div>
+          )
+        })}
       </div>
     </div>
   )

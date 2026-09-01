@@ -17,6 +17,7 @@ const partnerRoutes = require('./routes/partners')
 const allotmentRoutes = require('./routes/allotments')
 const snapshotRoutes = require('./routes/snapshots')
 const bookingFlagRoutes = require('./routes/bookingFlags')
+const contactRoutes = require('./routes/contacts')
 
 const { errorHandler } = require('./middleware/errorHandler')
 const logger = require('./utils/logger')
@@ -24,10 +25,10 @@ const logger = require('./utils/logger')
 const app = express()
 
 app.use(helmet())
-app.use(cors({
-  origin: process.env.CLIENT_ORIGIN || ['http://localhost:5173', 'http://localhost:3000'],
-  credentials: true,
-}))
+
+// CORS под desktop/LAN-модель (детали и обоснование — в utils/corsOrigin.js).
+const { corsOrigin } = require('./utils/corsOrigin')
+app.use(cors({ origin: corsOrigin, credentials: true }))
 app.use(express.json({ limit: '1mb' }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -61,6 +62,7 @@ app.use('/api/partners', apiLimiter, partnerRoutes)
 app.use('/api/allotments', apiLimiter, allotmentRoutes)
 app.use('/api/snapshots', apiLimiter, snapshotRoutes)
 app.use('/api/booking-flags', apiLimiter, bookingFlagRoutes)
+app.use('/api/contacts', apiLimiter, contactRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })

@@ -1,0 +1,71 @@
+{
+  "name": "hotel-booking-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Система бронирования отеля — десктоп (хост/клиент)",
+  "author": "Hotel Booking",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "build": "electron-builder --win nsis"
+  },
+  "dependencies": {
+    "embedded-postgres": "^18.4.0-beta.17"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.hotelbooking.desktop",
+    "productName": "Система бронирования",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "settings-preload.js",
+      "settings.html",
+      "package.json"
+    ],
+    "asar": false,
+    "extraResources": [
+      {
+        "from": "../client/dist",
+        "to": "renderer"
+      },
+      {
+        "from": "db",
+        "to": "db"
+      },
+      {
+        "from": "../server",
+        "to": "server",
+        "filter": [
+          "**/*",
+          "!**/.env",
+          "!**/.env.*",
+          "!node_modules/.bin/**",
+          "!node_modules/prisma/**",
+          "!node_modules/nodemon/**",
+          "!node_modules/.prisma/client/*.tmp*",
+          "!logs/**",
+          "!backups/**",
+          "!scripts/**"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Система бронирования"
+    }
+  }
+}

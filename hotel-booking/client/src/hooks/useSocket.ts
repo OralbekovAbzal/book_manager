@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { io, Socket } from 'socket.io-client'
+import { SOCKET_URL } from '../config'
 import { useGridStore } from '../store/useGridStore'
 import type { GridBooking } from '../types'
 
@@ -11,7 +12,7 @@ export function useSocket(token: string | null) {
   useEffect(() => {
     if (!token) return
 
-    socket = io('/', { auth: { token }, transports: ['websocket'] })
+    socket = io(SOCKET_URL, { auth: { token }, transports: ['websocket'] })
 
     socket.on('booking:created', ({ booking }: { booking: GridBooking }) => {
       onBookingCreated(booking)

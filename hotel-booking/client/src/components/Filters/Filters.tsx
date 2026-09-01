@@ -3,6 +3,7 @@ import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
 import { fetchCategories } from '../../api/rooms'
 import type { Category } from '../../types'
+import { DatePicker } from '../ui/DatePicker'
 
 interface Props {
   /** Видимость панели управляется кнопкой в тулбаре (TodayStats). */
@@ -215,12 +216,9 @@ export const Filters: React.FC<Props> = ({ open }) => {
         )}
 
         <Field label="Перейти к дате">
-          <input
-            type="date"
+          <DatePicker
             value={draft.jumpDate}
-            onChange={e => setDraft({ ...draft, jumpDate: e.target.value })}
-            onKeyDown={e => { if (e.key === 'Enter') onApply() }}
-            style={inputStyle}
+            onChange={v => setDraft({ ...draft, jumpDate: v })}
           />
         </Field>
 

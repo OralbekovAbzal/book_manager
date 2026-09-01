@@ -2,11 +2,19 @@ const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
 const { invalidateFlagCache } = require('../utils/flagEffects')
 
-// Дефолтные метки — сеются при первом обращении, если таблица пуста
-const DEFAULTS = [
-  { code: 'early_checkout', label: 'Выезд до 17:00',  effects: null, order: 0 },
-  { code: 'late_checkout',  label: 'Выезд после 17:00', effects: { bufferAfter: 1 }, order: 1 },
-  { code: 'debt',           label: 'Долг / не оплатил', effects: null, order: 2 },
+// Готовая библиотека меток с эффектами, которые понимает оптимизатор.
+// Словарь эффектов: pin (не двигать), lockFloor (только свой этаж),
+// requireFeature (номер обязан иметь особенность), bufferAfter/Before (зазор),
+// bufferAfterExceptFlag (зазор после снимается, если у следующей брони есть метка с этим code).
+const LIBRARY = [
+  { code: 'only_room',      label: 'Только этот номер',   color: '#ef4444', order: 0, effects: { pin: true } },
+  { code: 'only_floor',     label: 'Только этот этаж',     color: '#f59e0b', order: 1, effects: { lockFloor: true } },
+  { code: 'only_single',    label: 'Только односпальные',  color: '#8b5cf6', order: 2, effects: { requireFeature: 'Односпальная кровать' } },
+  { code: 'only_double',    label: 'Только двуспальные',   color: '#6366f1', order: 3, effects: { requireFeature: 'Двуспальная кровать' } },
+  { code: 'early_checkout', label: 'Выезд до 17:00',       color: '#06b6d4', order: 4, effects: { bufferAfter: 1, bufferAfterExceptFlag: 'late_checkin' } },
+  { code: 'late_checkout',  label: 'Выезд после 17:00',    color: '#0ea5e9', order: 5, effects: { bufferAfter: 1 } },
+  { code: 'late_checkin',   label: 'Заезд после 17:00',    color: '#22c55e', order: 6, effects: null },
+  { code: 'debt',           label: 'Долг',                 color: '#dc2626', order: 7, effects: null },
 ]
 
 const SELECT = { id: true, code: true, label: true, color: true, effects: true, order: true }
@@ -17,11 +25,19 @@ function genCode(label) {
 }
 
 async function ensureSeeded() {
-  const count = await prisma.bookingFlag.count()
-  if (count === 0) {
-    await prisma.bookingFlag.createMany({ data: DEFAULTS })
-    invalidateFlagCache()
+  // Сеется один раз (по «маяку» only_room). Существующие старые метки с теми же
+  // code (early_checkout/late_checkout/debt) обновляются до канона; пользовательские —
+  // не трогаются. После засева пользователь может редактировать их свободно.
+  const sentinel = await prisma.bookingFlag.findUnique({ where: { code: 'only_room' } })
+  if (sentinel) return
+  for (const f of LIBRARY) {
+    await prisma.bookingFlag.upsert({
+      where: { code: f.code },
+      create: f,
+      update: { label: f.label, effects: f.effects, color: f.color },
+    })
   }
+  invalidateFlagCache()
 }
 
 // GET /api/booking-flags
@@ -95,6 +111,9 @@ function normalizeEffects(effects) {
   if (effects.bufferAfter > 0) out.bufferAfter = Number(effects.bufferAfter)
   if (effects.bufferBefore > 0) out.bufferBefore = Number(effects.bufferBefore)
   if (effects.pin) out.pin = true
+  if (effects.lockFloor) out.lockFloor = true
+  if (typeof effects.requireFeature === 'string' && effects.requireFeature.trim()) out.requireFeature = effects.requireFeature.trim()
+  if (typeof effects.bufferAfterExceptFlag === 'string' && effects.bufferAfterExceptFlag.trim()) out.bufferAfterExceptFlag = effects.bufferAfterExceptFlag.trim()
   return Object.keys(out).length ? out : null
 }
 

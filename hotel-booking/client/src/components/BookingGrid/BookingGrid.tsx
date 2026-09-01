@@ -91,7 +91,7 @@ export const BookingGrid: React.FC = () => {
 
 const BookingGridInner: React.FC = () => {
   const { data, loading, error, dateFrom, dateTo, fetchGrid, roomStatusFilter, shiftDate, hiddenCategoryIds } = useGridStore()
-  const { ROW_HEIGHT } = useGridSettings()
+  const { ROW_HEIGHT, DAY_WIDTH, ROOM_COL_WIDTH } = useGridSettings()
   const parentRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { fetchGrid() }, [])
@@ -228,8 +228,29 @@ const BookingGridInner: React.FC = () => {
           })}
         </div>
 
-        {/* Спейсер — прижимает сводку к низу вьюпорта когда строк мало */}
-        <div style={{ flex: 1, minHeight: 0 }} />
+        {/* Спейсер — прижимает сводку к низу вьюпорта когда строк мало.
+            Продолжает вертикальные линии сетки (номер↔даты и разделители дней) донизу. */}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', minWidth: 'max-content' }}>
+          {/* Залипшая колонка «Номер» с правой границей */}
+          <div style={{
+            position: 'sticky', left: 0, zIndex: 1,
+            width: ROOM_COL_WIDTH, flexShrink: 0,
+            background: 'var(--bg)', borderRight: '1px solid var(--border)',
+          }} />
+          {/* Дни: вертикальные разделители + линия «сегодня» */}
+          <div style={{
+            width: dates.length * DAY_WIDTH, flexShrink: 0, position: 'relative',
+            backgroundImage: `repeating-linear-gradient(to right, var(--border-subtle) 0, var(--border-subtle) 1px, transparent 1px, transparent ${DAY_WIDTH}px)`,
+          }}>
+            {dates.indexOf(today) >= 0 && (
+              <div style={{
+                position: 'absolute', top: 0, bottom: 0,
+                left: dates.indexOf(today) * DAY_WIDTH, width: 2,
+                background: 'var(--today-line)', opacity: 0.5,
+              }} />
+            )}
+          </div>
+        </div>
 
         {/* Feature 1 — Сводка по датам (sticky bottom, скроллится с сеткой) */}
         {data && flatRows.length > 0 && (

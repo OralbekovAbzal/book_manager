@@ -57,6 +57,16 @@ function roomSignature(room) {
 function compatibilityCheck(room, booking, S) {
   let penalty = 0
 
+  // ─── Жёсткие ограничения от меток брони (не зависят от настроек правил) ───
+  // «Только этот этаж» — нельзя менять этаж.
+  if (booking.lockFloor && booking.originalFloor != null && room.floor !== booking.originalFloor) {
+    return { allowed: false, penalty: 0 }
+  }
+  // «Только односпальные/двуспальные» — номер обязан иметь нужную особенность.
+  if (booking.requireFeature && !(room.features || []).includes(booking.requireFeature)) {
+    return { allowed: false, penalty: 0 }
+  }
+
   // Вместимость
   if (S.capacityRule !== 'ignore') {
     if ((room.capacity || '') !== (booking.originalCapacity || '')) {
@@ -140,7 +150,11 @@ function bookingsOverlap(a, b) {
  * буфер после первой (turnaround) и буфер до второй. Берём максимум.
  */
 function requiredGap(first, second) {
-  return Math.max(first.bufferAfter || 0, second.bufferBefore || 0)
+  let after = first.bufferAfter || 0
+  // Исключение: «выезд до 17:00» снимает зазор, если у следующей брони стоит метка-исключение
+  // (заезд после 17:00). У «выезд после 17:00» exceptAfterFlag нет → зазор остаётся всегда.
+  if (after && first.exceptAfterFlag && (second.flags || []).includes(first.exceptAfterFlag)) after = 0
+  return Math.max(after, second.bufferBefore || 0)
 }
 
 /** Конфликт с учётом буферов: прямое пересечение ИЛИ недостаточный зазор. */
@@ -542,14 +556,19 @@ async function optimize(req, res, next) {
       const room = roomById.get(b.roomId)
       if (!room) continue
 
-      // Сворачиваем эффекты всех меток брони в буферы + признак pin
+      // Сворачиваем эффекты всех меток брони: буферы, pin, блокировка этажа,
+      // требуемая особенность номера, исключение буфера «после».
       let bufferAfter = 0, bufferBefore = 0, pinned = false
+      let lockFloor = false, requireFeature = null, exceptAfterFlag = null
       for (const fId of (b.flags || [])) {
         const e = flagEffects[fId]
         if (!e) continue
         if (e.bufferAfter) bufferAfter = Math.max(bufferAfter, Number(e.bufferAfter) || 0)
         if (e.bufferBefore) bufferBefore = Math.max(bufferBefore, Number(e.bufferBefore) || 0)
         if (e.pin) pinned = true
+        if (e.lockFloor) lockFloor = true
+        if (e.requireFeature) requireFeature = e.requireFeature
+        if (e.bufferAfterExceptFlag) exceptAfterFlag = e.bufferAfterExceptFlag
       }
 
       const item = {
@@ -568,6 +587,9 @@ async function optimize(req, res, next) {
         flags: b.flags || [],
         bufferAfter,
         bufferBefore,
+        lockFloor,
+        requireFeature,
+        exceptAfterFlag,
       }
 
       const inHorizon = item.checkInMs < horizonMs

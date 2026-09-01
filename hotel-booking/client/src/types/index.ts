@@ -210,3 +210,19 @@ export interface GridFilters {
   capacity: string
   features: string
 }
+
+// Справочник контактов (сотрудники, службы, подрядчики, экстренные номера)
+export interface Contact {
+  id: number
+  name: string
+  role: string | null
+  group: string
+  phones: string[]
+  email: string | null
+  notes: string | null
+  isPinned: boolean
+  order: number
+  isActive: boolean
+  createdAt: string
+  updatedAt: string
+}

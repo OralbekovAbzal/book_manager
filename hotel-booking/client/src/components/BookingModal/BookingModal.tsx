@@ -16,6 +16,7 @@ import {
 import type { Room, GridBooking } from '../../types'
 import { fetchRoomAvailability } from '../../api/occupancy'
 import { calculate } from '../../utils/calculator'
+import { DatePicker } from '../ui/DatePicker'
 
 interface FormValues {
   roomId: number
@@ -165,7 +166,7 @@ const ResultCard: React.FC<ResultCardProps> = ({ result, discountPercent, prepay
 
 export const BookingModal: React.FC = () => {
   const { modal, closeModal, fetchGrid, fetchToday, shiftDate } = useGridStore()
-  const { pricing, roomFund } = useSettingsStore()
+  const { pricing, roomFund, hiddenFlagCodes } = useSettingsStore()
   const [rooms, setRooms] = useState<Room[]>([])
   const [conflict, setConflict] = useState<GridBooking | null>(null)
   const [checking, setChecking] = useState(false)
@@ -617,22 +618,26 @@ export const BookingModal: React.FC = () => {
             {/* Dates */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
               <Field label="Дата заезда" error={errors.checkIn?.message}>
-                <input
-                  type="date"
-                  {...register('checkIn', { required: 'Укажите дату заезда' })}
-                  disabled={isClosed}
-                  style={inputStyle}
+                <Controller
+                  name="checkIn"
+                  control={control}
+                  rules={{ required: 'Укажите дату заезда' }}
+                  render={({ field }) => (
+                    <DatePicker value={field.value} onChange={field.onChange} disabled={isClosed} />
+                  )}
                 />
               </Field>
               <Field label="Дата выезда" error={errors.checkOut?.message}>
-                <input
-                  type="date"
-                  {...register('checkOut', {
+                <Controller
+                  name="checkOut"
+                  control={control}
+                  rules={{
                     required: 'Укажите дату выезда',
                     validate: (v) => v > watchedCheckIn || 'Выезд должен быть позже заезда',
-                  })}
-                  disabled={isClosed}
-                  style={inputStyle}
+                  }}
+                  render={({ field }) => (
+                    <DatePicker value={field.value} onChange={field.onChange} min={watchedCheckIn} disabled={isClosed} />
+                  )}
                 />
               </Field>
             </div>
@@ -678,10 +683,10 @@ export const BookingModal: React.FC = () => {
               </Field>
             )}
 
-            {/* Booking flags */}
+            {/* Booking flags — только видимые (скрытые настраиваются в Настройки → Метки броней) */}
             {!isMaintenance && (
               <FlagsField
-                flags={roomFund.bookingFlags ?? []}
+                flags={(roomFund.bookingFlags ?? []).filter(f => !hiddenFlagCodes.includes(f.id))}
                 selected={selectedFlags}
                 customFlag={customFlag}
                 onToggle={(id) => setSelectedFlags(prev =>

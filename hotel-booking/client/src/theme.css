@@ -1,3 +1,11 @@
+/* ─── Layout ─────────────────────────────────────────────────────────── */
+/* Константы оболочки приложения — от темы не зависят.
+   Верхняя панель (логотип, отель, пользователь) остаётся видимой всегда:
+   полноэкранные разделы (Настройки, Справочник) начинаются под ней. */
+:root {
+  --topbar-h: 52px;
+}
+
 /* ─── Tokens ─────────────────────────────────────────────────────────── */
 
 :root,
@@ -20,31 +28,31 @@
   --border-subtle:   #e5e7eb;
   --border-strong:   #9ca3af;
 
-  /* Accent */
-  --accent:          #2563eb;
-  --accent-hover:    #1d4ed8;
-  --accent-bg:       #eff6ff;
-  --accent-text:     #1e40af;
+  /* Accent — спокойный синий */
+  --accent:          #4f76c9;
+  --accent-hover:    #3f63b0;
+  --accent-bg:       #eef3fb;
+  --accent-text:     #34548f;
 
-  /* Status colors (design handoff — одинаковы в обеих темах) */
-  --s-confirmed:     #5B8DEF;
-  --s-in:            #22C55E;
-  --s-out:           #F59E0B;
-  --s-overdue:       #EF4444;
-  --s-maint:         #94A3B8;
+  /* Status colors — приглушённая палитра (мягкий синий / шалфей / янтарь / коралл) */
+  --s-confirmed:     #5a82c4;
+  --s-in:            #5b9e7e;
+  --s-out:           #d3a25c;
+  --s-overdue:       #cc6b6b;
+  --s-maint:         #97a2b3;
   /* Aliases — старые имена ссылаются на новую палитру (не ломаем существующий код) */
   --status-confirmed:    var(--s-confirmed);
   --status-checked-in:   var(--s-in);
   --status-checked-out:  var(--s-out);
   --status-overdue:      var(--s-overdue);
   --status-maintenance:  var(--s-maint);
-  --status-no-show:      #9ca3af;
+  --status-no-show:      #9aa3b2;
 
   /* Calendar */
-  --today-bg:        #eff6ff;
-  --today-line:      #2563eb;
-  --weekend-bg:      #f9fafb;
-  --past-bg:         #f9fafb;
+  --today-bg:        #eef3fb;
+  --today-line:      #4f76c9;
+  --weekend-bg:      #f8f9fb;
+  --past-bg:         #f8f9fb;
 
   /* Shadows */
   --shadow-sm:       0 1px 2px rgba(0,0,0,0.06);
@@ -71,18 +79,18 @@
   --border-subtle:   #2d2d33;
   --border-strong:   #71717a;
 
-  /* Accent */
-  --accent:          #60a5fa;
-  --accent-hover:    #93c5fd;
-  --accent-bg:       rgba(59,130,246,0.15);
-  --accent-text:     #93c5fd;
+  /* Accent — спокойный синий (чуть светлее для тёмного фона) */
+  --accent:          #7ba0db;
+  --accent-hover:    #9bb9e8;
+  --accent-bg:       rgba(123,160,219,0.16);
+  --accent-text:     #a8c2e6;
 
-  /* Status colors (design handoff — те же hex, что и в светлой теме) */
-  --s-confirmed:     #5B8DEF;
-  --s-in:            #22C55E;
-  --s-out:           #F59E0B;
-  --s-overdue:       #EF4444;
-  --s-maint:         #94A3B8;
+  /* Status colors — приглушённая палитра, чуть ярче для тёмного фона */
+  --s-confirmed:     #6e93d0;
+  --s-in:            #6fb495;
+  --s-out:           #ddb070;
+  --s-overdue:       #d98686;
+  --s-maint:         #8a93a3;
   --status-confirmed:    var(--s-confirmed);
   --status-checked-in:   var(--s-in);
   --status-checked-out:  var(--s-out);
@@ -91,8 +99,8 @@
   --status-no-show:      #6b7280;
 
   /* Calendar */
-  --today-bg:        rgba(59,130,246,0.12);
-  --today-line:      #60a5fa;
+  --today-bg:        rgba(123,160,219,0.12);
+  --today-line:      #7ba0db;
   --weekend-bg:      #18181b;
   --past-bg:         #111115;
 

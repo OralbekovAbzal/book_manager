@@ -35,7 +35,7 @@ const NAV_GROUPS: NavGroupDef[] = [
     heading: 'Основное',
     items: [
       { id: 'grid', label: 'Шахматка', icon: 'M3 3h7v7H3zM14 3h7v7h-7zM14 14h7v7h-7zM3 14h7v7H3z' },
-      { id: 'reference', label: 'Справочник', icon: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5z' },
+      { id: 'reference', label: 'Справочник', icon: 'M4 19.5A2.5 2.5 0 0 1 6.5 17H20M4 19.5A2.5 2.5 0 0 0 6.5 22H20V2H6.5A2.5 2.5 0 0 0 4 4.5z', badge: 'F2' },
     ],
   },
   {

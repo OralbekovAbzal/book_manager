@@ -67,13 +67,12 @@ export const SettingsPanel: React.FC<Props> = ({ open, onClose }) => {
 
   return (
     <>
+      {/* Обычный экран в потоке приложения, а не окно поверх сетки: шахматка
+          заменяется этим разделом, шапка остаётся общей для всех разделов. */}
       <div style={{
-        position: 'fixed',
-        inset: 0,
-        width: '100vw',
-        height: '100vh',
+        flex: 1,
+        minHeight: 0,
         background: 'var(--bg)',
-        zIndex: 501,
         display: 'flex',
         overflow: 'hidden',
         color: 'var(--text)',

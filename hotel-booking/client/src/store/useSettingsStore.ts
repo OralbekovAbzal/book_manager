@@ -38,9 +38,12 @@ export interface CapacityItem { id: string; label: string; value: number }
  * метки, а с этими эффектами — поэтому новую метку достаточно собрать из них.
  */
 export interface FlagEffects {
-  bufferAfter?: number    // дней «чистого» зазора ПОСЛЕ брони (поздний выезд → 1)
-  bufferBefore?: number   // дней зазора ДО брони (раннее заселение → 1)
-  pin?: boolean           // не перемещать оптимизатором (VIP, спец-условия)
+  bufferAfter?: number          // дней «чистого» зазора ПОСЛЕ брони (поздний выезд → 1)
+  bufferBefore?: number         // дней зазора ДО брони (раннее заселение → 1)
+  pin?: boolean                 // не перемещать оптимизатором (VIP, спец-условия)
+  lockFloor?: boolean           // только свой этаж (нельзя менять этаж)
+  requireFeature?: string       // номер обязан иметь эту особенность (тип кровати)
+  bufferAfterExceptFlag?: string // зазор «после» снимается, если у следующей брони есть метка с этим code
 }
 export interface BookingFlagItem { id: string; label: string; effects?: FlagEffects }
 
@@ -223,6 +226,10 @@ interface SettingsStore {
   optimizer: OptimizerSettings
   setOptimizer: <K extends keyof OptimizerSettings>(key: K, value: OptimizerSettings[K]) => void
   resetOptimizer: () => void
+
+  // Скрытые метки броней (по code) — не показываются в форме брони. Сами метки не редактируются.
+  hiddenFlagCodes: string[]
+  toggleFlagHidden: (code: string) => void
 }
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -252,6 +259,14 @@ export const useSettingsStore = create<SettingsStore>()(
       setOptimizer: (key, value) =>
         set((s) => ({ optimizer: { ...s.optimizer, [key]: value } })),
       resetOptimizer: () => set({ optimizer: OPTIMIZER_DEFAULTS }),
+
+      hiddenFlagCodes: [],
+      toggleFlagHidden: (code) =>
+        set((s) => ({
+          hiddenFlagCodes: s.hiddenFlagCodes.includes(code)
+            ? s.hiddenFlagCodes.filter((c) => c !== code)
+            : [...s.hiddenFlagCodes, code],
+        })),
     }),
     {
       name: 'hotel_visual_settings',

@@ -17,7 +17,11 @@ logs/
 *.err
 
 # Database dumps & backups
-*.sql
+# NB: общий `*.sql` здесь стоял раньше и молча выкидывал из репозитория СХЕМУ —
+# electron/db/init.sql (то, из чего разворачивается свежая установка) и SQL-констрейнты.
+# Схема — это код, она нужна в истории. Не нужны только дампы данных.
+backup_*.sql
+*.dump
 backups/
 hotel-booking/.logs/
 
@@ -26,8 +30,10 @@ _design_code/
 _design_import/
 *.zip
 
-# Prisma generated migrations (local)
-hotel-booking/server/prisma/migrations/
+# ВНИМАНИЕ: миграции Prisma намеренно НЕ игнорируются.
+# Они и есть способ обновлять базу у клиента, у которого уже есть данные.
+# Пока проект на `db push`, миграций нет — но как только появятся, они должны
+# лежать в репозитории, иначе обновление установленной программы невозможно.
 
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json

@@ -217,3 +217,24 @@ model Release {
 
   @@index([allotmentId, dateFrom, dateTo])
 }
+
+/// Справочник контактов отеля: сотрудники, службы, подрядчики, экстренные номера.
+/// `group` — строка из фиксированного пресета (см. CONTACT_GROUPS на клиенте):
+/// клиент не настраивает группы, он только заполняет записи.
+model Contact {
+  id        Int      @id @default(autoincrement())
+  name      String
+  role      String?
+  group     String   @default("Службы отеля")
+  phones    String[] @default([])
+  email     String?
+  notes     String?
+  isPinned  Boolean  @default(false)
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([group, order])
+  @@index([isPinned])
+}

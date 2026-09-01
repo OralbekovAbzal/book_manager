@@ -21,17 +21,24 @@ async function getFlagEffectsMap() {
 
 function invalidateFlagCache() { _cache = null; _ts = 0 }
 
-/** Сворачивает эффекты всех меток брони в буферы + признак pin. */
+/** Сворачивает эффекты всех меток брони в буферы + признак pin + исключение буфера. */
 function bookingBuffers(flagCodes, effMap) {
-  let after = 0, before = 0, pin = false
+  let after = 0, before = 0, pin = false, exceptAfterFlag = null
   for (const c of flagCodes || []) {
     const e = effMap[c]
     if (!e) continue
     if (e.bufferAfter) after = Math.max(after, Number(e.bufferAfter) || 0)
     if (e.bufferBefore) before = Math.max(before, Number(e.bufferBefore) || 0)
     if (e.pin) pin = true
+    if (e.bufferAfterExceptFlag) exceptAfterFlag = e.bufferAfterExceptFlag
   }
-  return { after, before, pin }
+  return { after, before, pin, exceptAfterFlag }
+}
+
+/** Буфер «после» с учётом исключения: снимается, если у СЛЕДУЮЩЕЙ брони есть метка-исключение. */
+function afterWithException(buf, laterFlagCodes) {
+  if (buf.after && buf.exceptAfterFlag && (laterFlagCodes || []).includes(buf.exceptAfterFlag)) return 0
+  return buf.after
 }
 
 /** Есть ли среди меток вообще какие-то буферы (чтобы не делать лишних проверок). */
@@ -66,12 +73,12 @@ async function findBufferConflict({ roomId, checkIn, checkOut, flags = [], exclu
 
     const eBuf = bookingBuffers(e.flags, effMap)
     let gapDays, required
-    if (eOut <= newIn) {                 // существующая раньше новой
+    if (eOut <= newIn) {                 // существующая раньше новой → буфер «после» у существующей
       gapDays = (newIn - eOut) / DAY
-      required = Math.max(eBuf.after, newBuf.before)
-    } else {                             // новая раньше существующей
+      required = Math.max(afterWithException(eBuf, flags), newBuf.before)
+    } else {                             // новая раньше существующей → буфер «после» у новой
       gapDays = (eIn - newOut) / DAY
-      required = Math.max(newBuf.after, eBuf.before)
+      required = Math.max(afterWithException(newBuf, e.flags), eBuf.before)
     }
     if (gapDays < required) return { booking: e, required, gapDays }
   }

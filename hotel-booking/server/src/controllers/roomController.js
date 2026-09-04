@@ -1,5 +1,5 @@
 const { prisma } = require('../utils/prisma')
-const { findOverlapsBulk } = require('../utils/overlap')
+const { checkRoomsAvailability, parseFlags } = require('../utils/availability')
 const { createError } = require('../middleware/errorHandler')
 // Сетка /api/occupancy/grid кэшируется на 30 с — после правки номеров сбрасываем кэш,
 // иначе новые/переименованные/скрытые номера появляются в сетке с задержкой.
@@ -40,10 +40,14 @@ async function list(req, res, next) {
   }
 }
 
-// GET /api/rooms/availability?checkIn=&checkOut=&categoryId=&building=
+// GET /api/rooms/availability?checkIn=&checkOut=&categoryId=&building=&flags=&partnerId=&excludeBookingId=
+// «Свободно» здесь считает общая утилита utils/availability — те же три проверки,
+// что при создании брони (пересечения, буферы меток, квоты партнёров). Раньше тут
+// смотрелись только пересечения, и подбор показывал зелёным номер, который
+// сохранение отбивало 409.
 async function availability(req, res, next) {
   try {
-    const { checkIn, checkOut, categoryId, building, floor } = req.query
+    const { checkIn, checkOut, categoryId, building, floor, partnerId, excludeBookingId } = req.query
 
     if (!checkIn || !checkOut) {
       return next(createError('checkIn и checkOut обязательны', 400))
@@ -64,13 +68,27 @@ async function availability(req, res, next) {
     })
 
     const roomIds = rooms.map((r) => r.id)
-    const conflicts = await findOverlapsBulk({ roomIds, checkIn, checkOut })
+    const checked = await checkRoomsAvailability({
+      roomIds,
+      checkIn,
+      checkOut,
+      flags: parseFlags(req.query.flags),
+      partnerId: partnerId ? parseInt(partnerId) : null,
+      excludeBookingId: excludeBookingId ? parseInt(excludeBookingId) : null,
+    })
 
-    const result = rooms.map((room) => ({
-      ...room,
-      available: !conflicts.has(room.id),
-      conflict: conflicts.get(room.id) || null,
-    }))
+    const result = rooms.map((room) => {
+      const st = checked.get(room.id)
+      return {
+        ...room,
+        available: st.available,
+        conflict: st.conflict,
+        // Почему занято: overlap | buffer | allotment — чтобы экран подбора мог
+        // объяснить причину, а не просто покрасить номер красным.
+        reason: st.reason,
+        reasonText: st.message,
+      }
+    })
 
     res.json({ data: result })
   } catch (err) {

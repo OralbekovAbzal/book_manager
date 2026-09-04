@@ -16,6 +16,10 @@ const EXPOSE = `module.exports.__test = {
   canPlace, calcMetrics, scoreLayout,
 };`
 
+// Свёртка эффектов меток у оптимизатора и у проверки броней теперь ОДНА — берём
+// её настоящую, а не заглушку, иначе тест проверял бы копию, которой больше нет.
+const realFlagEffects = loadCjs('src/utils/flagEffects.js', { stubs: { './prisma': { prisma: {} } } })
+
 const {
   DEFAULT_SETTINGS, mergeSettings, roomSignature, compatibilityCheck,
   bookingsOverlap, requiredGap, bookingsConflict, effectiveGapDays,
@@ -25,7 +29,7 @@ const {
   stubs: {
     '../utils/prisma': { prisma: {} },
     '../utils/businessDate': { getCurrentBusinessDate: async () => d('2026-07-01') },
-    '../utils/flagEffects': { getFlagEffectsMap: async () => ({}) },
+    '../utils/flagEffects': { ...realFlagEffects, getFlagEffectsMap: async () => ({}) },
     '../utils/snapshot': { createSnapshot: async () => ({}) },
     '../socket/socketManager': { emitBookingEvent: () => {} },
     './bookingController': { BOOKING_SELECT: {} },
@@ -194,6 +198,18 @@ describe('requiredGap', () => {
   it('у буфера без исключения зазор остаётся при любых метках соседа', () => {
     const first = bk('2026-07-10', '2026-07-15', { bufferAfter: 1 })
     expect(requiredGap(first, bk('2026-07-15', '2026-07-18', { flags: ['lateIn'] }))).toBe(1)
+  })
+
+  // Была ошибка: у оптимизатора была своя копия свёртки меток, и исключение
+  // ОДНОЙ метки снимало общий максимум буфера. Уборка на 2 суток обнулялась
+  // меткой позднего заезда, к уборке отношения не имеющей.
+  it('исключение одной метки не снимает буфер ДРУГОЙ метки', () => {
+    const first = bk('2026-07-10', '2026-07-15', {
+      bufferAfter: 2,
+      afterRules: [{ days: 2, exceptFlag: null }, { days: 1, exceptFlag: 'lateIn' }],
+    })
+    expect(requiredGap(first, bk('2026-07-17', '2026-07-19', { flags: ['lateIn'] }))).toBe(2)
+    expect(requiredGap(first, bk('2026-07-17', '2026-07-19', { flags: [] }))).toBe(2)
   })
 })
 

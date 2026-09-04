@@ -29,12 +29,12 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "node-cron": "^3.0.3",
+    "prisma": "^5.14.0",
     "socket.io": "^4.7.5",
     "winston": "^3.13.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.4",
-    "prisma": "^5.14.0",
     "vitest": "^5.0.0"
   }
 }

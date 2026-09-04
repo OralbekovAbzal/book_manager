@@ -26,6 +26,10 @@ router.get(
   [
     query(['checkIn', 'checkOut']).isDate().withMessage('Дата должна быть в формате YYYY-MM-DD'),
     query('excludeBookingId').optional().isInt().withMessage('excludeBookingId должен быть целым числом'),
+    // Метки будущей брони и её партнёр влияют на «свободно» так же, как при
+    // создании: буфер меток и квота партнёра. Оба параметра необязательные.
+    query('flags').optional().isString(),
+    query('partnerId').optional().isInt(),
   ],
   validate,
   ctrl.roomAvailability

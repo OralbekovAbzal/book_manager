@@ -48,6 +48,8 @@ export interface Booking {
   partner?: PartnerLite
   shiftId?: number | null
   room?: Room
+  /** Питание и услуги брони. Приходят только из GET /bookings/:id — в сетке их нет. */
+  services?: BookingServiceLink[]
   createdBy?: { id: number; name: string }
   createdAt?: string
   updatedAt?: string
@@ -227,6 +229,75 @@ export interface Contact {
   updatedAt: string
 }
 
+// ─── Гости (справочник) ───────────────────────────────────────────────────────
+// Собираются из существующих броней, своей таблицы у них нет: гость — это
+// свёртка броней по одному телефону (см. server/src/controllers/guestController.js).
+
+/** Бронь в карточке гостя — ровно столько, сколько нужно строке списка и переходу. */
+export interface GuestBooking {
+  id: number
+  guestName: string
+  roomId: number
+  roomNumber: string
+  /** YYYY-MM-DD, уже без времени — сдвиг на день здесь не поймать */
+  checkIn: string
+  checkOut: string
+  nights: number
+  status: BookingStatus
+  source: string | null
+  totalAmount: number
+}
+
+export interface Guest {
+  /** Нормализованные цифры номера — ключ группировки */
+  phoneKey: string
+  /** Как показывать номер */
+  phone: string
+  /** Разные написания одного номера в бронях; >1 — доказательство склейки */
+  phoneVariants: string[]
+  /** Самый полный вариант имени */
+  name: string
+  /** Все написания имени, от полного к короткому */
+  nameVariants: string[]
+  /** Сколько раз жил (без отменённых и неявок) */
+  visits: number
+  nights: number
+  cancelled: number
+  /** Броней на будущее */
+  upcoming: number
+  firstVisit: string | null
+  lastVisit: string | null
+  /** Ближайший заезд впереди — ради него книгу и открывают */
+  nextVisit: string | null
+  bookings: GuestBooking[]
+}
+
+/**
+ * Брони без опознанного телефона. Это НЕ карточка гостя: без номера одинаковое
+ * имя не доказывает, что человек один. Группа по точному совпадению имени —
+ * и подписана в интерфейсе именно так.
+ */
+export interface UnnamedGuestGroup {
+  key: string
+  name: string
+  /** Номер был, но не распознан (обрывок) — показываем, чтобы можно было починить */
+  phoneRaw: string | null
+  visits: number
+  nights: number
+  cancelled: number
+  bookings: GuestBooking[]
+}
+
+export interface GuestBook {
+  guests: Guest[]
+  unnamed: UnnamedGuestGroup[]
+  meta: {
+    bookingsTotal: number
+    bookingsWithPhone: number
+    bookingsWithoutPhone: number
+  }
+}
+
 // ─── Ценообразование ──────────────────────────────────────────────────────────
 
 export type PricingBase = 'room' | 'person'
@@ -347,6 +418,18 @@ export interface Service {
   includedByDefault: boolean
   isActive: boolean
   order: number
+}
+
+/** Услуга, подключённая к конкретной брони: что, скольким и сколько раз. */
+export interface BookingServiceLink {
+  id: number
+  serviceId: number
+  /** Сколько взрослых пользуется услугой. «Завтрак на 2 из 3 гостей» — это здесь. */
+  adults: number
+  children: number
+  /** Для услуг, не зависящих от числа людей (per_night, per_booking) */
+  quantity: number
+  service: Pick<Service, 'id' | 'code' | 'name' | 'price' | 'childPrice' | 'unit' | 'kind' | 'isActive'>
 }
 
 /** Пресет пансиона: кнопка, включающая набор услуг питания. */

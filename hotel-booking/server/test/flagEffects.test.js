@@ -39,7 +39,7 @@ function booking(over = {}) {
 describe('bookingBuffers — свёртка эффектов меток брони', () => {
   it('бронь без меток не требует никаких буферов', () => {
     const { bookingBuffers } = load()
-    expect(bookingBuffers([], EFFECTS)).toEqual({ after: 0, before: 0, pin: false, exceptAfterFlag: null })
+    expect(bookingBuffers([], EFFECTS)).toEqual({ after: 0, before: 0, pin: false, afterRules: [] })
   })
 
   it('неизвестный код метки просто игнорируется, а не роняет расчёт', () => {
@@ -84,13 +84,32 @@ describe('afterWithException — снятие буфера меткой-искл
     expect(__afterWithException(buf, ['lateIn'])).toBe(1)
   })
 
-  // ОЖИДАЕМО ПАДАЕТ — настоящая ошибка, см. отчёт.
-  // exceptAfterFlag собирается со ВСЕХ меток брони и снимает ОБЩИЙ максимум буфера,
-  // хотя исключение принадлежит только своей метке. Двухдневный зазор генеральной
-  // уборки обнуляется меткой «заезд после 17:00», к уборке отношения не имеющей.
-  it.fails('исключение одной метки не должно снимать буфер ДРУГОЙ метки', () => {
+  // Была ошибка (починена 2026-09-04): exceptAfterFlag собирался со ВСЕХ меток брони
+  // и снимал ОБЩИЙ максимум буфера, хотя исключение принадлежит только своей метке.
+  // Двухдневный зазор генеральной уборки обнулялся меткой «заезд после 17:00»,
+  // к уборке отношения не имеющей. Теперь у каждой метки своё правило (afterRules).
+  it('исключение одной метки не должно снимать буфер ДРУГОЙ метки', () => {
     const { bookingBuffers, __afterWithException } = load()
     const buf = bookingBuffers(['deepClean', 'lateOut17'], EFFECTS)
+    expect(__afterWithException(buf, ['lateIn'])).toBe(2)
+  })
+
+  it('у каждой метки своё исключение — снимается только её собственный буфер', () => {
+    const { bookingBuffers, __afterWithException } = load()
+    const EX = {
+      long:  { bufferAfter: 2, bufferAfterExceptFlag: 'снимаетДлинный' },
+      short: { bufferAfter: 1, bufferAfterExceptFlag: 'снимаетКороткий' },
+    }
+    const buf = bookingBuffers(['long', 'short'], EX)
+    expect(__afterWithException(buf, ['снимаетДлинный'])).toBe(1)
+    expect(__afterWithException(buf, ['снимаетКороткий'])).toBe(2)
+    expect(__afterWithException(buf, ['снимаетДлинный', 'снимаетКороткий'])).toBe(0)
+  })
+
+  it('исключение у метки без своего буфера ничего не снимает', () => {
+    const { bookingBuffers, __afterWithException } = load()
+    const EX = { clean: { bufferAfter: 2 }, weird: { bufferAfterExceptFlag: 'lateIn' } }
+    const buf = bookingBuffers(['clean', 'weird'], EX)
     expect(__afterWithException(buf, ['lateIn'])).toBe(2)
   })
 })
@@ -207,6 +226,18 @@ describe('findBufferConflict', () => {
       EFFECTS,
     )
     expect(hit).toBeNull()
+  })
+
+  it('соседи дальше самого длинного буфера из базы не читаются', async () => {
+    const { findBufferConflict, calls } = load({ booking: [booking()] })
+    // Самый длинный буфер словаря — 2 дня (deepClean), значит окно поиска
+    // соседей — [checkIn − 2 дн., checkOut + 2 дн.]. Соседка 10–15 июля в него
+    // не попадает: запрос её не вернёт, и читать всю историю номера не нужно.
+    const hit = await findBufferConflict({ roomId: 101, checkIn: d('2026-08-01'), checkOut: d('2026-08-05') }, EFFECTS)
+    expect(hit).toBeNull()
+    const { where } = calls[0].args
+    expect(where.checkOut).toEqual({ gt: d('2026-07-30') })
+    expect(where.checkIn).toEqual({ lt: d('2026-08-07') })
   })
 
   it('соседка в другом номере и отменённая бронь буфера не требуют', async () => {

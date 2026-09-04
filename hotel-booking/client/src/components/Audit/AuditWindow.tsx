@@ -461,6 +461,9 @@ const ACTION_LABELS: Array<[RegExp, string]> = [
   [/^PATCH \/bookings\/:id\/checkin$/,        'Заезд'],
   [/^PATCH \/bookings\/:id\/checkout$/,       'Выезд'],
   [/^POST \/bookings\/:id\/move$/,            'Переезд'],
+  [/^POST \/payments$/,                       'Приём оплаты'],
+  [/^POST \/payments\/:id\/refund$/,          'Возврат оплаты'],
+  [/^POST \/payments\/:id\/void$/,            'Отмена платежа'],
   [/^POST \/occupancy\/optimize\/apply$/,     'Применение оптимизатора'],
   [/^POST \/shifts\/next-day$/,               'Переход дня'],
   [/^POST \/snapshots\/:id\/restore$/,        'Откат снимка'],
@@ -493,10 +496,11 @@ const ENTITY_LABELS: Record<string, string> = {
   bookings: 'Бронь', users: 'Пользователь', rooms: 'Номер', categories: 'Категория',
   partners: 'Партнёр', allotments: 'Квота', snapshots: 'Снимок', shifts: 'Смена',
   occupancy: 'Оптимизатор', rates: 'Тарифы', hotel: 'Отель', system: 'База',
+  payments: 'Платёж',
 }
 const ENTITY_GROUP_LABELS: Record<string, string> = {
   bookings: 'Брони', users: 'Пользователи', rooms: 'Номера', categories: 'Категории',
-  partners: 'Партнёры', allotments: 'Квоты', rates: 'Тарифы',
+  partners: 'Партнёры', allotments: 'Квоты', rates: 'Тарифы', payments: 'Платежи',
 }
 
 function describeAction(action: string, entity: string): string {

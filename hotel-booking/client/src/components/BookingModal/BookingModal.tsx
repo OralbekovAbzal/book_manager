@@ -14,14 +14,19 @@ import {
   checkAvailability,
   fetchBooking,
 } from '../../api/bookings'
-import type { Room, GridBooking, Booking, RatePrice, Service, PricingBase } from '../../types'
+import type { Room, GridBooking, Booking, RatePrice, Service, MealPlan, PricingBase } from '../../types'
 import { fetchRoomAvailability } from '../../api/occupancy'
 import { fetchRates } from '../../api/rates'
-import { fetchServices } from '../../api/services'
+import { fetchServices, fetchMealPlans } from '../../api/services'
 import { fetchHotel } from '../../api/hotel'
 import { calculate, buildCalcKey, nightsOf } from '../../utils/calculator'
-import type { CalcInput, CalcResult, RateContext } from '../../utils/calculator'
+import type { CalcInput, CalcResult, RateContext, BreakdownLine } from '../../utils/calculator'
 import { ChargesPanel } from './ChargesPanel'
+import {
+  defaultLinks, linksFromBooking, linksKey, linksToPayload, newLink, isPerPerson,
+  servicePreviewLines, syncLinksWithGuests,
+} from './serviceLines'
+import type { ServiceLink, GuestTotals } from './serviceLines'
 import { DatePicker } from '../ui/DatePicker'
 
 interface FormValues {
@@ -71,16 +76,153 @@ const counterBtnStyle: React.CSSProperties = {
   padding: 0,
 }
 
-const GuestCounter: React.FC<{ label: string; value: number; onChange: (v: number) => void }> = ({ label, value, onChange }) => (
-  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 4px' }}>
-    <span style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>{label}</span>
+const GuestCounter: React.FC<{
+  label: string
+  value: number
+  onChange: (v: number) => void
+  /** Потолок (число едоков не бывает больше числа гостей). Без него — без ограничения. */
+  max?: number
+  small?: boolean
+}> = ({ label, value, onChange, max, small }) => (
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: small ? '4px 4px' : '7px 4px' }}>
+    <span style={{ fontSize: small ? '0.85rem' : '0.95rem', color: 'var(--text-muted)' }}>{label}</span>
     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
       <button type="button" onClick={() => onChange(Math.max(0, value - 1))} style={counterBtnStyle}>−</button>
       <span className="mono" style={{ minWidth: 22, textAlign: 'center', fontSize: '0.95rem', fontWeight: 600 }}>{value}</span>
-      <button type="button" onClick={() => onChange(value + 1)} style={counterBtnStyle}>+</button>
+      <button
+        type="button"
+        onClick={() => onChange(max != null ? Math.min(max, value + 1) : value + 1)}
+        disabled={max != null && value >= max}
+        style={{ ...counterBtnStyle, opacity: max != null && value >= max ? 0.4 : 1 }}
+      >+</button>
     </div>
   </div>
 )
+
+// ─── Строка услуги в форме брони ──────────────────────────────────────────────
+// Питание и доп. услуги устроены одинаково: услуга + сколько людей ей пользуется
+// (или сколько раз). Разница только в том, как строка появляется: питание —
+// галочкой из списка, доп. услуга — выбором из справочника.
+
+const UNIT_HINTS: Record<string, string> = {
+  per_person_night: 'за человека в сутки',
+  per_night: 'за сутки',
+  per_person: 'за человека',
+  per_booking: 'разово',
+}
+
+const ServiceRow: React.FC<{
+  service: Service
+  link?: ServiceLink
+  guests: GuestTotals
+  disabled?: boolean
+  onToggle: () => void
+  onPatch: (patch: Partial<ServiceLink>) => void
+}> = ({ service, link, guests, disabled, onToggle, onPatch }) => {
+  const on = !!link
+  const isMeal = service.kind === 'meal'
+  const perPerson = isPerPerson(service.unit)
+  const maxAdults = guests.adults + guests.extraBeds
+  // Детей показываем, только если они есть — иначе счётчик-пустышка в каждой строке
+  const showChildren = guests.children > 0 || (link?.children ?? 0) > 0
+
+  return (
+    <div style={{
+      borderTop: '1px solid var(--border-subtle)', padding: '6px 0',
+    }}>
+      {/* Название на своей строке: цена с единицей начисления рядом с ним съедала
+          его до одной буквы («З 3 500 ₸ · за человека в сутки»). */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0, cursor: disabled ? 'default' : 'pointer' }}>
+          <input type="checkbox" checked={on} disabled={disabled} onChange={onToggle} style={{ flexShrink: 0 }} />
+          <span style={{ fontSize: '0.92rem', color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {service.name}
+          </span>
+        </label>
+        {!isMeal && on && (
+          <button type="button" disabled={disabled} onClick={onToggle} title="Убрать услугу"
+            style={{ ...counterBtnStyle, width: 24, height: 24, fontSize: '0.9rem', flexShrink: 0 }}>×</button>
+        )}
+      </div>
+      <div style={{ paddingLeft: 22, fontSize: '0.75rem', color: 'var(--text-faint)' }}>
+        {service.price > 0
+          ? `${service.price.toLocaleString('ru-RU')} ₸${service.childPrice != null ? ` · дети ${service.childPrice.toLocaleString('ru-RU')} ₸` : ''}`
+          : 'цена не задана'}
+        {' · '}{UNIT_HINTS[service.unit] ?? service.unit}
+      </div>
+
+      {on && link && (
+        <div style={{ paddingLeft: 22 }}>
+          {perPerson ? (
+            <>
+              <GuestCounter
+                small
+                label={showChildren ? 'Взрослых' : 'Человек'}
+                value={link.adults}
+                max={maxAdults}
+                onChange={(v) => onPatch({ adults: v })}
+              />
+              {showChildren && (
+                <GuestCounter
+                  small
+                  label="Детей"
+                  value={link.children}
+                  max={guests.children}
+                  onChange={(v) => onPatch({ children: v })}
+                />
+              )}
+            </>
+          ) : (
+            <GuestCounter
+              small
+              label={service.unit === 'per_night' ? 'Штук на ночь' : 'Количество'}
+              value={link.quantity}
+              onChange={(v) => onPatch({ quantity: v })}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Выбор услуги из справочника — вторая половина блока «Доп. услуги». */
+const AddServiceRow: React.FC<{
+  services: Service[]
+  disabled?: boolean
+  onAdd: (serviceId: number) => void
+}> = ({ services, disabled, onAdd }) => {
+  const [value, setValue] = useState(0)
+  if (services.length === 0) {
+    return (
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', padding: '8px 4px 4px', lineHeight: 1.4 }}>
+        Все услуги из справочника уже добавлены. Новые заводятся в разделе
+        «Тарифы и наличие» → вкладка «Услуги».
+      </div>
+    )
+  }
+  return (
+    <div style={{ display: 'flex', gap: 6, padding: '10px 0 4px' }}>
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={e => setValue(Number(e.target.value))}
+        style={{ ...selectStyle, flex: 1, minWidth: 0, fontSize: '0.88rem' }}
+      >
+        <option value={0}>— добавить услугу —</option>
+        {services.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+      <button
+        type="button"
+        disabled={disabled || value === 0}
+        onClick={() => { onAdd(value); setValue(0) }}
+        style={{ ...cancelBtnStyle, padding: '6px 12px', fontSize: '0.88rem', opacity: value === 0 ? 0.5 : 1 }}
+      >
+        Добавить
+      </button>
+    </div>
+  )
+}
 
 // Сворачиваемая секция (прогрессивное раскрытие) — по дизайну «Бронь».
 // Редко используемые группы свёрнуты по умолчанию; в свёрнутом виде показывают итог.
@@ -180,12 +322,23 @@ const ResultCard: React.FC<ResultCardProps> = ({
 
   // Ни на одну ночь нет цены в календаре: 0 из калькулятора — это не цена
   if (result.nights > 0 && result.noRates && categoryName) {
+    // Питание и услуги свою цену имеют и начислятся всё равно. Молчать о них
+    // нельзя: администратор увидел бы «итог не рассчитан», сохранил — и в брони
+    // появилась бы сумма из ниоткуда.
+    const svcTotal = result.breakdown
+      .filter(l => l.kind !== 'stay')
+      .reduce((sum, l) => sum + l.amount, 0)
     return (
       <div style={{ textAlign: 'center', color: '#b45309', fontSize: '0.95rem', padding: '12px 0' }}>
-        Для категории «{categoryName}» на эти даты нет цен в календаре — итог не рассчитан.
+        Для категории «{categoryName}» на эти даты нет цен в календаре — проживание не рассчитано.
         <div style={{ fontSize: '0.82rem', color: '#9ca3af', marginTop: 4 }}>
           Цены заполняются в разделе «Тарифы и наличие».
         </div>
+        {svcTotal > 0 && (
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #e5e7eb', color: '#374151', fontSize: '0.9rem' }}>
+            Питание и услуги начислятся: <strong>{fmt(svcTotal)}</strong>
+          </div>
+        )}
       </div>
     )
   }
@@ -273,20 +426,26 @@ export const BookingModal: React.FC = () => {
   // Квота партнёра: сервер вернул 409 ALLOTMENT_CONFLICT, ждём осознанного подтверждения
   const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
   const pendingValues = useRef<FormValues | null>(null)
+  // Подставили ли в НОВУЮ бронь услуги «включено в тариф». Отметка нужна, потому что
+  // справочник услуг грузится асинхронно: без неё повторная загрузка вернула бы
+  // снятые галочки обратно.
+  const linksSeeded = useRef(false)
 
   // Цены — из календаря RatePrice, а не из localStorage: одна цена на каждую ночь
   const [pricingBase, setPricingBase] = useState<PricingBase>('person')
-  const [autoServices, setAutoServices] = useState<Service[]>([])
+  const [allServices, setAllServices] = useState<Service[]>([])
+  const [mealPlans, setMealPlans] = useState<MealPlan[]>([])
   const [ratesByDate, setRatesByDate] = useState<Record<string, RatePrice>>({})
   const [ratesLoading, setRatesLoading] = useState(false)
 
-  // Calculator state
-  const [adultsWithMeals, setAdultsWithMeals] = useState(0)
-  const [childrenWithMeals, setChildrenWithMeals] = useState(0)
-  const [adultsNoMeals, setAdultsNoMeals] = useState(0)
-  const [childrenNoMeals, setChildrenNoMeals] = useState(0)
-  const [extraBedsWithMeals, setExtraBedsWithMeals] = useState(0)
-  const [extraBedsNoMeals, setExtraBedsNoMeals] = useState(0)
+  // Гости — три счётчика, а не шесть. Деление «с питанием / без питания» ушло:
+  // на проживание оно не влияло (счётчики складывались), а кому начислять питание,
+  // теперь говорит блок «Питание» — по каждой услуге отдельно.
+  const [adults, setAdults] = useState(0)
+  const [children, setChildren] = useState(0)
+  const [extraBeds, setExtraBeds] = useState(0)
+  // Питание и услуги этой брони
+  const [serviceLinks, setServiceLinks] = useState<ServiceLink[]>([])
   const [disabledAdults, setDisabledAdults] = useState(0)
   const [disabledChildren, setDisabledChildren] = useState(0)
   const [discountPercent, setDiscountPercent] = useState(0)
@@ -324,23 +483,31 @@ export const BookingModal: React.FC = () => {
     fetchRooms({ isActive: true }).then(r => setRooms([...r].sort(compareRooms)))
   }, [])
 
-  // Настройки объекта и автоматически начисляемые услуги — общие для всей формы.
+  // Настройки объекта, справочник услуг и пресеты пансиона — общие для всей формы.
   // pricingBase решает, какие поля цены значимы: 'room' — за номер, 'person' — за место.
+  // Услуги берём ВСЕ активные: питание выбирается галочками, а не флагом в справочнике.
   useEffect(() => {
     fetchHotel().then(h => setPricingBase(h.pricingBase)).catch(() => {})
     fetchServices()
-      .then(list => setAutoServices(list.filter(s => s.isActive && s.includedByDefault)))
-      .catch(() => setAutoServices([]))
+      .then(list => setAllServices(list.filter(s => s.isActive)))
+      .catch(() => setAllServices([]))
+    fetchMealPlans().then(setMealPlans).catch(() => setMealPlans([]))
   }, [])
 
-  // Счётчики гостей, скидка, предоплата, «Оплачено» — из брони; {} даёт сброс для create
+  const servicesById = useMemo(
+    () => new Map(allServices.map(s => [s.id, s])),
+    [allServices],
+  )
+  const mealServices = useMemo(() => allServices.filter(s => s.kind === 'meal'), [allServices])
+  const extraServices = useMemo(() => allServices.filter(s => s.kind !== 'meal'), [allServices])
+
+  // Счётчики гостей, скидка, предоплата, «Оплачено» — из брони; {} даёт сброс для create.
+  // Старые брони держат гостей в ДВУХ колонках («с питанием» / «без питания») —
+  // складываем: в форме тип гостя один, а питание живёт отдельным блоком.
   const applyCalcFields = (b: Partial<Booking>) => {
-    setAdultsWithMeals(b.adultsWithMeals ?? 0)
-    setChildrenWithMeals(b.childrenWithMeals ?? 0)
-    setAdultsNoMeals(b.adultsNoMeals ?? 0)
-    setChildrenNoMeals(b.childrenNoMeals ?? 0)
-    setExtraBedsWithMeals(b.extraBedsWithMeals ?? 0)
-    setExtraBedsNoMeals(b.extraBedsNoMeals ?? 0)
+    setAdults((b.adultsWithMeals ?? 0) + (b.adultsNoMeals ?? 0))
+    setChildren((b.childrenWithMeals ?? 0) + (b.childrenNoMeals ?? 0))
+    setExtraBeds((b.extraBedsWithMeals ?? 0) + (b.extraBedsNoMeals ?? 0))
     setDisabledAdults(b.disabledAdults ?? 0)
     setDisabledChildren(b.disabledChildren ?? 0)
     setDiscountPercent(b.discountPercent ?? 0)
@@ -375,6 +542,7 @@ export const BookingModal: React.FC = () => {
       // Гостей и деньги ВСЕГДА берём с сервера: объект из сетки может быть частичным,
       // и раньше `?? 0` обнулял их при сохранении. Пока грузится — «Сохранить» заблокирована.
       setServerBooking(null)
+      setServiceLinks([])
       setRecalc(false)
       setLoadingBooking(true)
       fetchBooking(booking.id)
@@ -382,6 +550,8 @@ export const BookingModal: React.FC = () => {
           if (cancelled) return
           setServerBooking(full)
           applyCalcFields(full)
+          // Питание и услуги приходят только из GET /bookings/:id — в объекте сетки их нет
+          setServiceLinks(linksFromBooking(full.services))
         })
         .catch(() => {
           if (!cancelled) setApiError('Не удалось загрузить бронь целиком, суммы могут быть неточными')
@@ -407,6 +577,11 @@ export const BookingModal: React.FC = () => {
       setServerBooking(null)
       setRecalc(false)
       setLoadingBooking(false)
+      // Новая бронь получает услуги «включено в тариф». Справочник мог ещё не
+      // загрузиться — тогда набор подставит эффект ниже, поэтому снимаем отметку.
+      linksSeeded.current = false
+      setServiceLinks(defaultLinks(allServices, { adults: 0, children: 0, extraBeds: 0 }))
+      if (allServices.length > 0) linksSeeded.current = true
     }
     setConflict(null)
     setApiError('')
@@ -418,6 +593,69 @@ export const BookingModal: React.FC = () => {
     // Закрыли модалку (или открыли другую бронь) до ответа сервера — ответ игнорируем
     return () => { cancelled = true }
   }, [modal.open, modal.mode, booking?.id])
+
+  const guestTotals = useMemo<GuestTotals>(
+    () => ({ adults, children, extraBeds }),
+    [adults, children, extraBeds],
+  )
+
+  // Справочник услуг мог догрузиться уже после открытия формы — подставляем
+  // «включено в тариф» тогда. Только для новой брони: у сохранённой набор свой.
+  useEffect(() => {
+    if (!modal.open || isEdit || linksSeeded.current || allServices.length === 0) return
+    linksSeeded.current = true
+    setServiceLinks(defaultLinks(allServices, guestTotals))
+  }, [modal.open, isEdit, allServices, guestTotals])
+
+  // Число едоков едет за счётчиками гостей, пока его не задали руками.
+  // Иначе «добавил третьего гостя» молча оставляло бы завтрак на двоих.
+  useEffect(() => {
+    setServiceLinks(prev => syncLinksWithGuests(prev, servicesById, guestTotals))
+  }, [guestTotals, servicesById])
+
+  // ── Действия над питанием и услугами ───────────────────────────────────────
+  const linkOf = (serviceId: number) => serviceLinks.find(l => l.serviceId === serviceId)
+
+  const toggleService = (serviceId: number) => {
+    setServiceLinks(prev => prev.some(l => l.serviceId === serviceId)
+      ? prev.filter(l => l.serviceId !== serviceId)
+      : [...prev, newLink(serviceId, guestTotals)])
+  }
+
+  const removeService = (serviceId: number) => {
+    setServiceLinks(prev => prev.filter(l => l.serviceId !== serviceId))
+  }
+
+  // Правка вручную помечает строку `custom`: дальше она за счётчиками гостей не едет,
+  // иначе «завтрак на двоих из троих» сбрасывался бы при любой правке состава.
+  const patchLink = (serviceId: number, patch: Partial<ServiceLink>) => {
+    setServiceLinks(prev => prev.map(l => (
+      l.serviceId === serviceId ? { ...l, ...patch, custom: true } : l
+    )))
+  }
+
+  /** Пресет пансиона: включает ровно свой набор питания, остальное снимает. */
+  const applyMealPlan = (plan: MealPlan) => {
+    const wanted = new Set(plan.serviceCodes)
+    const mealIds = new Set(mealServices.filter(s => wanted.has(s.code)).map(s => s.id))
+    setServiceLinks(prev => [
+      // Доп. услуги пресет питания не трогает — это разные блоки формы
+      ...prev.filter(l => servicesById.get(l.serviceId)?.kind !== 'meal'),
+      ...[...mealIds].map(id => prev.find(l => l.serviceId === id) ?? newLink(id, guestTotals)),
+    ])
+  }
+
+  const activeMealCodes = useMemo(() => {
+    const codes = serviceLinks
+      .map(l => servicesById.get(l.serviceId))
+      .filter((s): s is Service => !!s && s.kind === 'meal')
+      .map(s => s.code)
+    return new Set(codes)
+  }, [serviceLinks, servicesById])
+
+  const isPlanActive = (plan: MealPlan) =>
+    plan.serviceCodes.length === activeMealCodes.size
+    && plan.serviceCodes.every(c => activeMealCodes.has(c))
 
   // Watched form fields
   const watchedRoomId  = watch('roomId')
@@ -455,43 +693,58 @@ export const BookingModal: React.FC = () => {
     return () => { cancelled = true }
   }, [categoryId, watchedCheckIn, watchedCheckOut])
 
+  // services: [] — услуги калькулятор больше не считает сам. Он не знает, скольким
+  // гостям начислено питание: это сказано строками BookingService, и предпросмотр
+  // по ним собирается ниже (servicePreviewLines).
   const rateCtx = useMemo<RateContext>(
-    () => ({ pricingBase, ratesByDate, services: autoServices }),
-    [pricingBase, ratesByDate, autoServices],
+    () => ({ pricingBase, ratesByDate, services: [] }),
+    [pricingBase, ratesByDate],
   )
 
-  // Доп. места показываем, если цена на них есть в календаре (или они уже проставлены в брони)
-  const hasExtraBeds = useMemo(
-    () => extraBedsWithMeals + extraBedsNoMeals > 0
-      || Object.values(ratesByDate).some(r => r.extraBedPrice != null),
-    [ratesByDate, extraBedsWithMeals, extraBedsNoMeals],
-  )
-
-  // Входы калькулятора — общие для расчёта и для ключа «изменились ли входы»
+  // Входы калькулятора — общие для расчёта и для ключа «изменились ли входы».
+  // Три счётчика формы кладём в поля `*WithMeals`: на проживание деление не влияет,
+  // а старые поля остаются ради 107 существующих броней (см. NOTES).
   const calcInput = useMemo<CalcInput>(() => ({
     checkIn: watchedCheckIn,
     checkOut: watchedCheckOut,
     categoryId,
     categoryName,
-    adultsWithMeals,
-    childrenWithMeals,
-    adultsNoMeals,
-    childrenNoMeals,
-    extraBedsWithMeals,
-    extraBedsNoMeals,
+    adultsWithMeals: adults,
+    childrenWithMeals: children,
+    adultsNoMeals: 0,
+    childrenNoMeals: 0,
+    extraBedsWithMeals: extraBeds,
+    extraBedsNoMeals: 0,
     disabledAdults,
     disabledChildren,
     discountPercent,
     prepaymentPercent,
   }), [
     watchedCheckIn, watchedCheckOut, categoryId, categoryName,
-    adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
-    extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
+    adults, children, extraBeds, disabledAdults, disabledChildren,
     discountPercent, prepaymentPercent,
   ])
 
-  // Calculator result
-  const calcResult = useMemo(() => calculate(calcInput, rateCtx), [calcInput, rateCtx])
+  // Проживание — из калькулятора, услуги — из выбранных строк. Складываем здесь,
+  // потому что скидка считается от ВСЕГО счёта: так же, как её пишет сервер.
+  const calcResult = useMemo<CalcResult>(() => {
+    const base = calculate(calcInput, rateCtx)
+    const svc: BreakdownLine[] = servicePreviewLines(serviceLinks, servicesById, base.nights)
+    if (svc.length === 0) return base
+
+    const total = base.total + svc.reduce((s, l) => s + l.amount, 0)
+    const discount = discountPercent > 0 ? Math.round(total * discountPercent / 100) : 0
+    const totalAfterDiscount = total - discount
+    const prepaid = Math.round(totalAfterDiscount * (prepaymentPercent / 100))
+    return {
+      ...base,
+      breakdown: [...base.breakdown, ...svc],
+      total,
+      totalAfterDiscount,
+      prepaidAmount: prepaid,
+      remaining: totalAfterDiscount - prepaid,
+    }
+  }, [calcInput, rateCtx, serviceLinks, servicesById, discountPercent, prepaymentPercent])
 
   // Базовый ключ входов — из СЕРВЕРНОЙ версии брони (категория: room.category.name из BOOKING_SELECT)
   const baseCalcKey = useMemo(() => {
@@ -501,12 +754,15 @@ export const BookingModal: React.FC = () => {
       checkOut: serverBooking.checkOut.slice(0, 10),
       categoryId: serverBooking.room?.category?.id ?? 0,
       categoryName: serverBooking.room?.category?.name ?? '',
-      adultsWithMeals: serverBooking.adultsWithMeals ?? 0,
-      childrenWithMeals: serverBooking.childrenWithMeals ?? 0,
-      adultsNoMeals: serverBooking.adultsNoMeals ?? 0,
-      childrenNoMeals: serverBooking.childrenNoMeals ?? 0,
-      extraBedsWithMeals: serverBooking.extraBedsWithMeals ?? 0,
-      extraBedsNoMeals: serverBooking.extraBedsNoMeals ?? 0,
+      // Сравниваем в той же системе координат, что и форма: гости сложены по типам,
+      // иначе открытие старой брони «с питанием + без питания» само выглядело бы
+      // как изменение и переоценивало её по сегодняшнему тарифу.
+      adultsWithMeals: (serverBooking.adultsWithMeals ?? 0) + (serverBooking.adultsNoMeals ?? 0),
+      childrenWithMeals: (serverBooking.childrenWithMeals ?? 0) + (serverBooking.childrenNoMeals ?? 0),
+      adultsNoMeals: 0,
+      childrenNoMeals: 0,
+      extraBedsWithMeals: (serverBooking.extraBedsWithMeals ?? 0) + (serverBooking.extraBedsNoMeals ?? 0),
+      extraBedsNoMeals: 0,
       disabledAdults: serverBooking.disabledAdults ?? 0,
       disabledChildren: serverBooking.disabledChildren ?? 0,
       discountPercent: serverBooking.discountPercent ?? 0,
@@ -514,11 +770,19 @@ export const BookingModal: React.FC = () => {
     })
   }, [serverBooking])
 
+  // Питание — такой же вход тарифа, как даты и гости: сняли обед — итог обязан
+  // пересчитаться, иначе форма показывала бы старую сохранённую сумму.
+  const baseServicesKey = useMemo(
+    () => (serverBooking ? linksKey(linksFromBooking(serverBooking.services)) : null),
+    [serverBooking],
+  )
+
   // В edit итог пересчитываем только если изменились входы калькулятора (даты, категория, гости,
   // скидка, предоплата) или админ нажал «Пересчитать по тарифу». Иначе правка заметки на ноутбуке
   // с другим тарифом в localStorage молча переоценивала бронь.
   // rooms.length > 0: пока номера не загружены, categoryName пустой и ключи различались бы ложно.
-  const inputsChanged = isEdit && baseCalcKey !== null && rooms.length > 0 && baseCalcKey !== buildCalcKey(calcInput)
+  const inputsChanged = isEdit && baseCalcKey !== null && rooms.length > 0
+    && (baseCalcKey !== buildCalcKey(calcInput) || baseServicesKey !== linksKey(serviceLinks))
   const sendTotals = !isEdit || recalc || inputsChanged
   // Цен на эти даты нет (или ещё грузятся): 0 из калькулятора — не цена, суммы не отправляем.
   // Итог всё равно соберёт сервер из строк начислений — он и есть источник истины.
@@ -589,13 +853,21 @@ export const BookingModal: React.FC = () => {
         source: isMaintenance ? 'ремонт' : (values.source || undefined),
         notes: values.notes.trim() || undefined,
         status: (!isEdit && values.immediateCheckIn) ? ('CHECKED_IN' as const) : undefined,
-        // Calculator fields
-        adultsWithMeals,
-        childrenWithMeals,
-        adultsNoMeals,
-        childrenNoMeals,
-        extraBedsWithMeals,
-        extraBedsNoMeals,
+        // Гости. Форма считает их по типам один раз, поэтому всех пишем в поля
+        // `*WithMeals`, а парные `*NoMeals` обнуляем: колонки остались ради 107
+        // старых броней, но новые данные больше не разбиваются надвое —
+        // кому начислять питание, сказано в `services`.
+        adultsWithMeals: adults,
+        childrenWithMeals: children,
+        adultsNoMeals: 0,
+        childrenNoMeals: 0,
+        extraBedsWithMeals: extraBeds,
+        extraBedsNoMeals: 0,
+        // Питание и услуги — целиком: сервер заменяет набор, снятая галочка = удаление.
+        // Но если полную бронь загрузить не удалось, набор в форме пустой не потому,
+        // что питание сняли, а потому что его не показали — тогда поле не отправляем
+        // вовсе, и сервер оставляет услуги брони как есть.
+        ...(!isEdit || serverBooking ? { services: linksToPayload(serviceLinks) } : {}),
         disabledAdults,
         disabledChildren,
         discountPercent,
@@ -1219,26 +1491,82 @@ export const BookingModal: React.FC = () => {
                 />
               )}
 
-              <CalcSection title="Гости с питанием" badge={adultsWithMeals + childrenWithMeals}>
-                <GuestCounter label="Взрослые" value={adultsWithMeals} onChange={setAdultsWithMeals} />
-                <GuestCounter label="Дети" value={childrenWithMeals} onChange={setChildrenWithMeals} />
+              {/* ── 1. Гости ── три счётчика вместо шести. Типы разделены, потому что
+                  в календаре цен у взрослого, ребёнка и доп. места РАЗНЫЕ цены. */}
+              <CalcSection title="Гости" badge={adults + children + extraBeds}>
+                <GuestCounter label="Взрослые" value={adults} onChange={setAdults} />
+                <GuestCounter label="Дети" value={children} onChange={setChildren} />
+                <GuestCounter label="Доп. места" value={extraBeds} onChange={setExtraBeds} />
               </CalcSection>
 
-              <CalcSection title="Гости без питания" defaultOpen={adultsNoMeals + childrenNoMeals > 0} badge={adultsNoMeals + childrenNoMeals}>
-                <GuestCounter label="Взрослые" value={adultsNoMeals} onChange={setAdultsNoMeals} />
-                <GuestCounter label="Дети" value={childrenNoMeals} onChange={setChildrenNoMeals} />
-                <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', padding: '2px 4px 6px', lineHeight: 1.4 }}>
-                  Проживание считается всем одинаково. Питание начисляется только гостям
-                  «с питанием» — отдельными строками по услугам.
-                </div>
+              {/* ── 2. Питание ── у каждой галочки своё число едоков: «завтрак на
+                  двоих из троих» — обычная ситуация, а не исключение. */}
+              <CalcSection title="Питание" badge={activeMealCodes.size}>
+                {mealPlans.length > 0 && (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '6px 0 10px' }}>
+                    {mealPlans.map(p => {
+                      const active = isPlanActive(p)
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          disabled={isClosed}
+                          onClick={() => applyMealPlan(p)}
+                          style={{
+                            padding: '5px 11px', borderRadius: 20,
+                            border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                            background: active ? 'var(--accent-bg)' : 'var(--surface)',
+                            color: active ? 'var(--accent-text)' : 'var(--text-muted)',
+                            fontSize: '0.85rem', fontWeight: active ? 700 : 500,
+                            cursor: isClosed ? 'default' : 'pointer', fontFamily: 'inherit',
+                          }}
+                        >
+                          {p.name}
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                {mealServices.length === 0 ? (
+                  <div style={{ fontSize: '0.82rem', color: 'var(--text-faint)', padding: '4px 4px 8px', lineHeight: 1.4 }}>
+                    Питание не заведено. Раздел «Тарифы и наличие» → вкладка «Питание».
+                  </div>
+                ) : mealServices.map(s => (
+                  <ServiceRow
+                    key={s.id}
+                    service={s}
+                    link={linkOf(s.id)}
+                    guests={guestTotals}
+                    disabled={isClosed}
+                    onToggle={() => toggleService(s.id)}
+                    onPatch={(patch) => patchLink(s.id, patch)}
+                  />
+                ))}
               </CalcSection>
 
-              {hasExtraBeds && (
-                <CalcSection title="Дополнительные места" defaultOpen={extraBedsWithMeals + extraBedsNoMeals > 0} badge={extraBedsWithMeals + extraBedsNoMeals}>
-                  <GuestCounter label="С питанием" value={extraBedsWithMeals} onChange={setExtraBedsWithMeals} />
-                  <GuestCounter label="Без питания" value={extraBedsNoMeals} onChange={setExtraBedsNoMeals} />
-                </CalcSection>
-              )}
+              {/* ── 3. Доп. услуги ── из того же справочника, но добавляются поштучно */}
+              <CalcSection
+                title="Доп. услуги"
+                defaultOpen={serviceLinks.some(l => servicesById.get(l.serviceId)?.kind !== 'meal')}
+                badge={serviceLinks.filter(l => servicesById.get(l.serviceId)?.kind !== 'meal').length}
+              >
+                {extraServices.filter(s => linkOf(s.id)).map(s => (
+                  <ServiceRow
+                    key={s.id}
+                    service={s}
+                    link={linkOf(s.id)}
+                    guests={guestTotals}
+                    disabled={isClosed}
+                    onToggle={() => removeService(s.id)}
+                    onPatch={(patch) => patchLink(s.id, patch)}
+                  />
+                ))}
+                <AddServiceRow
+                  services={extraServices.filter(s => !linkOf(s.id))}
+                  disabled={isClosed}
+                  onAdd={(id) => toggleService(id)}
+                />
+              </CalcSection>
 
               <CalcSection title="Гости с инвалидностью" defaultOpen={disabledAdults + disabledChildren > 0} badge={disabledAdults + disabledChildren}>
                 <GuestCounter label="Взрослые" value={disabledAdults} onChange={setDisabledAdults} />

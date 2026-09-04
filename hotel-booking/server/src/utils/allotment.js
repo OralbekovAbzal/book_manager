@@ -31,18 +31,39 @@ function releasedDays(allotment) {
   return set
 }
 
+/** Мешает ли конкретная квота брони в этот период (с учётом релизов). */
+function quotaBlocks(a, from, to, partnerId) {
+  // Бронь самого партнёра в его же квоту — это и есть её назначение.
+  if (partnerId && a.partnerId === parseInt(partnerId)) return false
+
+  const overlapFrom = Math.max(toUTC(a.dateFrom).getTime(), from.getTime())
+  const overlapTo = Math.min(toUTC(a.dateTo).getTime(), to.getTime())
+  if (!(overlapTo > overlapFrom)) return false
+
+  // Если КАЖДЫЙ день пересечения освобождён релизом — квота не мешает.
+  const released = releasedDays(a)
+  for (let t = overlapFrom; t < overlapTo; t += DAY) {
+    if (!released.has(t)) return true
+  }
+  return false
+}
+
 /**
- * Ищет квоту другого партнёра, мешающую этой брони.
+ * Ищет квоты, мешающие брони, сразу по нескольким номерам — ОДНИМ запросом.
+ * Нужно подбору номеров (utils/availability.js): там номеров сотни, и запрос
+ * на каждый превратил бы экран подбора в сотню обращений к базе.
  *
- * @returns {Promise<{partnerName: string, dateFrom: Date, dateTo: Date}|null>}
+ * @returns {Promise<Map<number, {partnerName: string, dateFrom: Date, dateTo: Date}>>}
  */
-async function findAllotmentConflict({ roomId, checkIn, checkOut, partnerId }) {
+async function findAllotmentConflictsBulk({ roomIds, checkIn, checkOut, partnerId }) {
+  const hits = new Map()
   const from = toUTC(checkIn)
   const to = toUTC(checkOut)
-  if (!(to > from)) return null
+  const ids = (roomIds || []).map((r) => parseInt(r))
+  if (!(to > from) || !ids.length) return hits
 
   const allotments = await prisma.allotment.findMany({
-    where: { roomId: parseInt(roomId), dateFrom: { lt: to }, dateTo: { gt: from } },
+    where: { roomId: { in: ids }, dateFrom: { lt: to }, dateTo: { gt: from } },
     include: {
       partner: { select: { id: true, name: true } },
       releases: true,
@@ -50,28 +71,25 @@ async function findAllotmentConflict({ roomId, checkIn, checkOut, partnerId }) {
   })
 
   for (const a of allotments) {
-    // Бронь самого партнёра в его же квоту — это и есть её назначение.
-    if (partnerId && a.partnerId === parseInt(partnerId)) continue
-
-    const overlapFrom = Math.max(toUTC(a.dateFrom).getTime(), from.getTime())
-    const overlapTo = Math.min(toUTC(a.dateTo).getTime(), to.getTime())
-    if (!(overlapTo > overlapFrom)) continue
-
-    // Если КАЖДЫЙ день пересечения освобождён релизом — квота не мешает.
-    const released = releasedDays(a)
-    let blocked = false
-    for (let t = overlapFrom; t < overlapTo; t += DAY) {
-      if (!released.has(t)) { blocked = true; break }
-    }
-    if (!blocked) continue
-
-    return {
+    if (hits.has(a.roomId)) continue
+    if (!quotaBlocks(a, from, to, partnerId)) continue
+    hits.set(a.roomId, {
       partnerName: a.partner?.name ?? 'партнёр',
       dateFrom: a.dateFrom,
       dateTo: a.dateTo,
-    }
+    })
   }
-  return null
+  return hits
+}
+
+/**
+ * Ищет квоту другого партнёра, мешающую этой брони.
+ *
+ * @returns {Promise<{partnerName: string, dateFrom: Date, dateTo: Date}|null>}
+ */
+async function findAllotmentConflict({ roomId, checkIn, checkOut, partnerId }) {
+  const hits = await findAllotmentConflictsBulk({ roomIds: [roomId], checkIn, checkOut, partnerId })
+  return hits.get(parseInt(roomId)) ?? null
 }
 
 /** Текст ошибки для 409. */
@@ -81,4 +99,4 @@ function allotmentConflictMessage(hit) {
     'Освободите период релизом или подтвердите бронирование поверх квоты.'
 }
 
-module.exports = { findAllotmentConflict, allotmentConflictMessage }
+module.exports = { findAllotmentConflict, findAllotmentConflictsBulk, allotmentConflictMessage }

@@ -21,50 +21,77 @@ async function getFlagEffectsMap() {
 
 function invalidateFlagCache() { _cache = null; _ts = 0 }
 
-/** Сворачивает эффекты всех меток брони в буферы + признак pin + исключение буфера. */
+/**
+ * Сворачивает эффекты всех меток брони в буферы + признак pin.
+ *
+ * Буфер «после» НЕЛЬЗЯ сворачивать в одно число вместе с исключением:
+ * исключение (`bufferAfterExceptFlag`) принадлежит СВОЕЙ метке, а не брони целиком.
+ * Раньше здесь копился один общий `exceptAfterFlag` от любой метки, у которой он есть,
+ * и снимал ОБЩИЙ максимум буфера: «генеральная уборка» с зазором в двое суток
+ * обнулялась меткой «заезд после 17:00», к уборке отношения не имеющей.
+ * Поэтому храним СПИСОК правил `afterRules: [{ days, exceptFlag }]` — по одному
+ * на каждую метку с буфером, — а максимум считаем уже с учётом меток соседа
+ * (см. afterWithException). `after` остаётся «сырым» максимумом для тех мест,
+ * где нужен буфер без оглядки на соседа (метрики, показ требуемого зазора).
+ */
 function bookingBuffers(flagCodes, effMap) {
-  let after = 0, before = 0, pin = false, exceptAfterFlag = null
+  let after = 0, before = 0, pin = false
+  const afterRules = []
   for (const c of flagCodes || []) {
     const e = effMap[c]
     if (!e) continue
-    if (e.bufferAfter) after = Math.max(after, Number(e.bufferAfter) || 0)
+    const days = Number(e.bufferAfter) || 0
+    if (days > 0) {
+      after = Math.max(after, days)
+      afterRules.push({ days, exceptFlag: e.bufferAfterExceptFlag || null })
+    }
     if (e.bufferBefore) before = Math.max(before, Number(e.bufferBefore) || 0)
     if (e.pin) pin = true
-    if (e.bufferAfterExceptFlag) exceptAfterFlag = e.bufferAfterExceptFlag
   }
-  return { after, before, pin, exceptAfterFlag }
+  return { after, before, pin, afterRules }
 }
 
-/** Буфер «после» с учётом исключения: снимается, если у СЛЕДУЮЩЕЙ брони есть метка-исключение. */
+/**
+ * Буфер «после» с учётом исключений: у каждой метки своё правило, снимается
+ * только то, чей `exceptFlag` есть у СЛЕДУЮЩЕЙ брони. Из оставшихся берём максимум.
+ */
 function afterWithException(buf, laterFlagCodes) {
-  if (buf.after && buf.exceptAfterFlag && (laterFlagCodes || []).includes(buf.exceptAfterFlag)) return 0
-  return buf.after
+  const rules = buf?.afterRules
+  // Свёртки без списка правил (упрощённые объекты в вызывающем коде) — как раньше
+  if (!Array.isArray(rules)) return buf?.after || 0
+  const later = laterFlagCodes || []
+  let max = 0
+  for (const r of rules) {
+    if (r.exceptFlag && later.includes(r.exceptFlag)) continue
+    if (r.days > max) max = r.days
+  }
+  return max
+}
+
+/** Самый длинный буфер во всём словаре эффектов — ширина окна поиска соседей. */
+function maxBufferDays(effMap) {
+  let max = 0
+  for (const e of Object.values(effMap || {})) {
+    max = Math.max(max, Number(e.bufferAfter) || 0, Number(e.bufferBefore) || 0)
+  }
+  return max
 }
 
 /** Есть ли среди меток вообще какие-то буферы (чтобы не делать лишних проверок). */
 function hasAnyBuffer(effMap) {
-  return Object.values(effMap).some(e => (e.bufferAfter || 0) > 0 || (e.bufferBefore || 0) > 0)
+  return maxBufferDays(effMap) > 0
 }
 
 /**
- * Ищет конфликт по буферу (turnaround) рядом с новой/изменяемой бронью.
- * Прямые пересечения проверяются отдельно (findOverlap) — здесь только зазоры.
+ * Ищет конфликт по буферу среди УЖЕ ПРОЧИТАННЫХ соседей (чистая функция).
+ * Отдельно от findBufferConflict, потому что подбор номеров (utils/availability.js)
+ * читает соседей по всем номерам одним запросом и переиспользует эту логику.
  * @returns {object|null} { booking, required, gapDays } или null
  */
-async function findBufferConflict({ roomId, checkIn, checkOut, flags = [], excludeBookingId = null }, effMap) {
-  if (!hasAnyBuffer(effMap)) return null  // буферов нет — проверять нечего
-
+function bufferConflictAmong(neighbors, { checkIn, checkOut, flags = [] }, effMap) {
   const newIn = new Date(checkIn).getTime()
   const newOut = new Date(checkOut).getTime()
   const newBuf = bookingBuffers(flags, effMap)
-
-  const where = { roomId, status: { in: ACTIVE } }
-  if (excludeBookingId) where.id = { not: excludeBookingId }
-
-  const neighbors = await prisma.booking.findMany({
-    where,
-    select: { id: true, guestName: true, checkIn: true, checkOut: true, flags: true },
-  })
 
   for (const e of neighbors) {
     const eIn = new Date(e.checkIn).getTime()
@@ -85,4 +112,37 @@ async function findBufferConflict({ roomId, checkIn, checkOut, flags = [], exclu
   return null
 }
 
-module.exports = { getFlagEffectsMap, invalidateFlagCache, bookingBuffers, hasAnyBuffer, findBufferConflict }
+/**
+ * Ищет конфликт по буферу (turnaround) рядом с новой/изменяемой бронью.
+ * Прямые пересечения проверяются отдельно (findOverlap) — здесь только зазоры.
+ * @returns {object|null} { booking, required, gapDays } или null
+ */
+async function findBufferConflict({ roomId, checkIn, checkOut, flags = [], excludeBookingId = null }, effMap) {
+  const maxBuf = maxBufferDays(effMap)
+  if (!maxBuf) return null  // буферов нет — проверять нечего
+
+  const newIn = new Date(checkIn).getTime()
+  const newOut = new Date(checkOut).getTime()
+
+  const where = { roomId, status: { in: ACTIVE } }
+  if (excludeBookingId) where.id = { not: excludeBookingId }
+  // Окно по датам: буфер шире самого длинного в словаре быть не может, поэтому
+  // соседи за его пределами конфликтовать не способны. Без окна читались ВСЕ
+  // активные брони номера — лишнее чтение на каждое создание/правку брони и,
+  // тем более, на подбор по всем номерам сразу.
+  // Границы строгие: ровно maxBuf дней зазора — это уже достаточный зазор.
+  where.checkOut = { gt: new Date(newIn - maxBuf * DAY) }
+  where.checkIn = { lt: new Date(newOut + maxBuf * DAY) }
+
+  const neighbors = await prisma.booking.findMany({
+    where,
+    select: { id: true, guestName: true, checkIn: true, checkOut: true, flags: true },
+  })
+
+  return bufferConflictAmong(neighbors, { checkIn, checkOut, flags }, effMap)
+}
+
+module.exports = {
+  getFlagEffectsMap, invalidateFlagCache, bookingBuffers, afterWithException,
+  maxBufferDays, hasAnyBuffer, bufferConflictAmong, findBufferConflict,
+}

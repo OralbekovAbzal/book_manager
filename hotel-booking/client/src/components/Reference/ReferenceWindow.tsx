@@ -1,24 +1,38 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchContacts, createContact, updateContact, deleteContact } from '../../api/contacts'
+import { fetchContacts, createContact, updateContact, deleteContact, createDefaultContacts } from '../../api/contacts'
 import { useAuthStore } from '../../store/useAuthStore'
-import type { Contact } from '../../types'
+import { useGridStore } from '../../store/useGridStore'
+import type { Contact, GuestBooking } from '../../types'
+import { GuestsTab } from './GuestsTab'
 import {
   AddButton, EmptyBox, iconBtn,
   formTitle, inputStyle, labelStyle, errorStyle, primaryBtn, secondaryBtn,
 } from '../Settings/sections/sectionUi'
 
 /**
- * Справочник — контакты сотрудников и служб.
+ * Справочник — две вкладки.
  *
- * Экран построен вокруг поиска: администратор чаще ищет («сантех»), чем листает.
- * Группы фиксированы (пресет, см. GROUPS на сервере) — клиент их не настраивает,
- * только заполняет записи.
+ * «Контакты» — сотрудники и службы, которые заводят руками. Экран построен
+ * вокруг поиска: администратор чаще ищет («сантех»), чем листает. Группы
+ * фиксированы (пресет, см. GROUPS на сервере) — клиент их не настраивает.
+ *
+ * «Гости» — адресная книга постояльцев, которая собирается САМА из существующих
+ * броней (см. GuestsTab и server/src/controllers/guestController.js). Заводить
+ * руками нечего; ключ гостя — телефон, а не имя.
  */
 
 interface Props {
   open: boolean
   onClose: () => void
 }
+
+type Tab = 'contacts' | 'guests'
+
+// Вкладку помним между открытиями: раздел размонтируется при уходе в шахматку
+// (App.tsx рендерит его по условию), и без этого F2 туда-обратно каждый раз
+// возвращал бы на «Контакты».
+const LS_TAB = 'reference_tab'
+const loadTab = (): Tab => (localStorage.getItem(LS_TAB) === 'guests' ? 'guests' : 'contacts')
 
 const GROUPS = ['Экстренные', 'Сотрудники', 'Службы отеля', 'Подрядчики', 'Прочее'] as const
 
@@ -60,6 +74,7 @@ export const ReferenceWindow: React.FC<Props> = ({ open, onClose }) => {
   const admin = useAuthStore(s => s.admin)
   const canEdit = admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN'
 
+  const [tab, setTab] = useState<Tab>(loadTab)
   const [contacts, setContacts] = useState<Contact[]>([])
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState('')
@@ -85,9 +100,49 @@ export const ReferenceWindow: React.FC<Props> = ({ open, onClose }) => {
     setQuery('')
     setGroupFilter('all')
     setEditId(null)
+    if (tab !== 'contacts') return
     const t = window.setTimeout(() => searchRef.current?.focus(), 60)
     return () => window.clearTimeout(t)
+    // tab намеренно не в зависимостях: перезагружать контакты при смене вкладки
+    // незачем, фокус ставим только на первом открытии.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  const switchTab = (next: Tab) => {
+    setTab(next)
+    localStorage.setItem(LS_TAB, next)
+    setEditId(null)
+    if (next === 'contacts') window.setTimeout(() => searchRef.current?.focus(), 30)
+  }
+
+  /**
+   * Переход к брони в шахматке. Поиск по гостю в сетке серверный: он сужает
+   * набор НОМЕРОВ до тех, где есть совпавшая бронь, поэтому связка
+   * «поиск по имени + прыжок на дату заезда» показывает именно нужную полосу.
+   *
+   * Дату приходится выставлять НЕСКОЛЬКО раз, и это не перестраховка. Возвращаясь
+   * в шахматку, заново монтируется `TodayStats`, а он в `useEffect` зовёт
+   * `fetchShiftDate()` — тот дожидается ответа сервера и перецентрирует сетку
+   * на рабочий день, затирая нашу дату. Момент его ответа предсказать нельзя,
+   * поэтому в течение ~секунды проверяем, не «отскочила» ли дата назад, и
+   * возвращаем её. Проверка дешёвая: повторный `jumpToDate` случается только
+   * при реальном отскоке, а устаревшие ответы сетки отсекает её собственный
+   * счётчик запросов (`gridReqSeq` в useGridStore).
+   */
+  const jumpToBooking = (b: GuestBooking) => {
+    useGridStore.getState().setGuestSearch(b.guestName)
+    onClose()                    // раздел меняется на шахматку (см. App.tsx)
+
+    let tries = 0
+    const tick = () => {
+      const s = useGridStore.getState()
+      if (s.dateFrom !== b.checkIn) s.jumpToDate(b.checkIn)  // сам дёргает fetchGrid
+      if (++tries < 6) window.setTimeout(tick, 180)
+    }
+    tick()
+  }
+
+  const [seeding, setSeeding] = useState(false)
 
   // Escape закрывает сначала форму, и только потом весь раздел — иначе одно
   // нажатие выбрасывало бы из справочника вместе с недописанной записью.
@@ -108,6 +163,23 @@ export const ReferenceWindow: React.FC<Props> = ({ open, onClose }) => {
     setToast(text)
     window.clearTimeout(toastTimer.current)
     toastTimer.current = window.setTimeout(() => setToast(''), 1800)
+  }
+
+  // Стандартный набор экстренных служб — тот же приём «пресеты вместо настройки»,
+  // что и у питания (`POST /api/services/defaults`). Идемпотентно: существующее
+  // не трогаем. Кнопка показывается, только пока справочник пуст.
+  const seedDefaults = async () => {
+    setSeeding(true)
+    try {
+      const r = await createDefaultContacts()
+      flash(r.created + r.restored > 0 ? 'Экстренные службы добавлены' : 'Всё уже на месте')
+      load()
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: string } } }
+      alert(err?.response?.data?.error ?? 'Не удалось создать набор')
+    } finally {
+      setSeeding(false)
+    }
   }
 
   // Копирование номера: в Electron окно грузится из file://, поэтому держим
@@ -369,23 +441,48 @@ export const ReferenceWindow: React.FC<Props> = ({ open, onClose }) => {
       display: 'flex', flexDirection: 'column',
       color: 'var(--text)', overflow: 'hidden',
     }}>
-      {/* Шапка */}
+      {/* Шапка. Кнопки «Печать» и «Добавить» принадлежат контактам: гостей
+          не заводят руками и печатать список постояльцев со стойки незачем. */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 14, padding: '0 24px',
         height: 60, borderBottom: '1px solid var(--border)', flexShrink: 0,
       }}>
         <span style={{ fontSize: '1.08rem', fontWeight: 700, letterSpacing: '-0.01em' }}>Справочник</span>
-        <span style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>
-          {contacts.length ? `${contacts.length} ${contactWord(contacts.length)}` : ''}
-        </span>
+
+        <div style={{
+          display: 'inline-flex', alignItems: 'center', gap: 3, padding: 3,
+          background: 'var(--surface-2)', border: '1px solid var(--border-subtle)',
+          borderRadius: 9, flexShrink: 0,
+        }}>
+          <TabBtn active={tab === 'contacts'} label="Контакты" onClick={() => switchTab('contacts')} />
+          <TabBtn active={tab === 'guests'} label="Гости" onClick={() => switchTab('guests')} />
+        </div>
+
+        {tab === 'contacts' && (
+          <span style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>
+            {contacts.length ? `${contacts.length} ${contactWord(contacts.length)}` : ''}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
-        <button onClick={print} style={secondaryBtn} title="Распечатать список">Печать</button>
-        {canEdit && <AddButton onClick={() => startEdit()} label="Добавить контакт" />}
+        {tab === 'contacts' && (
+          <>
+            <button onClick={print} style={secondaryBtn} title="Распечатать список">Печать</button>
+            {canEdit && <AddButton onClick={() => startEdit()} label="Добавить контакт" />}
+          </>
+        )}
         <button onClick={onClose} title="К шахматке (Esc)" style={{
           background: 'none', border: 'none', cursor: 'pointer', fontSize: '1.5rem',
           color: 'var(--text-faint)', padding: '0 4px', lineHeight: 1, fontWeight: 300,
         }}>×</button>
       </div>
+
+      {tab === 'guests' && (
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px 32px' }}>
+          <GuestsTab onCopyPhone={copyPhone} onJump={jumpToBooking} />
+        </div>
+      )}
+
+      {tab === 'contacts' && <>
 
       {/* Поиск и группы — по левому краю контента, а не по центру узкой колонки */}
       <div style={{ padding: '16px 24px 12px', flexShrink: 0 }}>
@@ -454,6 +551,22 @@ export const ReferenceWindow: React.FC<Props> = ({ open, onClose }) => {
               {canEdit
                 ? 'Добавьте сантехника, электрика, прачечную, такси — всех, кому звонят со стойки.'
                 : 'Контакты добавляет администратор.'}
+              {/* Пресет вместо пустого экрана: 103/101/102/104 одинаковы у всех
+                  в стране, и на демо пустой справочник выглядит недоделанным.
+                  Своего сантехника владелец впишет сам — его в набор не кладём. */}
+              {canEdit && (
+                <div style={{ marginTop: 16 }}>
+                  <button onClick={seedDefaults} disabled={seeding} style={{
+                    ...primaryBtn, opacity: seeding ? 0.6 : 1,
+                    cursor: seeding ? 'default' : 'pointer',
+                  }}>
+                    {seeding ? 'Создаём…' : 'Создать стандартный набор'}
+                  </button>
+                  <div style={{ marginTop: 8, fontSize: '0.78rem', color: 'var(--text-faint)' }}>
+                    Скорая 103, пожарная 101, полиция 102, аварийная газовая 104
+                  </div>
+                </div>
+              )}
             </EmptyBox>
           ) : sections.length === 0 ? (
             <EmptyBox>
@@ -485,6 +598,8 @@ export const ReferenceWindow: React.FC<Props> = ({ open, onClose }) => {
           )}
         </div>
       </div>
+
+      </>}
 
       {/* Форма — модальным окном, как бронь и перемещение. Раньше она открывалась
           сверху списка: нажимаешь карандаш на нижней карточке, а форма появляется
@@ -683,6 +798,22 @@ const LinkBtn: React.FC<{ onClick: () => void; children: React.ReactNode }> = ({
     color: 'var(--accent)', fontFamily: 'inherit', fontSize: 'inherit',
     fontWeight: 600, textDecoration: 'underline',
   }}>{children}</button>
+)
+
+/** Переключатель вкладок — тот же «сегмент», что у чипов групп и фильтров сетки. */
+const TabBtn: React.FC<{ active: boolean; label: string; onClick: () => void }> = ({ active, label, onClick }) => (
+  <button
+    onClick={onClick}
+    style={{
+      height: 28, padding: '0 14px', borderRadius: 7, border: 'none',
+      fontFamily: 'inherit', fontSize: '0.86rem', cursor: 'pointer', whiteSpace: 'nowrap',
+      background: active ? 'var(--bg)' : 'transparent',
+      color: active ? 'var(--text)' : 'var(--text-muted)',
+      fontWeight: active ? 600 : 500,
+      boxShadow: active ? 'var(--shadow-sm)' : 'none',
+      transition: 'background 0.12s',
+    }}
+  >{label}</button>
 )
 
 const GroupPill: React.FC<{

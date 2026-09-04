@@ -10,9 +10,12 @@ const logger = require('../utils/logger')
 
 const METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 // Префиксы путей (без /api), которые попадают в журнал целиком
+// Деньги журналируются наравне с бронями: приём оплаты, возврат и отмена записи
+// меняют кассу, и «кто это сделал» должно быть видно в журнале, а не только
+// в самой записи Payment.
 const TRACKED_PREFIXES = [
   '/bookings', '/users', '/rooms', '/categories', '/partners', '/allotments',
-  '/rates', '/hotel', '/system/backup', '/reports',
+  '/rates', '/hotel', '/system/backup', '/reports', '/payments',
 ]
 // POST-запросы, которые ничего не меняют
 const IGNORED = new Set(['/bookings/check-availability'])
@@ -65,6 +68,13 @@ function extractId(routePath, params, responseBody) {
     ? (responseBody.data !== undefined ? responseBody.data : responseBody)
     : null
   if (d && typeof d === 'object' && Number.isInteger(d.id)) return d.id
+  // Часть ответов кладёт созданную сущность на уровень глубже, рядом со сводкой:
+  // POST /payments → { data: { payment, summary } }. Без этого у платежа
+  // в журнале не было бы номера объекта — только «Платёж» без «#6».
+  if (d && typeof d === 'object' && !Array.isArray(d)) {
+    const nested = Object.values(d).find((v) => v && typeof v === 'object' && Number.isInteger(v.id))
+    if (nested) return nested.id
+  }
   return null
 }
 

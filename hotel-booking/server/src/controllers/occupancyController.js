@@ -1,6 +1,7 @@
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
 const { getCurrentBusinessDate } = require('../utils/businessDate')
+const { checkRoomsAvailability, parseFlags } = require('../utils/availability')
 
 // Кэш сетки: инвалидируется при любом изменении брони
 const gridCache = new Map()
@@ -324,11 +325,17 @@ async function today(req, res, next) {
 
 /**
  * GET /api/occupancy/availability?checkIn=YYYY-MM-DD&checkOut=YYYY-MM-DD&excludeBookingId=N
+ *   &flags=late-out,deep-clean&partnerId=N
  * Возвращает доступность всех активных номеров на заданный период.
+ *
+ * «Свободно» считает общая утилита utils/availability — те же три проверки, что
+ * при создании брони: пересечения, буферы меток и квоты партнёров. Раньше здесь
+ * смотрелись только пересечения (да ещё и по другому набору статусов), поэтому
+ * форма брони показывала номер свободным, а сохранение отвечало 409.
  */
 async function roomAvailability(req, res, next) {
   try {
-    const { checkIn, checkOut, excludeBookingId } = req.query
+    const { checkIn, checkOut, excludeBookingId, partnerId } = req.query
 
     if (!checkIn || !checkOut || checkOut <= checkIn) {
       return res.json({ availability: {} })
@@ -340,26 +347,26 @@ async function roomAvailability(req, res, next) {
     })
 
     const roomIds = rooms.map(r => r.id)
-
-    const conflicts = await prisma.booking.findMany({
-      where: {
-        roomId: { in: roomIds },
-        status: { notIn: ['CANCELLED', 'CHECKED_OUT'] },
-        checkIn: { lt: new Date(checkOut) },
-        checkOut: { gt: new Date(checkIn) },
-        ...(excludeBookingId ? { id: { not: parseInt(excludeBookingId) } } : {}),
-      },
-      select: { roomId: true },
+    const checked = await checkRoomsAvailability({
+      roomIds,
+      checkIn,
+      checkOut,
+      flags: parseFlags(req.query.flags),
+      partnerId: partnerId ? parseInt(partnerId) : null,
+      excludeBookingId: excludeBookingId ? parseInt(excludeBookingId) : null,
     })
 
-    const occupiedIds = new Set(conflicts.map(b => b.roomId))
-
+    // Форма брони понимает только 'free' | 'occupied' — форму ответа не меняем,
+    // причину отдаём отдельным полем, чтобы старый клиент продолжал работать.
     const availability = {}
+    const reasons = {}
     for (const roomId of roomIds) {
-      availability[roomId] = occupiedIds.has(roomId) ? 'occupied' : 'free'
+      const st = checked.get(roomId)
+      availability[roomId] = st.available ? 'free' : 'occupied'
+      if (!st.available) reasons[roomId] = { reason: st.reason, text: st.message }
     }
 
-    res.json({ availability })
+    res.json({ availability, reasons })
   } catch (err) {
     next(err)
   }

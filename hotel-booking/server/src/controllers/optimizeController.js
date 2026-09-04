@@ -1,6 +1,6 @@
 const { prisma } = require('../utils/prisma')
 const { getCurrentBusinessDate } = require('../utils/businessDate')
-const { getFlagEffectsMap } = require('../utils/flagEffects')
+const { getFlagEffectsMap, bookingBuffers, afterWithException } = require('../utils/flagEffects')
 const { createSnapshot } = require('../utils/snapshot')
 const { emitBookingEvent } = require('../socket/socketManager')
 const { BOOKING_SELECT } = require('./bookingController')
@@ -150,14 +150,28 @@ function bookingsOverlap(a, b) {
 }
 
 /**
+ * Правила буфера «после» в виде списка [{ days, exceptFlag }].
+ * У броней, собранных optimize(), список уже построен общей свёрткой
+ * (utils/flagEffects → bookingBuffers). Старая плоская форма
+ * `{ bufferAfter, exceptAfterFlag }` — одно правило, поддержана для
+ * вызовов, которые строят бронь вручную.
+ */
+function afterRulesOf(b) {
+  if (Array.isArray(b.afterRules)) return b.afterRules
+  return b.bufferAfter ? [{ days: b.bufferAfter, exceptFlag: b.exceptAfterFlag || null }] : []
+}
+
+/**
  * Требуемый «чистый» зазор (дней) между соседними бронями из-за эффектов меток:
  * буфер после первой (turnaround) и буфер до второй. Берём максимум.
+ *
+ * Исключение: «выезд до 17:00» снимает зазор, если у следующей брони стоит
+ * метка-исключение (заезд после 17:00). У «выезд после 17:00» исключения нет →
+ * зазор остаётся всегда. Считает это общая утилита — здесь была своя копия
+ * свёртки, и в ней исключение ОДНОЙ метки снимало буфер ДРУГОЙ.
  */
 function requiredGap(first, second) {
-  let after = first.bufferAfter || 0
-  // Исключение: «выезд до 17:00» снимает зазор, если у следующей брони стоит метка-исключение
-  // (заезд после 17:00). У «выезд после 17:00» exceptAfterFlag нет → зазор остаётся всегда.
-  if (after && first.exceptAfterFlag && (second.flags || []).includes(first.exceptAfterFlag)) after = 0
+  const after = afterWithException({ after: first.bufferAfter || 0, afterRules: afterRulesOf(first) }, second.flags)
   return Math.max(after, second.bufferBefore || 0)
 }
 
@@ -560,19 +574,19 @@ async function optimize(req, res, next) {
       const room = roomById.get(b.roomId)
       if (!room) continue
 
-      // Сворачиваем эффекты всех меток брони: буферы, pin, блокировка этажа,
-      // требуемая особенность номера, исключение буфера «после».
-      let bufferAfter = 0, bufferBefore = 0, pinned = false
-      let lockFloor = false, requireFeature = null, exceptAfterFlag = null
+      // Буферы и pin сворачивает ОБЩАЯ утилита (utils/flagEffects) — та же, что
+      // проверяет буфер при создании брони. Здесь была своя копия свёртки, и в ней
+      // исключение одной метки снимало буфер другой; две копии разъезжались.
+      const { after: bufferAfter, before: bufferBefore, pin: pinned, afterRules } =
+        bookingBuffers(b.flags, flagEffects)
+
+      // Эффекты, которых нет в свёртке буферов (нужны только оптимизатору).
+      let lockFloor = false, requireFeature = null
       for (const fId of (b.flags || [])) {
         const e = flagEffects[fId]
         if (!e) continue
-        if (e.bufferAfter) bufferAfter = Math.max(bufferAfter, Number(e.bufferAfter) || 0)
-        if (e.bufferBefore) bufferBefore = Math.max(bufferBefore, Number(e.bufferBefore) || 0)
-        if (e.pin) pinned = true
         if (e.lockFloor) lockFloor = true
         if (e.requireFeature) requireFeature = e.requireFeature
-        if (e.bufferAfterExceptFlag) exceptAfterFlag = e.bufferAfterExceptFlag
       }
 
       const item = {
@@ -591,9 +605,9 @@ async function optimize(req, res, next) {
         flags: b.flags || [],
         bufferAfter,
         bufferBefore,
+        afterRules,   // по правилу на каждую метку с буфером — исключения не смешиваются
         lockFloor,
         requireFeature,
-        exceptAfterFlag,
       }
 
       const inHorizon = item.checkInMs < horizonMs

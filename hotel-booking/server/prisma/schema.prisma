@@ -84,6 +84,9 @@ model Booking {
   createdBy          Admin         @relation(fields: [adminId], references: [id])
   /// Начисления. totalAmount — кэш их суммы, источник истины здесь.
   charges            BookingCharge[]
+  /// Питание и услуги ИМЕННО ЭТОЙ брони (кому и сколько). Из них генератор
+  /// строит начисления — глобального флага includedByDefault для этого мало.
+  services           BookingService[]
   /// Принятые деньги. paidAmount — кэш их суммы, источник истины здесь.
   payments           Payment[]
   createdAt          DateTime      @default(now())
@@ -353,12 +356,54 @@ model Service {
   unit       String  @default("per_person_night")
   /// 'meal' — питание (участвует в пресетах пансиона), 'extra' — прочее
   kind       String  @default("extra")
-  /// Добавлять в новую бронь автоматически (например, завтрак «включён в тариф»)
+  /// Что подставляется в НОВУЮ бронь по умолчанию (завтрак «включён в тариф»).
+  /// Именно подставляется в форму — на уже сохранённую бронь этот флаг не влияет:
+  /// что ей начислять, решают строки BookingService.
   includedByDefault Boolean @default(false)
   isActive   Boolean @default(true)
   order      Int     @default(0)
+  bookings   BookingService[]
 
   @@index([kind, order])
+}
+
+/// Услуга, подключённая к КОНКРЕТНОЙ брони: что, скольким и сколько раз.
+///
+/// До этой таблицы питание цеплялось глобальным флагом `Service.includedByDefault`,
+/// а «кому начислять» выражалось счётчиками гостей «с питанием» / «без питания».
+/// Из-за этого «завтрак на двоих из троих» описать было нечем: либо всем, либо никому,
+/// а разбиение гостей на две колонки заодно делало форму нечитаемой (шесть счётчиков).
+/// Теперь гости считаются один раз (взрослые / дети / доп. места), а число едоков
+/// живёт здесь — у самой услуги.
+///
+/// Как читается по единицам начисления (`Service.unit`):
+/// - `per_person_night` — (adults + children) × ночи   → «завтрак на 2 из 3 гостей»
+/// - `per_person`       — (adults + children)          → «трансфер на двоих»
+/// - `per_night`        — quantity × ночи              → «парковка на все ночи»
+/// - `per_booking`      — quantity                     → «поздний выезд, один раз»
+/// `adults` и `children` раздельно, потому что у услуги может быть детская цена
+/// (`Service.childPrice`), и «двое взрослых + ребёнок» стоит не столько же, сколько трое взрослых.
+model BookingService {
+  id        Int      @id @default(autoincrement())
+  bookingId Int
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  serviceId Int
+  /// Cascade, а не Restrict: удаление услуги из справочника не должно упираться
+  /// в старые брони. Деньги от этого не теряются — они уже записаны строками
+  /// BookingCharge, а те живут отдельно от справочника.
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  adults    Int      @default(0)
+  children  Int      @default(0)
+  /// Для услуг, не зависящих от числа людей (per_night, per_booking): сколько раз.
+  quantity  Float    @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Одна услуга подключается к брони один раз — «завтрак» и «ещё завтрак» это
+  /// не два ряда, а одно число едоков.
+  @@unique([bookingId, serviceId])
+  @@index([bookingId])
+  @@index([serviceId])
 }
 
 /// Пресет питания: «Полный пансион», «Полупансион», «Только завтрак».

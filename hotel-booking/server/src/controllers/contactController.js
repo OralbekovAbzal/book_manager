@@ -95,4 +95,78 @@ async function remove(req, res, next) {
   }
 }
 
-module.exports = { list, create, update, remove, GROUPS }
+// ─── Стандартный набор ────────────────────────────────────────────────────────
+
+/**
+ * POST /api/contacts/defaults — экстренные службы одной кнопкой.
+ *
+ * Тот же приём «пресеты вместо настройки», что и у питания
+ * (`serviceController.createDefaults`): пустой справочник на свежей установке
+ * выглядит недоделанным, а эти четыре номера одинаковы для любого отеля
+ * в стране. Сантехника, прачечную и такси владелец впишет сам — их в набор
+ * не кладём, они у всех разные.
+ */
+const DEFAULT_CONTACTS = [
+  { name: 'Скорая помощь', phones: ['103'], order: 1 },
+  { name: 'Пожарная служба', phones: ['101'], order: 2 },
+  { name: 'Полиция', phones: ['102'], order: 3 },
+  { name: 'Аварийная газовая служба', phones: ['104'], order: 4 },
+]
+
+async function createDefaults(_req, res, next) {
+  try {
+    // Уникального кода у контакта нет, поэтому идемпотентность — по имени
+    // в группе «Экстренные». Ищем среди ВСЕХ записей, включая удалённые:
+    // удаление здесь мягкое (isActive = false), и создать вторую «Скорую»
+    // поверх скрытой первой значило бы копить мусор в таблице.
+    const existing = await prisma.contact.findMany({
+      where: { group: 'Экстренные' },
+      select: { id: true, name: true, isActive: true },
+      orderBy: { id: 'asc' },
+    })
+    // Одноимённых записей может быть несколько (накопились за время работы).
+    // Активная всегда важнее скрытой, иначе каждый вызов «восстанавливал» бы
+    // очередной дубль — и кнопка перестала бы быть идемпотентной.
+    const byName = new Map()
+    for (const c of existing) {
+      const key = c.name.trim().toLowerCase()
+      const prev = byName.get(key)
+      if (!prev || (!prev.isActive && c.isActive)) byName.set(key, c)
+    }
+
+    let created = 0
+    let restored = 0
+    let skipped = 0
+
+    for (const preset of DEFAULT_CONTACTS) {
+      const found = byName.get(preset.name.toLowerCase())
+      if (found?.isActive) { skipped++; continue }
+
+      if (found) {
+        // Запись есть, но скрыта — возвращаем её, а не плодим дубль.
+        await prisma.contact.update({
+          where: { id: found.id },
+          data: { isActive: true, phones: preset.phones, order: preset.order },
+        })
+        restored++
+      } else {
+        await prisma.contact.create({
+          data: {
+            name: preset.name,
+            role: 'Экстренная служба',
+            group: 'Экстренные',
+            phones: preset.phones,
+            order: preset.order,
+          },
+        })
+        created++
+      }
+    }
+
+    res.json({ data: { created, restored, skipped } })
+  } catch (err) {
+    next(err)
+  }
+}
+
+module.exports = { list, create, update, remove, createDefaults, GROUPS }

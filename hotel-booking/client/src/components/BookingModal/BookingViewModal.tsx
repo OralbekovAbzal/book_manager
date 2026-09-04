@@ -46,9 +46,12 @@ export const BookingViewModal: React.FC = () => {
     return () => document.removeEventListener('keydown', handler)
   }, [open, closeModal])
 
+  // Грузим всегда, а не только когда в сетке нет сумм: питание и услуги брони
+  // в объект сетки не входят в принципе (BOOKING_SELECT их не отдаёт), а без них
+  // карточка врала бы — «гость без завтрака», хотя завтрак у него есть.
   useEffect(() => {
     setFull(null)
-    if (!open || !booking || booking.totalAmount !== undefined) return
+    if (!open || !booking) return
     let cancelled = false
     fetchBooking(booking.id)
       .then(b => { if (!cancelled) setFull(b) })
@@ -66,9 +69,25 @@ export const BookingViewModal: React.FC = () => {
     parseISO(booking.checkIn.slice(0, 10)),
   )
 
-  const guestTotal =
-    (info.adultsWithMeals ?? 0) + (info.childrenWithMeals ?? 0) +
-    (info.adultsNoMeals ?? 0) + (info.childrenNoMeals ?? 0)
+  // Гости по типам: колонки «с питанием» и «без питания» складываем — на проживание
+  // это деление не влияет, а питание теперь описано услугами брони (см. ниже).
+  const guests = {
+    adults: (info.adultsWithMeals ?? 0) + (info.adultsNoMeals ?? 0),
+    children: (info.childrenWithMeals ?? 0) + (info.childrenNoMeals ?? 0),
+    extraBeds: (info.extraBedsWithMeals ?? 0) + (info.extraBedsNoMeals ?? 0),
+  }
+  const guestTotal = guests.adults + guests.children + guests.extraBeds
+
+  /** «Завтрак — 2 из 3» читается с одного взгляда, в отличие от «adults: 2». */
+  const serviceValue = (s: NonNullable<Booking['services']>[number]) => {
+    const heads = (s.adults ?? 0) + (s.children ?? 0)
+    if (s.service.unit === 'per_person' || s.service.unit === 'per_person_night') {
+      return heads >= guestTotal && guestTotal > 0
+        ? `все ${heads}`
+        : `${heads} из ${guestTotal}`
+    }
+    return `${s.quantity} шт.`
+  }
 
   const flagLabels = (() => {
     const flags = booking.flags ?? []
@@ -123,16 +142,18 @@ export const BookingViewModal: React.FC = () => {
         {(booking.guestPhone || guestTotal > 0) && (
           <Section title="Гость">
             {booking.guestPhone && <Row label="Телефон" value={booking.guestPhone} />}
-            {guestTotal > 0 && (
-              <>
-                {(info.adultsWithMeals ?? 0) > 0 && <Row label="Взрослые (с питанием)" value={String(info.adultsWithMeals)} />}
-                {(info.childrenWithMeals ?? 0) > 0 && <Row label="Дети (с питанием)" value={String(info.childrenWithMeals)} />}
-                {(info.adultsNoMeals ?? 0) > 0 && <Row label="Взрослые (без питания)" value={String(info.adultsNoMeals)} />}
-                {(info.childrenNoMeals ?? 0) > 0 && <Row label="Дети (без питания)" value={String(info.childrenNoMeals)} />}
-                {(info.extraBedsWithMeals ?? 0) > 0 && <Row label="Доп. места (с питанием)" value={String(info.extraBedsWithMeals)} />}
-                {(info.extraBedsNoMeals ?? 0) > 0 && <Row label="Доп. места (без питания)" value={String(info.extraBedsNoMeals)} />}
-              </>
-            )}
+            {guests.adults > 0 && <Row label="Взрослые" value={String(guests.adults)} />}
+            {guests.children > 0 && <Row label="Дети" value={String(guests.children)} />}
+            {guests.extraBeds > 0 && <Row label="Доп. места" value={String(guests.extraBeds)} />}
+          </Section>
+        )}
+
+        {/* Питание и услуги: сколько человек ими пользуется, а не «включено/нет» */}
+        {(full?.services ?? []).length > 0 && (
+          <Section title="Питание и услуги">
+            {(full?.services ?? []).map(s => (
+              <Row key={s.id} label={s.service.name} value={serviceValue(s)} />
+            ))}
           </Section>
         )}
 

@@ -7,7 +7,23 @@ const { getFlagEffectsMap, findBufferConflict } = require('../utils/flagEffects'
 const { findAllotmentConflict, allotmentConflictMessage } = require('../utils/allotment')
 const {
   rebuildAutoCharges, recalcBookingTotals, chargeInputsChanged, toUTCDate,
+  replaceBookingServices, defaultServiceLinks, serviceLinksChanged, normalizeServiceLinks,
 } = require('../utils/charges')
+
+/**
+ * Услуги из тела запроса должны существовать в справочнике.
+ * Без этой проверки несуществующий serviceId падал бы внутри транзакции в FK-ошибку,
+ * и клиент получил бы про «номер, категория, партнёр или смена» — сообщение не о том.
+ * @returns {Promise<string|null>} текст ошибки или null
+ */
+async function findUnknownServices(services) {
+  const ids = normalizeServiceLinks(services).map(s => s.serviceId)
+  if (ids.length === 0) return null
+  const found = await prisma.service.findMany({ where: { id: { in: ids } }, select: { id: true } })
+  const known = new Set(found.map(s => s.id))
+  const missing = ids.filter(id => !known.has(id))
+  return missing.length > 0 ? `Услуга не найдена (id ${missing.join(', ')})` : null
+}
 
 /** Resolve the shift id for a new booking — the current business day (manual-only). */
 async function resolveShiftId(explicitShiftId, adminId) {
@@ -52,6 +68,29 @@ const BOOKING_SELECT = {
   createdBy: { select: { id: true, name: true } },
 }
 
+// Питание и услуги в сетку не нужны — там рисуются полоски, а не счёт. Поэтому
+// они отдельным «подробным» select'ом: BOOKING_SELECT уходит в каждое socket-событие
+// и в список до 500 броней, и лишний join там стоил бы дороже, чем приносил.
+const BOOKING_DETAIL_SELECT = {
+  ...BOOKING_SELECT,
+  services: {
+    select: {
+      id: true,
+      serviceId: true,
+      adults: true,
+      children: true,
+      quantity: true,
+      service: {
+        select: {
+          id: true, code: true, name: true, price: true, childPrice: true,
+          unit: true, kind: true, isActive: true,
+        },
+      },
+    },
+    orderBy: { id: 'asc' },
+  },
+}
+
 // GET /api/bookings
 async function list(req, res, next) {
   try {
@@ -88,9 +127,10 @@ async function list(req, res, next) {
 // GET /api/bookings/:id
 async function getOne(req, res, next) {
   try {
+    // Форма брони открывается именно отсюда — ей нужны питание и услуги целиком
     const booking = await prisma.booking.findUnique({
       where: { id: parseInt(req.params.id) },
-      select: BOOKING_SELECT,
+      select: BOOKING_DETAIL_SELECT,
     })
     if (!booking) return next(createError('Бронь не найдена', 404))
     res.json({ data: booking })
@@ -107,6 +147,7 @@ async function create(req, res, next) {
       adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
       extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
       discountPercent, prepaymentPercent, totalAmount, prepaidAmount, paidAmount, flags, shiftId,
+      services,
     } = req.body
 
     // Проверка: минимум 1 ночь
@@ -138,6 +179,11 @@ async function create(req, res, next) {
     // Проверка номера
     const room = await prisma.room.findUnique({ where: { id: roomId } })
     if (!room || !room.isActive) return next(createError('Номер не найден или деактивирован', 404))
+
+    if (services !== undefined) {
+      const badService = await findUnknownServices(services)
+      if (badService) return next(createError(badService, 400))
+    }
 
     // Проверка пересечений
     const conflict = await findOverlap({ roomId, checkIn, checkOut })
@@ -213,8 +259,15 @@ async function create(req, res, next) {
           shiftId: resolvedShiftId,
           adminId: req.admin.id,
         },
-        select: { id: true },
+        select: { id: true, adultsWithMeals: true, childrenWithMeals: true, adultsNoMeals: true,
+          childrenNoMeals: true, extraBedsWithMeals: true, extraBedsNoMeals: true },
       })
+
+      // Питание и услуги — до генерации начислений: генератор читает именно их.
+      // Клиент не прислал набор (старый клиент, служебный вызов) — подставляем
+      // услуги «включены в тариф», чтобы бронь не оказалась молча без завтрака.
+      const links = services !== undefined ? services : await defaultServiceLinks(created, tx)
+      await replaceBookingServices(created.id, links, tx)
 
       // keepIfEmpty: тариф на эти даты может быть не заполнен — тогда строк нет,
       // и сумму, посчитанную администратором вручную, мы не обнуляем.
@@ -239,6 +292,7 @@ async function update(req, res, next) {
       adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
       extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
       discountPercent, prepaymentPercent, totalAmount, prepaidAmount, paidAmount, flags, shiftId,
+      services,
     } = req.body
 
     const existing = await prisma.booking.findUnique({ where: { id } })
@@ -356,7 +410,21 @@ async function update(req, res, next) {
       extraBedsNoMeals: extraBedsNoMeals ?? existing.extraBedsNoMeals,
       discountPercent: discountPercent ?? existing.discountPercent,
     }
-    const needsRebuild = req.body.recalcCharges === true || chargeInputsChanged(existing, nextInputs)
+    // Питание и услуги — такой же вход тарифа, как даты и гости: сняли обед —
+    // строку начисления надо убрать. Поле не прислали — набор не трогаем вообще
+    // (частичный PUT из другого экрана не должен обнулять питание).
+    if (services !== undefined) {
+      const badService = await findUnknownServices(services)
+      if (badService) return next(createError(badService, 400))
+    }
+    const existingLinks = services !== undefined
+      ? await prisma.bookingService.findMany({ where: { bookingId: id } })
+      : []
+    const servicesChanged = services !== undefined && serviceLinksChanged(existingLinks, services)
+
+    const needsRebuild = req.body.recalcCharges === true
+      || servicesChanged
+      || chargeInputsChanged(existing, nextInputs)
 
     const booking = await prisma.$transaction(async (tx) => {
       const updated = await tx.booking.update({
@@ -387,6 +455,10 @@ async function update(req, res, next) {
         },
         select: BOOKING_SELECT,
       })
+
+      // Переписываем только при реальном изменении: иначе каждое сохранение брони
+      // пересоздавало бы строки (новые id, новая дата создания) без всякой причины.
+      if (servicesChanged) await replaceBookingServices(id, services, tx)
 
       if (!needsRebuild) return updated
 
@@ -687,6 +759,23 @@ async function move(req, res, next) {
         },
         select: BOOKING_SELECT,
       })
+
+      // Питание и услуги переезжают вместе с гостем: он продолжает жить и продолжает
+      // завтракать. Копируем, а не переносим — у первой части остались свои ночи,
+      // и её начисления должны пересобираться по тому же набору.
+      const links = await tx.bookingService.findMany({ where: { bookingId: id } })
+      if (links.length > 0) {
+        await tx.bookingService.createMany({
+          data: links.map(l => ({
+            bookingId: created.id,
+            serviceId: l.serviceId,
+            adults: l.adults,
+            children: l.children,
+            quantity: l.quantity,
+          })),
+          skipDuplicates: true,
+        })
+      }
 
       // Начисления делим по датам, а не пропорцией: посуточные строки проживания
       // сами знают, к какой ночи относятся. Услуги и скидки остаются на исходной

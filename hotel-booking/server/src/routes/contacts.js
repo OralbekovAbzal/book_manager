@@ -16,6 +16,9 @@ const contactRules = [
 ]
 
 // Читают все, правят администраторы.
+// '/defaults' — ДО '/:id', иначе слово попадёт в параметр id (как в routes/services.js).
+router.post('/defaults', requireRole('SUPER_ADMIN', 'ADMIN'), ctrl.createDefaults)
+
 router.get('/', ctrl.list)
 router.post('/', requireRole('SUPER_ADMIN', 'ADMIN'), contactRules, validate, ctrl.create)
 router.put('/:id', requireRole('SUPER_ADMIN', 'ADMIN'), param('id').isInt(), contactRules, validate, ctrl.update)

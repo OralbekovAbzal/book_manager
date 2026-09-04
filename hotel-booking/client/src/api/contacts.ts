@@ -19,3 +19,20 @@ export async function updateContact(id: number, payload: Partial<Contact>): Prom
 export async function deleteContact(id: number): Promise<void> {
   await api.delete(`/contacts/${id}`)
 }
+
+/** Сколько записей набор создал, вернул из удалённых и пропустил как уже существующие. */
+export interface ContactDefaultsResult {
+  created: number
+  restored: number
+  skipped: number
+}
+
+/**
+ * Стандартный набор экстренных служб (103/101/102/104) одной кнопкой.
+ * Идемпотентно: уже существующее не трогает — тот же приём, что
+ * у `POST /api/services/defaults` для питания.
+ */
+export async function createDefaultContacts(): Promise<ContactDefaultsResult> {
+  const { data } = await api.post('/contacts/defaults')
+  return data.data
+}

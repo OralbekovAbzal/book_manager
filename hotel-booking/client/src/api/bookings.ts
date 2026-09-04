@@ -1,6 +1,20 @@
 import api from './client'
 import type { Booking } from '../types'
 
+/**
+ * Питание и услуги брони. Присылаются ЦЕЛИКОМ: сервер заменяет набор,
+ * поэтому снятая галочка «Обед» и есть удаление строки.
+ * Поле отсутствует → набор не трогаем (частичное сохранение из другого экрана).
+ */
+export interface BookingServicePayload {
+  serviceId: number
+  /** Сколько взрослых пользуется услугой (для per_person / per_person_night) */
+  adults?: number
+  children?: number
+  /** Сколько раз (для per_night / per_booking) */
+  quantity?: number
+}
+
 export interface BookingPayload {
   roomId: number
   guestName: string
@@ -24,6 +38,7 @@ export interface BookingPayload {
   prepaidAmount?: number
   paidAmount?: number
   flags?: string[]
+  services?: BookingServicePayload[]
   shiftId?: number | null
   /** Осознанная продажа номера из квоты партнёра (после 409 ALLOTMENT_CONFLICT) */
   allowAllotmentOverride?: boolean

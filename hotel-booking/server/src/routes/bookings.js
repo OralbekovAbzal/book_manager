@@ -30,6 +30,19 @@ const bookingNumericRules = [
   body('allowAllotmentOverride').optional().isBoolean().withMessage('allowAllotmentOverride — да/нет'),
   // Явное «Пересчитать по тарифу»: пересобрать автоматические строки начислений
   body('recalcCharges').optional().isBoolean().withMessage('recalcCharges — да/нет'),
+  // Питание и услуги брони: какая услуга, скольким людям, сколько раз.
+  // Отсутствие поля и пустой массив — РАЗНЫЕ вещи: первое «не трогай питание»,
+  // второе «питания нет». Поэтому optional() без nullable: null не принимаем.
+  body('services').optional().isArray({ max: 50 })
+    .withMessage('services — массив услуг (до 50)'),
+  body('services.*.serviceId').isInt({ min: 1 })
+    .withMessage('serviceId услуги обязателен'),
+  body('services.*.adults').optional().isInt({ min: 0, max: 99 })
+    .withMessage('Число взрослых по услуге — от 0 до 99'),
+  body('services.*.children').optional().isInt({ min: 0, max: 99 })
+    .withMessage('Число детей по услуге — от 0 до 99'),
+  body('services.*.quantity').optional().isFloat({ min: 0, max: 999 })
+    .withMessage('Количество услуги — от 0 до 999'),
 ]
 
 const bookingBodyRules = [

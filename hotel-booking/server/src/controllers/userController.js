@@ -1,6 +1,8 @@
 const bcrypt = require('bcryptjs')
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
+const { disconnectAdmin } = require('../socket/socketManager')
+const logger = require('../utils/logger')
 
 // Учётные записи сотрудников — только SUPER_ADMIN (см. routes/users.js).
 // Удаления нет: на сотруднике висят брони/смены/снапшоты, поэтому только isActive=false.
@@ -63,6 +65,14 @@ async function update(req, res, next) {
     }
 
     const updated = await prisma.admin.update({ where: { id }, data, select: PUBLIC_FIELDS })
+
+    // Деактивация должна отбирать и realtime, а не только REST: открытый сокет
+    // живёт до истечения токена (8 ч) и всё это время получает обновления сетки.
+    // Сбой сокета не должен ронять сам запрос — учётка уже отключена в базе.
+    if (data.isActive === false) {
+      try { disconnectAdmin(id) } catch (err) { logger.error(`Не удалось разорвать сокеты сотрудника ${id}: ${err.message}`) }
+    }
+
     res.json({ data: updated })
   } catch (err) {
     next(err)

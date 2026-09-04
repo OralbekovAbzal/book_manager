@@ -37,16 +37,19 @@ function nightsOf(checkIn, checkOut) {
   return out
 }
 
+/**
+ * Гости брони по типам. Деление «с питанием / без питания» здесь СКЛАДЫВАЕТСЯ:
+ * на проживание оно давно не влияет (цена одинакова), а кому начислять питание —
+ * теперь сказано строками BookingService, а не колонкой счётчика.
+ *
+ * Читать обе колонки обязательно: форма пишет всех в `*WithMeals`, но в 107 старых
+ * бронях люди лежат в обеих, и сумма — единственный способ не потерять половину гостей.
+ */
 function guestCounts(b) {
   return {
     adults: (b.adultsWithMeals || 0) + (b.adultsNoMeals || 0),
     children: (b.childrenWithMeals || 0) + (b.childrenNoMeals || 0),
     extraBeds: (b.extraBedsWithMeals || 0) + (b.extraBedsNoMeals || 0),
-    // Питание начисляем только тем, кто «с питанием». Доп. место с питанием —
-    // это тоже едок, поэтому идёт по взрослой цене (как и в старом калькуляторе,
-    // где доп. место было отдельным слагаемым, а не частью счётчика взрослых).
-    mealAdults: (b.adultsWithMeals || 0) + (b.extraBedsWithMeals || 0),
-    mealChildren: b.childrenWithMeals || 0,
   }
 }
 
@@ -104,7 +107,7 @@ function normLabel(s) {
  * пересоздать, а чтобы НЕ создать дубль: если администратор поправил ночь «полсуток»,
  * автоматическая строка на ту же дату не нужна — иначе ночь начислится дважды.
  */
-function buildAutoCharges({ booking, pricingBase, ratesByDate, services, manualCharges = [] }) {
+function buildAutoCharges({ booking, pricingBase, ratesByDate, bookingServices, manualCharges = [] }) {
   const nights = nightsOf(booking.checkIn, booking.checkOut)
   if (nights.length === 0) return []
 
@@ -137,16 +140,23 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, services, manualC
     })
   }
 
-  // ── Услуги (питание и прочее) ──
+  // ── Питание и услуги ──
+  // Источник — подключённые к брони строки BookingService, а не флаг
+  // `Service.includedByDefault`: флагом нельзя выразить «завтрак на двоих из троих»,
+  // а именно так живой отель и продаёт. Флаг остался осмысленным — он решает,
+  // что форма подставит в НОВУЮ бронь.
+  //
   // Названия держим короткими и стабильными («Завтрак», «Завтрак (дети)»): количество
   // видно в самой строке (кол-во × цена), а стабильное название позволяет узнать
   // услугу после пересборки и не задвоить её ручную правку.
   const nightCount = nights.length
-  for (const s of services || []) {
-    if (!s.isActive) continue
+  for (const link of bookingServices || []) {
+    const s = link.service
+    if (!s || !s.isActive) continue
     const isMeal = s.kind === 'meal'
-    const adults = isMeal ? counts.mealAdults : counts.adults + counts.extraBeds
-    const children = isMeal ? counts.mealChildren : counts.children
+    const adults = Math.max(0, link.adults || 0)
+    const children = Math.max(0, link.children || 0)
+    const times = link.quantity == null ? 1 : Math.max(0, link.quantity)
     // childPrice = null означает «считать по взрослой цене»
     const splitChildren = s.childPrice !== null && s.childPrice !== undefined && children > 0
     const adultHeads = splitChildren ? adults : adults + children
@@ -171,7 +181,7 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, services, manualC
         if (splitChildren) push(childLabel, children * nightCount, s.childPrice)
         break
       case 'per_night':
-        push(s.name, nightCount, s.price)
+        push(s.name, times * nightCount, s.price)
         break
       case 'per_person':
         push(s.name, adultHeads, s.price)
@@ -179,7 +189,7 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, services, manualC
         break
       case 'per_booking':
       default:
-        push(s.name, 1, s.price)
+        push(s.name, times, s.price)
         break
     }
   }
@@ -209,9 +219,9 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, services, manualC
   return rows
 }
 
-/** Тариф, услуги и настройки объекта, нужные для генерации. */
+/** Тариф, подключённые к брони услуги и настройки объекта, нужные для генерации. */
 async function loadChargeContext(booking, client = prisma) {
-  const [hotel, rates, services] = await Promise.all([
+  const [hotel, rates, bookingServices] = await Promise.all([
     client.hotelSettings.findUnique({ where: { id: 1 } }),
     booking.room?.categoryId
       ? client.ratePrice.findMany({
@@ -221,13 +231,18 @@ async function loadChargeContext(booking, client = prisma) {
         },
       })
       : Promise.resolve([]),
-    client.service.findMany({ where: { isActive: true, includedByDefault: true }, orderBy: { order: 'asc' } }),
+    // Именно услуги ЭТОЙ брони: сколько человек ест завтрак, знает только она.
+    client.bookingService.findMany({
+      where: { bookingId: booking.id },
+      include: { service: true },
+      orderBy: { id: 'asc' },
+    }),
   ])
 
   const ratesByDate = {}
   for (const r of rates) ratesByDate[dateKey(r.date)] = r
 
-  return { pricingBase: hotel?.pricingBase || 'person', ratesByDate, services }
+  return { pricingBase: hotel?.pricingBase || 'person', ratesByDate, bookingServices }
 }
 
 function sumCharges(charges) {
@@ -286,6 +301,45 @@ async function rebuildAutoCharges(bookingId, { adminId = null, client = prisma, 
 }
 
 /**
+ * Переписывает набор услуг брони целиком (удалить всё → создать заново).
+ *
+ * Именно «заменить», а не «досоздать»: форма присылает итоговое состояние трёх
+ * блоков, и снятая галочка «Обед» обязана означать удаление строки, иначе убрать
+ * питание было бы нечем.
+ */
+async function replaceBookingServices(bookingId, links, client = prisma) {
+  const rows = normalizeServiceLinks(links)
+  await client.bookingService.deleteMany({ where: { bookingId } })
+  if (rows.length > 0) {
+    await client.bookingService.createMany({
+      data: rows.map(r => ({ ...r, bookingId })),
+      skipDuplicates: true,
+    })
+  }
+  return rows
+}
+
+/**
+ * Что подставить в НОВУЮ бронь, если клиент не прислал набор услуг явно:
+ * услуги с `includedByDefault` на всех гостей. Это единственное место, где флаг
+ * ещё работает — и ровно в том смысле, ради которого он заведён («завтрак включён
+ * в тариф»). Старые клиенты и служебные вызовы (переезд, импорт) продолжают
+ * получать привычное поведение, а не бронь без питания.
+ */
+async function defaultServiceLinks(booking, client = prisma) {
+  const services = await client.service.findMany({
+    where: { isActive: true, includedByDefault: true },
+    orderBy: { order: 'asc' },
+  })
+  if (services.length === 0) return []
+
+  const counts = guestCounts(booking)
+  const adults = counts.adults + counts.extraBeds
+  const children = counts.children
+  return services.map(s => ({ serviceId: s.id, adults, children, quantity: 1 }))
+}
+
+/**
  * Изменились ли входы, от которых зависят автоматические строки.
  * Правка заметки или телефона не должна переоценивать бронь по сегодняшнему тарифу —
  * та же защита, что и ключом пересчёта на клиенте.
@@ -295,6 +349,40 @@ const CHARGE_INPUT_FIELDS = [
   'adultsWithMeals', 'childrenWithMeals', 'adultsNoMeals', 'childrenNoMeals',
   'extraBedsWithMeals', 'extraBedsNoMeals', 'discountPercent',
 ]
+
+/**
+ * Приводит набор услуг брони к сравнимому виду: {serviceId, adults, children, quantity},
+ * отсортированному по serviceId. Нужен и для записи, и для ответа на вопрос
+ * «изменилось ли питание» — порядок строк в теле запроса и в базе не совпадает,
+ * а сравнение «в лоб» давало бы ложную пересборку начислений на каждом сохранении.
+ */
+function normalizeServiceLinks(list) {
+  if (!Array.isArray(list)) return []
+  const byId = new Map()
+  for (const raw of list) {
+    const serviceId = parseInt(raw?.serviceId)
+    if (!Number.isInteger(serviceId) || serviceId <= 0) continue
+    // Дубль одной услуги — не две строки, а одно число едоков (см. @@unique в схеме)
+    byId.set(serviceId, {
+      serviceId,
+      adults: Math.max(0, Math.round(Number(raw.adults) || 0)),
+      children: Math.max(0, Math.round(Number(raw.children) || 0)),
+      quantity: raw.quantity == null ? 1 : Math.max(0, Number(raw.quantity) || 0),
+    })
+  }
+  return [...byId.values()].sort((a, b) => a.serviceId - b.serviceId)
+}
+
+function serviceLinksChanged(before, after) {
+  const a = normalizeServiceLinks(before)
+  const b = normalizeServiceLinks(after)
+  if (a.length !== b.length) return true
+  return a.some((x, i) => {
+    const y = b[i]
+    return x.serviceId !== y.serviceId || x.adults !== y.adults
+      || x.children !== y.children || x.quantity !== y.quantity
+  })
+}
 
 function chargeInputsChanged(before, after) {
   return CHARGE_INPUT_FIELDS.some((f) => {
@@ -317,5 +405,9 @@ module.exports = {
   recalcBookingTotals,
   sumCharges,
   chargeInputsChanged,
+  normalizeServiceLinks,
+  serviceLinksChanged,
+  replaceBookingServices,
+  defaultServiceLinks,
   CHARGE_INPUT_FIELDS,
 }

@@ -104,6 +104,7 @@ function describeStartError(err) {
 
 // ─── Состояние процессов хоста ───────────────────────────────────────────────
 let pgInstance = null
+let pgDataDir = null   // папка кластера — нужна для штатной остановки через pg_ctl
 let serverProc = null
 let mainWindow = null
 let settingsWindow = null
@@ -128,6 +129,7 @@ async function startHost(cfg) {
   // Есть PG_VERSION, но нет отметки → старая установка (до отметок) или прерванный
   // первый запуск: решаем по факту существования базы после старта Postgres.
   const markerPath = path.join(dataDir, SCHEMA_MARKER)
+  pgDataDir = dataDir
   hlog('dataDir=', dataDir, 'fresh=', fresh, 'schemaReady=', fs.existsSync(markerPath))
 
   pgInstance = new EmbeddedPostgres({
@@ -276,6 +278,36 @@ async function inspectSchemaState() {
   }
 }
 
+// Таблицы, которые создаёт базовая миграция. Список читаем из самого файла
+// миграции, чтобы он не разъезжался со схемой при её изменениях.
+function baselineTables() {
+  const file = resourcePath('server', 'prisma', 'migrations', BASELINE_MIGRATION, 'migration.sql')
+  const sql = fs.readFileSync(file, 'utf8')
+  return [...sql.matchAll(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?"([A-Za-z0-9_]+)"/g)].map((m) => m[1])
+}
+
+// Каких таблиц базовой миграции в базе НЕ хватает.
+async function missingBaselineTables() {
+  let expected
+  try { expected = baselineTables() } catch (e) {
+    hlog('не прочитал базовую миграцию:', String(e && (e.message || e)))
+    return []   // проверить нечем — не мешаем обновлению
+  }
+  if (!expected.length) return []
+  const client = pgInstance.getPgClient(DB_NAME)
+  await client.connect()
+  try {
+    const r = await client.query(
+      `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY($1)`,
+      [expected],
+    )
+    const present = new Set(r.rows.map((x) => x.tablename))
+    return expected.filter((t) => !present.has(t))
+  } finally {
+    try { await client.end() } catch {}
+  }
+}
+
 async function applyMigrations(dbUrl) {
   const { managed, hasTables } = await inspectSchemaState()
   hlog('schema state: managed=', managed, 'hasTables=', hasTables)
@@ -285,6 +317,24 @@ async function applyMigrations(dbUrl) {
   // данные не трогаются. Без этого шага migrate deploy отвечает P3005
   // («schema is not empty») и обновление у клиента не проходит.
   if (!managed && hasTables) {
+    // ВАЖНО: пометка «0_init применён» — это ОБЕЩАНИЕ, что вся схема из этой
+    // миграции в базе уже есть. Если база собрана версией программы старше,
+    // чем снимок 0_init, части таблиц в ней нет — а deploy после пометки их уже
+    // не создаст: Prisma считает базу актуальной. Программа при этом
+    // запускается, но разделы, которым нужны недостающие таблицы, отвечают 500,
+    // и починить это обновлением уже нельзя. Поэтому сначала убеждаемся, что
+    // схема действительно полная (проверяем по таблицам; расхождения на уровне
+    // отдельных колонок так не ловятся), и при расхождении честно
+    // останавливаемся — данные при этом не изменяются.
+    const missing = await missingBaselineTables()
+    if (missing.length) {
+      throw new Error(
+        `База данных в папке ${pgDataDir} создана более старой версией программы: ` +
+        `в ней нет таблиц ${missing.join(', ')}. Автоматически привести такую базу ` +
+        `к текущей схеме нельзя. Установите прежнюю версию программы либо перенесите ` +
+        `данные в новую базу. Данные не изменены.`,
+      )
+    }
     hlog('baseline: mark', BASELINE_MIGRATION, 'as applied')
     await runPrisma(['migrate', 'resolve', '--applied', BASELINE_MIGRATION], dbUrl)
   }
@@ -360,12 +410,64 @@ function spawnServer(cfg) {
   return proc
 }
 
+// pg_ctl из того же дистрибутива Postgres, что запускает embedded-postgres.
+// __dirname подходит и в dev (electron/), и в сборке (resources/app/).
+function pgCtlPath() {
+  const base = path.join(__dirname, 'node_modules', '@embedded-postgres')
+  let dirs = []
+  try { dirs = fs.readdirSync(base) } catch { return null }
+  for (const d of dirs) {
+    for (const name of ['pg_ctl.exe', 'pg_ctl']) {
+      const p = path.join(base, d, 'native', 'bin', name)
+      if (fs.existsSync(p)) return p
+    }
+  }
+  return null
+}
+
+// Штатная остановка кластера. embedded-postgres на Windows «останавливает» базу
+// командой `taskkill /f /t` — это убийство процесса, а не остановка: каждый
+// следующий запуск начинался с «database system was not properly shut down;
+// automatic recovery in progress», а в папке данных оставался postmaster.pid.
+// Данные спасал журнал WAL, но делать аварийное завершение штатным сценарием
+// выхода нельзя. Поэтому сначала просим Postgres завершиться его же pg_ctl
+// (-m fast: закрыть клиентов, выполнить контрольную точку), и только если это
+// не получилось — отдаём управление библиотеке с её taskkill.
+function stopPostgresGracefully(dataDir) {
+  const cli = pgCtlPath()
+  if (!cli || !dataDir) { hlog('pg_ctl не найден — штатная остановка пропущена'); return Promise.resolve(false) }
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (ok, why) => { if (done) return; done = true; hlog('pg_ctl stop:', ok ? 'ok' : 'не удалось', why || ''); resolve(ok) }
+    let proc
+    try {
+      proc = spawn(cli, ['stop', '-D', dataDir, '-m', 'fast', '-w', '-t', '30'], { windowsHide: true })
+    } catch (e) { return finish(false, String(e && (e.message || e))) }
+    let out = ''
+    proc.stdout?.on('data', (d) => { out += String(d) })
+    proc.stderr?.on('data', (d) => { out += String(d) })
+    const timer = setTimeout(() => { try { proc.kill() } catch {}; finish(false, 'таймаут') }, 35000)
+    proc.on('error', (e) => { clearTimeout(timer); finish(false, String(e && (e.message || e))) })
+    proc.on('exit', (code) => { clearTimeout(timer); finish(code === 0, `код ${code} ${out.trim()}`) })
+  })
+}
+
 // Корректно гасим сервер и базу (иначе можно повредить данные Postgres).
 async function stopHostProcesses() {
   try { serverProc?.kill() } catch {}
   serverProc = null
-  try { if (pgInstance) await pgInstance.stop() } catch (e) { hlog('pg stop fail:', String(e && (e.message || e))) }
+  if (pgInstance) {
+    const stopped = await stopPostgresGracefully(pgDataDir)
+    if (stopped) {
+      // Кластер уже остановлен. Если оставить ссылку на процесс, stop()
+      // библиотеки будет ждать события 'exit' от УЖЕ завершившегося процесса
+      // и не дождётся — выход приложения повиснет до таймаута exit-хука.
+      try { pgInstance.process = undefined } catch {}
+    }
+    try { await pgInstance.stop() } catch (e) { hlog('pg stop fail:', String(e && (e.message || e))) }
+  }
   pgInstance = null
+  pgDataDir = null
 }
 
 function waitForHealth(port, timeoutMs) {

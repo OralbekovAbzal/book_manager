@@ -11,13 +11,16 @@ import { OptimizerSection } from './sections/OptimizerSection'
 import { PartnersSection } from './sections/PartnersSection'
 import { AllotmentsSection } from './sections/AllotmentsSection'
 import { BackupSection } from './sections/BackupSection'
+import { HotelSection } from './sections/HotelSection'
+import { UsersSection } from './sections/UsersSection'
+import { AboutSection } from './sections/AboutSection'
 
 interface Props {
   open: boolean
   onClose: () => void
 }
 
-type ActiveSection = 'visual' | 'buildings' | 'categories' | 'features' | 'capacities' | 'rooms' | 'filters' | 'bookingFlags' | 'optimizer' | 'partners' | 'allotments' | 'backup'
+type ActiveSection = 'hotel' | 'users' | 'visual' | 'buildings' | 'categories' | 'features' | 'capacities' | 'rooms' | 'filters' | 'bookingFlags' | 'optimizer' | 'partners' | 'allotments' | 'backup' | 'about'
 
 interface NavItem { id: ActiveSection; label: string; icon: string }
 interface NavGroup { title: string; items: NavItem[] }
@@ -27,6 +30,7 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Объект',
     items: [
+      { id: 'hotel',      label: 'Отель',       icon: 'M3 21h18 M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16 M9 7h1 M14 7h1 M9 11h1 M14 11h1 M9 15h1 M14 15h1 M10 21v-3h4v3' },
       { id: 'buildings',  label: 'Корпуса',     icon: 'M3 21h18 M5 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16 M19 21v-8a1 1 0 0 0-1-1h-3 M9 7h2 M9 11h2 M9 15h2' },
       { id: 'categories', label: 'Категории',   icon: 'M3 3h7v7H3z M14 3h7v7h-7z M14 14h7v7h-7z M3 14h7v7H3z' },
       { id: 'features',   label: 'Особенности', icon: 'M12 3l2.2 5.8L20 11l-5.8 2.2L12 19l-2.2-5.8L4 11l5.8-2.2z' },
@@ -46,9 +50,11 @@ const NAV_GROUPS: NavGroup[] = [
   {
     title: 'Система',
     items: [
+      { id: 'users',   label: 'Пользователи', icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M16 11l2 2 4-4' },
       { id: 'filters', label: 'Фильтры',     icon: 'M22 3H2l8 9.46V19l4 2v-8.54z' },
       { id: 'backup',  label: 'Бэкап',       icon: 'M12 8c4.4 0 8-1.3 8-3s-3.6-3-8-3-8 1.3-8 3 3.6 3 8 3 M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5 M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6' },
       { id: 'visual',  label: 'Внешний вид', icon: 'M12 22a10 10 0 1 1 10-10c0 2-2 3-4 3h-2a2 2 0 0 0-1 4 1 1 0 0 1-1 1z M13.5 6.5h.01 M17.5 10.5h.01 M8.5 7.5h.01 M6.5 12.5h.01' },
+      { id: 'about',   label: 'О программе', icon: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 16v-4 M12 8h.01' },
     ],
   },
 ]
@@ -166,6 +172,8 @@ export const SettingsPanel: React.FC<Props> = ({ open, onClose }) => {
 
         {/* CONTENT */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 32, background: 'var(--bg)' }}>
+          {activeSection === 'hotel'      && <HotelSection />}
+          {activeSection === 'users'      && <UsersSection />}
           {activeSection === 'visual'     && <VisualSettings />}
           {activeSection === 'buildings'  && <BuildingsSection />}
           {activeSection === 'categories' && <CategoriesSection />}
@@ -178,6 +186,7 @@ export const SettingsPanel: React.FC<Props> = ({ open, onClose }) => {
           {activeSection === 'partners'     && <PartnersSection />}
           {activeSection === 'allotments'   && <AllotmentsSection />}
           {activeSection === 'backup'       && <BackupSection />}
+          {activeSection === 'about'        && <AboutSection />}
         </div>
       </div>
     </>

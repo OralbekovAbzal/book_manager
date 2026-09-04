@@ -4,70 +4,124 @@
     {
       "name": "Gateway",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/gateway');require('C:/Users/abzal/OneDrive/Desktop/diploma/gateway/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/gateway');require('C:/Users/abzal/OneDrive/Desktop/diploma/gateway/src/index.js')"
+      ],
       "port": 3000,
       "autoPort": false
     },
     {
       "name": "Auth Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/auth');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/auth/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/auth');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/auth/src/index.js')"
+      ],
       "port": 3001,
       "autoPort": false
     },
     {
       "name": "Concert Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/concert');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/concert/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/concert');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/concert/src/index.js')"
+      ],
       "port": 3002,
       "autoPort": false
     },
     {
       "name": "Musician Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/musician');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/musician/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/musician');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/musician/src/index.js')"
+      ],
       "port": 3003,
       "autoPort": false
     },
     {
       "name": "Contract Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/contract');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/contract/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/contract');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/contract/src/index.js')"
+      ],
       "port": 3004,
       "autoPort": false
     },
     {
       "name": "Loyalty Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/loyalty');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/loyalty/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/loyalty');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/loyalty/src/index.js')"
+      ],
       "port": 3005,
       "autoPort": false
     },
     {
       "name": "Notification Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/notification');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/notification/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/notification');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/notification/src/index.js')"
+      ],
       "port": 3006,
       "autoPort": false
     },
     {
       "name": "Analytics Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/analytics');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/analytics/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/analytics');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/analytics/src/index.js')"
+      ],
       "port": 3007,
       "autoPort": false
     },
     {
       "name": "Chat Service",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["-e", "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/chat');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/chat/src/index.js')"],
+      "runtimeArgs": [
+        "-e",
+        "process.chdir('C:/Users/abzal/OneDrive/Desktop/diploma/services/chat');require('C:/Users/abzal/OneDrive/Desktop/diploma/services/chat/src/index.js')"
+      ],
       "port": 3008,
       "autoPort": false
     },
     {
       "name": "Admin Panel",
       "runtimeExecutable": "node",
-      "runtimeArgs": ["C:/Users/abzal/OneDrive/Desktop/diploma/admin/node_modules/vite/bin/vite.js", "C:/Users/abzal/OneDrive/Desktop/diploma/admin", "--port", "5173"],
+      "runtimeArgs": [
+        "C:/Users/abzal/OneDrive/Desktop/diploma/admin/node_modules/vite/bin/vite.js",
+        "C:/Users/abzal/OneDrive/Desktop/diploma/admin",
+        "--port",
+        "5173"
+      ],
+      "port": 5173,
+      "autoPort": false
+    },
+    {
+      "name": "Hotel Server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "-e",
+        "process.env.SNAPSHOT_KEEP_AUTO=process.env.SNAPSHOT_KEEP_AUTO||\"60\";process.env.SNAPSHOT_KEEP_SAFETY=process.env.SNAPSHOT_KEEP_SAFETY||\"30\";process.chdir(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/server\");require(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/server/server.js\")"
+      ],
+      "port": 3001,
+      "autoPort": false
+    },
+    {
+      "name": "Hotel Client",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/client/node_modules/vite/bin/vite.js",
+        "C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/client",
+        "--port",
+        "5173"
+      ],
       "port": 5173,
       "autoPort": false
     }

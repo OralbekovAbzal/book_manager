@@ -2,6 +2,7 @@ const { prisma } = require('../utils/prisma')
 const { todayUTC } = require('../utils/businessDate')
 const { invalidateGridCache } = require('./occupancyController')
 const { createSnapshot } = require('../utils/snapshot')
+const { emitShiftChanged } = require('../socket/socketManager')
 
 const INCLUDE = {
   createdBy: { select: { id: true, name: true } },
@@ -91,6 +92,9 @@ async function nextDay(req, res, next) {
 
     // Сетка центрируется на рабочем дне — сбрасываем кэш, чтобы линия "сегодня" сдвинулась сразу
     invalidateGridCache()
+
+    // Оповещаем остальные рабочие места — иначе у них сетка остаётся на прежней дате смены
+    try { emitShiftChanged(shift) } catch { /* сокет не инициализирован — не критично */ }
 
     // Снимок на старте новой смены — точка отката перед рабочим днём
     try {

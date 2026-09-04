@@ -1,8 +1,43 @@
 const router = require('express').Router()
-const { authenticate } = require('../middleware/auth')
+const { authenticate, requireRole } = require('../middleware/auth')
 const { prisma } = require('../utils/prisma')
 
 router.use(authenticate)
+
+// Граница периода из query: 'YYYY-MM-DD' — календарный день (UTC), иначе — ISO-момент
+// (клиент шлёт границы местных суток как ISO). Возвращает { at, dayOnly } или null.
+function parseBoundary(value) {
+  if (!value) return null
+  const s = String(value)
+  const dayOnly = /^\d{4}-\d{2}-\d{2}$/.test(s)
+  const at = new Date(dayOnly ? `${s}T00:00:00.000Z` : s)
+  return Number.isNaN(at.getTime()) ? null : { at, dayOnly }
+}
+
+// GET /api/audit/log?limit=100&adminId=&dateFrom=&dateTo= — журнал действий, новые сверху
+router.get('/log', requireRole('SUPER_ADMIN', 'ADMIN'), async (req, res, next) => {
+  try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 500)
+    const where = {}
+    const adminId = parseInt(req.query.adminId, 10)
+    if (Number.isInteger(adminId)) where.adminId = adminId
+
+    const from = parseBoundary(req.query.dateFrom)
+    const to = parseBoundary(req.query.dateTo)
+    if (from || to) {
+      where.createdAt = {}
+      if (from) where.createdAt.gte = from.at
+      // День указан целиком → включительно (до следующей полуночи)
+      if (to) {
+        if (to.dayOnly) where.createdAt.lt = new Date(to.at.getTime() + 86400_000)
+        else where.createdAt.lte = to.at
+      }
+    }
+
+    const data = await prisma.auditLog.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit })
+    res.json({ data })
+  } catch (err) { next(err) }
+})
 
 // GET /api/audit?period=today|week|month|shift&shiftId=123
 router.get('/', async (req, res, next) => {

@@ -17,8 +17,14 @@ import { AuditWindow } from './components/Audit/AuditWindow'
 import { OptimizeModal } from './components/Optimize/OptimizeModal'
 import { SnapshotsModal } from './components/Snapshots/SnapshotsModal'
 import { ReferenceWindow } from './components/Reference/ReferenceWindow'
+import { RatesScreen } from './components/Rates/RatesScreen'
+import { ReportsScreen } from './components/Reports/ReportsScreen'
 import { NavDrawer, type NavSection } from './components/NavDrawer/NavDrawer'
 import { fetchBookingFlags } from './api/bookingFlags'
+import { fetchSetupStatus } from './api/setup'
+import { fetchHotel } from './api/hotel'
+import { fetchRooms } from './api/rooms'
+import { SetupWizard } from './components/Setup/SetupWizard'
 
 const ROLE_LABELS: Record<string, string> = {
   SUPER_ADMIN: 'Главный администратор',
@@ -27,7 +33,7 @@ const ROLE_LABELS: Record<string, string> = {
 }
 
 export const App: React.FC = () => {
-  const { admin, token, restore, logout } = useAuthStore()
+  const { admin, token, restore, logout, hotelName, setHotelName } = useAuthStore()
   const { visual, setVisual, setRoomFund } = useSettingsStore()
   const [auditOpen, setAuditOpen] = useState(false)
   const [optimizeOpen, setOptimizeOpen] = useState(false)
@@ -52,8 +58,48 @@ export const App: React.FC = () => {
     setNavOpen(false)
   }
 
-  useEffect(() => { restore() }, [])
+  // Старт приложения: одновременно узнаём состояние сервера (нужна ли первичная
+  // настройка, название отеля) и восстанавливаем сессию по сохранённому токену.
+  // 'checking' — заставка; 'setup' — мастер вместо входа; 'ready' — вход/шахматка.
+  const [boot, setBoot] = useState<'checking' | 'setup' | 'ready'>('checking')
+  const [serverError, setServerError] = useState('')
+  // Число активных номеров для шапки; null — ещё не загружено.
+  const [roomsCount, setRoomsCount] = useState<number | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    const init = async () => {
+      const [status] = await Promise.all([
+        fetchSetupStatus()
+          .then(s => ({ ok: true as const, status: s }))
+          .catch((e: unknown) => ({ ok: false as const, error: e })),
+        restore(),
+      ])
+      if (cancelled) return
+      if (status.ok) {
+        setHotelName(status.status.hotelName)
+        setBoot(status.status.needsSetup ? 'setup' : 'ready')
+      } else {
+        // Сервер не ответил — пускаем на экран входа с баннером, чтобы можно было
+        // открыть системные настройки и поправить адрес подключения.
+        setServerError(describeBootError(status.error))
+        setBoot('ready')
+      }
+    }
+    init()
+    return () => { cancelled = true }
+  }, [])
   useSocket(token)
+
+  // Узкое окно (< 900px): название отеля и бейдж номеров в шапке прячем, иначе
+  // она переносилась на вторую строку и вылезала за фиксированные 52px.
+  const [narrow, setNarrow] = useState<boolean>(() => window.matchMedia('(max-width: 899px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 899px)')
+    const handler = (e: MediaQueryListEvent) => setNarrow(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
 
   // F2 — переключение между шахматкой и справочником. Нужен, когда трубку уже
   // держат в руке, поэтому работает и из полей ввода (F2 ничего не печатает).
@@ -75,6 +121,13 @@ export const App: React.FC = () => {
     fetchBookingFlags().then(bookingFlags => setRoomFund({ bookingFlags })).catch(() => {})
   }, [admin, setRoomFund])
 
+  // Данные для шапки после входа: актуальное название отеля и число активных номеров.
+  useEffect(() => {
+    if (!admin) return
+    fetchHotel().then(h => setHotelName(h.name || null)).catch(() => {})
+    fetchRooms({ isActive: true }).then(rooms => setRoomsCount(rooms.length)).catch(() => {})
+  }, [admin, setHotelName])
+
   // Apply theme + UI-scale vars to document root
   useEffect(() => {
     const root = document.documentElement
@@ -83,7 +136,13 @@ export const App: React.FC = () => {
     root.style.setProperty('--ui-radius', `${visual.uiRadius}px`)
   }, [visual.theme, visual.fontSize, visual.uiRadius])
 
-  if (!admin) return <Login />
+  // Порядок экранов при старте: заставка, пока сервер не ответил; мастер
+  // первичной настройки, если база пустая; иначе — обычный вход.
+  if (boot === 'checking') return <BootScreen />
+  // Незавершённая настройка важнее сохранённой сессии: иначе вход под сидовым
+  // admin/admin123 позволил бы обойти мастер и оставить пароль по умолчанию.
+  if (boot === 'setup') return <SetupWizard onComplete={() => setBoot('ready')} />
+  if (!admin) return <Login serverError={serverError} />
 
   const toggleTheme = () => setVisual('theme', visual.theme === 'light' ? 'dark' : 'light')
 
@@ -119,15 +178,21 @@ export const App: React.FC = () => {
           >
             H
           </button>
-          <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)', letterSpacing: '-0.01em' }}>
+          <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
             Hotel Booking
           </span>
-          <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
-          <span style={{ fontSize: '0.86rem', color: 'var(--text-faint)' }}>Гранд Алатау</span>
-          <span style={{
-            fontSize: '0.77rem', color: 'var(--text-faint)', padding: '2px 7px',
-            border: '1px solid var(--border-subtle)', borderRadius: 5,
-          }}>142 номера</span>
+          {!narrow && (
+            <>
+              <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
+              <span style={{ fontSize: '0.86rem', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{hotelName || 'Отель'}</span>
+              {roomsCount !== null && (
+                <span style={{
+                  fontSize: '0.77rem', color: 'var(--text-faint)', padding: '2px 7px',
+                  border: '1px solid var(--border-subtle)', borderRadius: 5, whiteSpace: 'nowrap',
+                }}>{roomsCount} {roomsWord(roomsCount)}</span>
+              )}
+            </>
+          )}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -173,12 +238,8 @@ export const App: React.FC = () => {
       {section === 'reference' && <ReferenceWindow open onClose={() => setSection('grid')} />}
       {section === 'settings'  && <SettingsPanel  open onClose={() => setSection('grid')} />}
 
-      {(section === 'rates' || section === 'reports') && (
-        <SectionStub
-          title={section === 'rates' ? 'Тарифы и наличие' : 'Отчёты'}
-          onBack={() => setSection('grid')}
-        />
-      )}
+      {section === 'rates'   && <RatesScreen onBack={() => setSection('grid')} />}
+      {section === 'reports' && <ReportsScreen onBack={() => setSection('grid')} />}
 
       {/* Действия остаются модалками: это не места, а операции над бронью. */}
       <BookingModal />
@@ -192,7 +253,7 @@ export const App: React.FC = () => {
       <NavDrawer
         open={navOpen}
         active={section}
-        hotelName="Гранд Алатау"
+        hotelName={hotelName || 'Отель'}
         adminName={admin.name}
         adminRole={ROLE_LABELS[admin.role] ?? admin.role}
         onClose={() => setNavOpen(false)}
@@ -200,6 +261,39 @@ export const App: React.FC = () => {
       />
     </div>
   )
+}
+
+// Заставка на время первого запроса к серверу (состояние настройки + восстановление сессии)
+const BootScreen: React.FC = () => (
+  <div style={{
+    minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+    gap: 14, background: 'var(--surface)', color: 'var(--text-faint)', fontSize: '0.9rem',
+  }}>
+    <div style={{
+      width: 28, height: 28, borderRadius: '50%', border: '3px solid var(--border-subtle)',
+      borderTopColor: 'var(--accent)', animation: 'spin 0.8s linear infinite',
+    }} />
+    Подключение к серверу…
+  </div>
+)
+
+// Текст баннера на экране входа, если /api/setup/status не ответил.
+function describeBootError(e: unknown): string {
+  const err = e as { response?: { status?: number } } | undefined
+  if (!err?.response) {
+    return 'Сервер недоступен. Проверьте, что сервер запущен, и адрес подключения в настройках системы.'
+  }
+  return `Сервер ответил ошибкой ${err.response.status ?? ''} при проверке состояния. Вход может не работать.`
+}
+
+// «1 номер», «2 номера», «5 номеров»
+function roomsWord(n: number): string {
+  const abs = Math.abs(n) % 100
+  const last = abs % 10
+  if (abs > 10 && abs < 20) return 'номеров'
+  if (last === 1) return 'номер'
+  if (last >= 2 && last <= 4) return 'номера'
+  return 'номеров'
 }
 
 // Иконки топбара (inline-SVG, Lucide/Feather-стиль из дизайн-хендоффа)
@@ -213,25 +307,6 @@ const ICONS = {
   settings: <><line x1="21" x2="14" y1="4" y2="4" /><line x1="10" x2="3" y1="4" y2="4" /><line x1="21" x2="12" y1="12" y2="12" /><line x1="8" x2="3" y1="12" y2="12" /><line x1="21" x2="16" y1="20" y2="20" /><line x1="12" x2="3" y1="20" y2="20" /><line x1="14" x2="14" y1="2" y2="6" /><line x1="8" x2="8" y1="10" y2="14" /><line x1="16" x2="16" y1="18" y2="22" /></>,
   logout:   <><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><path d="M16 17l5-5-5-5" /><path d="M21 12H9" /></>,
 }
-
-// Разделы, которых ещё нет. Раньше клик по ним просто закрывал меню и не делал
-// ничего — с настоящей навигацией это выглядело бы поломкой. Перед показом
-// клиенту пункты лучше убрать из меню совсем, а не оставлять эту заглушку.
-const SectionStub: React.FC<{ title: string; onBack: () => void }> = ({ title, onBack }) => (
-  <div style={{
-    flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column',
-    alignItems: 'center', justifyContent: 'center', gap: 14,
-    background: 'var(--bg)', color: 'var(--text)',
-  }}>
-    <div style={{ fontSize: '1.2rem', fontWeight: 600 }}>{title}</div>
-    <div style={{ fontSize: '0.9rem', color: 'var(--text-faint)' }}>Раздел ещё не готов.</div>
-    <button onClick={onBack} style={{
-      height: 34, padding: '0 16px', background: 'var(--bg)', border: '1px solid var(--border)',
-      borderRadius: 8, color: 'var(--text)', cursor: 'pointer', fontFamily: 'inherit',
-      fontSize: '0.86rem', fontWeight: 600,
-    }}>Вернуться к шахматке</button>
-  </div>
-)
 
 const IconBtn: React.FC<{
   onClick: () => void

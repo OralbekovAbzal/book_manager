@@ -1,0 +1,87 @@
+{
+  "id": "bookings-registry",
+  "version": 1,
+  "title": "Реестр броней",
+  "description": "Список броней за период с фильтрами. Основа для выгрузки и сверки.",
+  "icon": "list",
+  "dataset": "bookings",
+  "params": [
+    {
+      "key": "period",
+      "type": "dateRange",
+      "label": "Период",
+      "required": true,
+      "default": { "preset": "currentMonth" },
+      "presets": ["today", "last7", "last30", "currentMonth", "prevMonth", "currentYear"]
+    },
+    {
+      "key": "periodMode",
+      "type": "select",
+      "label": "Период считать",
+      "default": "overlap",
+      "hint": "Разные вопросы: кто жил в эти даты, кто заезжал, кто выезжал.",
+      "options": [
+        { "value": "overlap", "label": "По проживанию" },
+        { "value": "checkIn", "label": "По заезду" },
+        { "value": "checkOut", "label": "По выезду" },
+        { "value": "created", "label": "По дате создания" }
+      ]
+    },
+    {
+      "key": "statuses",
+      "type": "multiselect",
+      "label": "Статусы",
+      "default": ["CONFIRMED", "CHECKED_IN", "CHECKED_OUT"],
+      "options": [
+        { "value": "CONFIRMED", "label": "Подтверждена" },
+        { "value": "CHECKED_IN", "label": "Заехал" },
+        { "value": "CHECKED_OUT", "label": "Выехал" },
+        { "value": "CANCELLED", "label": "Отменена" },
+        { "value": "NO_SHOW", "label": "Не заехал" }
+      ]
+    },
+    {
+      "key": "maintenance",
+      "type": "select",
+      "label": "Ремонтные блоки",
+      "default": "exclude",
+      "options": [
+        { "value": "exclude", "label": "Не показывать" },
+        { "value": "include", "label": "Вместе с бронями" },
+        { "value": "only", "label": "Только ремонт" }
+      ]
+    },
+    { "key": "building", "type": "select", "label": "Корпус", "optionsFrom": "buildings", "placeholder": "Все" },
+    { "key": "categoryName", "type": "select", "label": "Категория", "optionsFrom": "categories", "placeholder": "Все" },
+    { "key": "source", "type": "select", "label": "Источник", "optionsFrom": "sources", "placeholder": "Любой" },
+    { "key": "partnerName", "type": "select", "label": "Партнёр", "optionsFrom": "partners", "placeholder": "Любой" },
+    { "key": "guest", "type": "text", "label": "Гость", "placeholder": "Часть имени" }
+  ],
+  "filters": [
+    { "field": "status", "op": "in", "param": "statuses" },
+    { "field": "isMaintenance", "op": "isFalse", "when": { "param": "maintenance", "eq": "exclude" } },
+    { "field": "isMaintenance", "op": "isTrue", "when": { "param": "maintenance", "eq": "only" } },
+    { "field": "building", "op": "eq", "param": "building" },
+    { "field": "categoryName", "op": "eq", "param": "categoryName" },
+    { "field": "source", "op": "eq", "param": "source" },
+    { "field": "partnerName", "op": "eq", "param": "partnerName" },
+    { "field": "guestName", "op": "contains", "param": "guest" }
+  ],
+  "groupBy": [],
+  "columns": [
+    { "key": "roomNumber", "field": "roomNumber", "width": 80 },
+    { "key": "categoryName", "field": "categoryName", "width": 130 },
+    { "key": "guestName", "field": "guestName", "width": 190 },
+    { "key": "guestPhone", "field": "guestPhone", "width": 130 },
+    { "key": "checkIn", "field": "checkIn", "width": 100 },
+    { "key": "checkOut", "field": "checkOut", "width": 100 },
+    { "key": "nights", "field": "nights", "width": 70 },
+    { "key": "guests", "field": "guests", "width": 70 },
+    { "key": "statusLabel", "field": "statusLabel", "width": 120 },
+    { "key": "source", "field": "source", "width": 110 },
+    { "key": "partnerName", "field": "partnerName", "width": 130 },
+    { "key": "createdByName", "field": "createdByName", "width": 130 }
+  ],
+  "sort": [{ "key": "checkIn", "dir": "asc" }, { "key": "roomNumber", "dir": "asc" }],
+  "totalsLabel": "Итого"
+}

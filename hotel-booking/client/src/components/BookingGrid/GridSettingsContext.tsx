@@ -34,14 +34,24 @@ interface Props {
   children: React.ReactNode
   /** Реальная ширина контейнера сетки в px (учитывает sidebar фильтра) */
   containerWidth: number
+  /** Ширина вертикальной полосы прокрутки тела сетки (offsetWidth − clientWidth;
+   *  на Windows 17px, при overlay-скроллбарах 0). Не измерена — берём 17. */
+  scrollbarWidth?: number
 }
 
-export const GridSettingsProvider: React.FC<Props> = ({ children, containerWidth }) => {
+// Ширина классической полосы прокрутки на Windows — запасное значение, пока тело не измерено
+const SCROLLBAR_FALLBACK = 17
+
+export const GridSettingsProvider: React.FC<Props> = ({ children, containerWidth, scrollbarWidth }) => {
   const { visual } = useSettingsStore()
   // Колонка «Номер» фиксирована под демо; ширина дня растягивается так, чтобы
   // ровно visibleDays дней заполнили контейнер без пустого хвоста и без обрезки
   // (но не уже MIN_DAY_WIDTH — тогда появляется горизонтальный скролл).
-  const availableWidth = Math.max(0, containerWidth - DEFAULT.ROOM_COL_WIDTH)
+  // Вертикальная полоса прокрутки тела съедает часть ширины (clientWidth < offsetWidth),
+  // поэтому вычитаем и её: иначе дни не вмещаются и горизонтальный скролл появляется
+  // почти при любой ширине окна. Инвариант: ROOM_COL_WIDTH + visibleDays·DAY_WIDTH ≤ clientWidth тела.
+  const sbw = scrollbarWidth ?? SCROLLBAR_FALLBACK
+  const availableWidth = Math.max(0, containerWidth - sbw - DEFAULT.ROOM_COL_WIDTH)
   const fitWidth = Math.floor(availableWidth / Math.max(1, visual.visibleDays))
   const DAY_WIDTH = Math.max(MIN_DAY_WIDTH, fitWidth)
 

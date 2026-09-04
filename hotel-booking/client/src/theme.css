@@ -204,3 +204,65 @@ textarea {
 @keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes navIn { from { transform: translateX(-100%); } to { transform: translateX(0); } }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ─── Печать отчёта ───────────────────────────────────────────────────── */
+/* На лист уходит только блок #report-print. Отдельной «версии для печати» нет
+   намеренно: она бы разошлась с экранной при первой же правке колонок.
+   Скрываем не через display:none у соседей (это ломает flex-раскладку окна),
+   а через visibility, а сам отчёт вынимаем в поток страницы. */
+.report-print-head h1 {
+  margin: 0 0 2px;
+  font-size: 15pt;
+  font-weight: 600;
+}
+.report-print-head p {
+  margin: 0 0 10px;
+  font-size: 9pt;
+  color: #555;
+}
+
+@media print {
+  @page { size: A4 landscape; margin: 12mm; }
+
+  body * { visibility: hidden !important; }
+  #report-print, #report-print * { visibility: visible !important; }
+
+  #report-print {
+    position: absolute;
+    left: 0; top: 0;
+    width: 100%;
+    overflow: visible !important;
+  }
+  /* Прокрутка таблицы на бумаге не нужна — иначе печатается только видимая часть */
+  #report-print > div { overflow: visible !important; }
+
+  .report-print-head { display: block !important; }
+  .report-sidebar, .report-toolbar { display: none !important; }
+
+  #report-print table { width: 100%; font-size: 8.5pt; }
+  #report-print thead th {
+    position: static !important;
+    background: #f1f1f1 !important;
+    border-bottom: 1px solid #999 !important;
+    color: #000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  #report-print tbody td {
+    border-bottom: 1px solid #ddd !important;
+    color: #000 !important;
+    /* Полоска процента на бумаге только мешает: печатаем чистое число */
+    background: none !important;
+  }
+  #report-print tfoot td {
+    position: static !important;
+    background: #f1f1f1 !important;
+    border-top: 1.5px solid #666 !important;
+    color: #000 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+  /* Шапка повторяется на каждой странице, строки не рвутся пополам */
+  #report-print thead { display: table-header-group; }
+  #report-print tr { page-break-inside: avoid; }
+}

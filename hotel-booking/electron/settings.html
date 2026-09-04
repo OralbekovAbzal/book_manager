@@ -2,112 +2,311 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <title>Настройка подключения</title>
+  <title>Настройка системы</title>
   <style>
     * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 26px; background: #f4f5f7; color: #1f2430; }
-    h1 { font-size: 18px; margin: 0 0 4px; }
-    p.hint { font-size: 13px; color: #5b6472; margin: 0 0 18px; line-height: 1.5; }
-    .modes { display: flex; gap: 12px; margin-bottom: 18px; }
-    .mode {
-      flex: 1; border: 2px solid #d4dae3; border-radius: 12px; padding: 14px; cursor: pointer;
-      background: #fff; transition: all .15s;
+    html { height: 100%; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; margin: 0; min-height: 100%;
+      padding: 22px 24px 28px; background: #F4F6F9; color: #1F2733; font-size: 13px; line-height: 1.45;
+      overflow-y: auto;
     }
-    .mode.active { border-color: #4c7ef3; background: #eef3fe; }
-    .mode .ttl { font-weight: 700; font-size: 14px; }
-    .mode .desc { font-size: 12px; color: #5b6472; margin-top: 6px; line-height: 1.4; }
-    label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
-    input { width: 100%; padding: 10px 12px; font-size: 14px; border: 1px solid #c6ccd6; border-radius: 8px; outline: none; }
-    input:focus { border-color: #4c7ef3; box-shadow: 0 0 0 3px rgba(76,126,243,.15); }
-    .examples { font-size: 12px; color: #8a93a2; margin-top: 6px; }
-    .row { display: flex; gap: 10px; margin-top: 18px; }
-    button { flex: 1; padding: 11px 14px; font-size: 14px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; }
-    .test { background: #e7ebf2; color: #1f2430; }
-    .save { background: #4c7ef3; color: #fff; }
-    .save:disabled { opacity: .5; cursor: default; }
-    #status { margin-top: 12px; font-size: 13px; min-height: 18px; }
-    .ok { color: #1a8a4a; } .err { color: #d23b3b; }
-    #clientBox { display: none; }
-    #hostBox { display: none; font-size: 13px; color: #5b6472; line-height: 1.5;
-      background: #fff; border: 1px solid #e1e6ee; border-radius: 8px; padding: 12px; margin-top: 6px; }
+    h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: -.01em; }
+    .sub { font-size: 13px; color: #5C6B7F; margin: 0 0 16px; }
+    .sub b { color: #3457D5; font-weight: 600; }
+
+    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+    .mode {
+      border: 1.5px solid #D9E0EA; border-radius: 10px; padding: 13px 14px; cursor: pointer; background: #fff;
+      transition: border-color .12s, box-shadow .12s;
+    }
+    .mode:hover { border-color: #B9C6DB; }
+    .mode.active { border-color: #3457D5; box-shadow: 0 0 0 3px rgba(52,87,213,.12); }
+    .mode .ttl { font-weight: 700; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+    .mode .dot { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #B9C6DB; flex: none; }
+    .mode.active .dot { border-color: #3457D5; background: radial-gradient(#3457D5 45%, #fff 52%); }
+    .mode .desc { font-size: 12px; color: #5C6B7F; margin-top: 6px; }
+
+    .card { background: #fff; border: 1px solid #D9E0EA; border-radius: 10px; padding: 14px 18px 16px; margin-bottom: 14px; }
+    .card h2 { font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #7A8797; margin: 0 0 6px; }
+    label { display: block; font-size: 12.5px; font-weight: 600; color: #35424F; margin: 12px 0 5px; }
+    input[type=text], input[type=number], input[type=password] {
+      width: 100%; height: 36px; padding: 0 11px; font-size: 13.5px; font-family: inherit; color: #1F2733;
+      border: 1px solid #C9D3E0; border-radius: 7px; outline: none; background: #fff;
+    }
+    input:focus { border-color: #3457D5; box-shadow: 0 0 0 3px rgba(52,87,213,.15); }
+    .help { font-size: 12px; color: #7A8797; margin-top: 5px; }
+    .with-btn { display: flex; gap: 8px; }
+    .with-btn input { flex: 1; min-width: 0; }
+
+    .btn {
+      height: 36px; padding: 0 14px; font-size: 13px; font-weight: 600; font-family: inherit; border-radius: 7px;
+      border: 1px solid #C9D3E0; background: #fff; color: #1F2733; cursor: pointer; white-space: nowrap;
+    }
+    .btn:hover { background: #F4F6F9; }
+    .btn.primary { background: #3457D5; border-color: #3457D5; color: #fff; }
+    .btn.primary:hover { background: #2C4BBE; }
+    .btn:disabled { opacity: .55; cursor: default; }
+
+    .note { font-size: 12px; color: #35424F; background: #EEF2FA; border: 1px solid #D6DFF3; border-radius: 7px; padding: 9px 11px; margin-top: 14px; }
+    .note code { font-family: Consolas, 'Courier New', monospace; font-size: 12px; color: #3457D5; }
+
+    details { margin-top: 2px; }
+    summary { cursor: pointer; font-weight: 600; font-size: 12.5px; color: #3457D5; list-style: none; user-select: none; }
+    summary::-webkit-details-marker { display: none; }
+    summary::before { content: '▸ '; }
+    details[open] summary::before { content: '▾ '; }
+
+    .actions { display: flex; gap: 10px; justify-content: flex-end; align-items: center; margin-top: 4px; }
+    #status { margin-top: 10px; font-size: 12.5px; min-height: 18px; text-align: right; }
+    #status.ok { color: #1E8E4A; }
+    #status.err { color: #D23B3B; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
-  <h1>Настройка подключения</h1>
-  <p class="hint">Выберите роль этого компьютера. Сменить можно позже: меню «Файл → Настройка подключения».</p>
+  <h1>Настройка системы</h1>
+  <p class="sub" id="subtitle">Загрузка…</p>
 
   <div class="modes">
     <div class="mode" id="mHost" data-mode="host">
-      <div class="ttl">🖥️ Хост (сервер)</div>
-      <div class="desc">На этом ПК работает база и сервер. Остальные подключаются к нему.</div>
+      <div class="ttl"><span class="dot"></span>Хост (сервер)</div>
+      <div class="desc">На этом компьютере работают база данных и сервер. Остальные подключаются к нему по сети.</div>
     </div>
     <div class="mode" id="mClient" data-mode="client">
-      <div class="ttl">💻 Клиент</div>
-      <div class="desc">Подключиться к компьютеру-хосту в локальной сети.</div>
+      <div class="ttl"><span class="dot"></span>Клиент</div>
+      <div class="desc">Подключение к компьютеру-хосту в локальной сети. Своей базы данных нет.</div>
     </div>
   </div>
 
-  <div id="hostBox">
-    Этот компьютер станет сервером. База данных запустится автоматически.
-    На других ноутбуках выберите «Клиент» и укажите адрес этого ПК
-    (его IP в локальной сети, порт 3001).
+  <div class="card hidden" id="hostBox">
+    <h2>Хост</h2>
+    <label for="hostPort">Порт сервера</label>
+    <input id="hostPort" type="number" min="1024" max="65535" step="1" placeholder="3001" />
+    <div class="help">Число от 1024 до 65535. По этому порту к хосту подключаются клиенты.</div>
+
+    <label for="dataDir">Папка данных базы</label>
+    <div class="with-btn">
+      <input id="dataDir" type="text" spellcheck="false" />
+      <button class="btn" id="pickData" type="button">Выбрать…</button>
+    </div>
+    <div class="help" id="dataDirHelp"></div>
+
+    <label for="backupDir">Папка резервных копий</label>
+    <div class="with-btn">
+      <input id="backupDir" type="text" spellcheck="false" />
+      <button class="btn" id="pickBackup" type="button">Выбрать…</button>
+    </div>
+    <div class="help">Сюда сервер складывает автоматические резервные копии базы.</div>
+
+    <div class="note" id="lanNote"></div>
   </div>
 
-  <div id="clientBox">
+  <div class="card hidden" id="clientBox">
+    <h2>Клиент</h2>
     <label for="url">Адрес хоста</label>
-    <input id="url" type="text" placeholder="http://192.168.1.50:3001" />
-    <div class="examples">Пример: http://192.168.1.50:3001 — IP компьютера-хоста и порт 3001</div>
+    <div class="with-btn">
+      <input id="url" type="text" placeholder="http://192.168.1.50:3001" spellcheck="false" />
+      <button class="btn" id="test" type="button">Проверить</button>
+    </div>
+    <div class="help">IP компьютера-хоста и порт сервера, например 192.168.1.50:3001 — «http://» подставится автоматически.</div>
   </div>
 
-  <div class="row">
-    <button class="test" id="test">Проверить</button>
-    <button class="save" id="save" disabled>Запустить</button>
+  <div class="card" id="sysBox">
+    <h2>Сисадмин</h2>
+    <div id="sysFirst">
+      <label for="pwd">Пароль сисадмина</label>
+      <input id="pwd" type="password" autocomplete="new-password" />
+      <label for="pwd2">Повторите пароль</label>
+      <input id="pwd2" type="password" autocomplete="new-password" />
+      <div class="help">Минимум 8 символов. Нужен только для входа в этот экран; сотрудники отеля его не используют.</div>
+    </div>
+    <details id="sysChange" class="hidden">
+      <summary>Сменить пароль сисадмина</summary>
+      <label for="npwd">Новый пароль</label>
+      <input id="npwd" type="password" autocomplete="new-password" />
+      <label for="npwd2">Повторите пароль</label>
+      <input id="npwd2" type="password" autocomplete="new-password" />
+      <div class="help">Необязательно. Оставьте поля пустыми, чтобы не менять пароль.</div>
+    </details>
+  </div>
+
+  <div class="card" id="updBox">
+    <h2>Обновления</h2>
+    <label for="updateUrl">Сервер обновлений (URL)</label>
+    <input id="updateUrl" type="text" placeholder="https://updates.example.com/hotel-booking/" spellcheck="false" />
+    <div class="help">Необязательно. Адрес папки с файлами обновлений (latest.yml и установщик). Пустое поле — проверка обновлений выключена.</div>
+  </div>
+
+  <div class="actions">
+    <button class="btn primary" id="save" type="button" disabled>Сохранить и запустить</button>
   </div>
   <div id="status"></div>
 
   <script>
-    let mode = null
+    // Экран «Настройка системы». Данные и проверки — через window.settingsApi (settings-preload.js).
+    // Валидация здесь дублирует main.js (config:apply) только ради быстрых подсказок;
+    // источник истины — main.js.
     const $ = (id) => document.getElementById(id)
-    const setStatus = (t, c) => { $('status').textContent = t; $('status').className = c || '' }
+    const state = {
+      mode: null, firstRun: true, hasSysadmin: false, lanIps: [],
+      defaults: { hostPort: 3001, dataDir: '', backupDir: '' },
+    }
+
+    function setStatus(text, cls) { const s = $('status'); s.textContent = text || ''; s.className = cls || '' }
+    function show(id, on) { $(id).classList.toggle('hidden', !on) }
+    // Пароль сисадмина обязателен, пока не задан (первый запуск или старая установка без него).
+    function needPassword() { return state.firstRun || !state.hasSysadmin }
 
     function selectMode(m) {
-      mode = m
+      state.mode = m
       $('mHost').classList.toggle('active', m === 'host')
       $('mClient').classList.toggle('active', m === 'client')
-      $('hostBox').style.display = m === 'host' ? 'block' : 'none'
-      $('clientBox').style.display = m === 'client' ? 'block' : 'none'
-      $('test').style.display = m === 'client' ? 'block' : 'none'
+      show('hostBox', m === 'host')
+      show('clientBox', m === 'client')
       $('save').disabled = false
-      $('save').textContent = m === 'host' ? 'Запустить сервер' : 'Подключиться'
       setStatus('')
+    }
+
+    // «Адрес для клиентов»: реальные IPv4 этого компьютера + выбранный порт.
+    function updateLanNote() {
+      const port = parseInt($('hostPort').value, 10) || state.defaults.hostPort
+      const box = $('lanNote')
+      box.textContent = 'Адрес для клиентов: '
+      const addCode = (text) => { const c = document.createElement('code'); c.textContent = text; box.appendChild(c) }
+      const addText = (text) => box.appendChild(document.createTextNode(text))
+      if (!state.lanIps.length) {
+        addCode('http://<IP этого компьютера>:' + port)
+        addText(' — сетевой адрес не определён, проверьте подключение к сети.')
+        return
+      }
+      state.lanIps.forEach((ip, i) => {
+        if (i) addText(i === state.lanIps.length - 1 ? ' или ' : ', ')
+        addCode('http://' + ip + ':' + port)
+      })
+      addText('. Укажите его на других компьютерах в режиме «Клиент».')
+    }
+
+    async function init() {
+      const cfg = (await window.settingsApi.get()) || {}
+      state.firstRun = !!cfg.firstRun
+      state.hasSysadmin = !!cfg.hasSysadmin
+      state.lanIps = Array.isArray(cfg.lanIps) ? cfg.lanIps : []
+      state.defaults = Object.assign(state.defaults, cfg.defaults || {})
+
+      $('hostPort').value = cfg.hostPort || state.defaults.hostPort
+      $('dataDir').value = cfg.dataDir || state.defaults.dataDir || ''
+      $('backupDir').value = cfg.backupDir || state.defaults.backupDir || ''
+      $('url').value = cfg.serverUrl || ''
+      $('updateUrl').value = cfg.updateUrl || ''
+
+      if (state.firstRun) {
+        $('subtitle').innerHTML = '<b>Шаг 1 из 2: подключение.</b> Выберите роль этого компьютера. ' +
+          'Шаг 2 — отель и учётные записи сотрудников — пройдёт уже в приложении.'
+        $('dataDirHelp').textContent = 'Можно указать пустую папку (база создастся автоматически) ' +
+          'или папку с данными существующей установки.'
+        $('save').textContent = 'Сохранить и запустить'
+      } else {
+        $('subtitle').textContent = 'Режим работы, порт и папки этого компьютера. ' +
+          'После сохранения приложение перезапустится.'
+        $('dataDirHelp').textContent = 'Смена папки не переносит базу: в новой папке будет создана пустая база, ' +
+          'прежние данные останутся в старой папке.'
+        $('save').textContent = 'Сохранить и перезапустить'
+      }
+
+      show('sysFirst', needPassword())
+      show('sysChange', !needPassword())
+      updateLanNote()
+      if (cfg.mode) selectMode(cfg.mode)
+    }
+
+    function passwordFields() {
+      return needPassword()
+        ? { p1: $('pwd').value, p2: $('pwd2').value }
+        : { p1: $('npwd').value, p2: $('npwd2').value }
+    }
+
+    // Возвращает текст ошибки или null.
+    function validateForm() {
+      if (!state.mode) return 'Выберите режим работы: хост или клиент'
+      if (state.mode === 'host') {
+        const port = Number($('hostPort').value)
+        if (!Number.isInteger(port) || port < 1024 || port > 65535) return 'Порт сервера: целое число от 1024 до 65535'
+        if (!$('dataDir').value.trim()) return 'Укажите папку данных базы'
+        if (!$('backupDir').value.trim()) return 'Укажите папку резервных копий'
+      } else if (!$('url').value.trim()) {
+        return 'Укажите адрес хоста'
+      }
+      const upd = $('updateUrl').value.trim()
+      if (upd && !/^https?:\/\/\S+$/i.test(upd)) return 'Сервер обновлений: укажите адрес вида http(s)://…'
+      const { p1, p2 } = passwordFields()
+      if (needPassword() || p1 || p2) {
+        if (p1.length < 8) return 'Пароль сисадмина: минимум 8 символов'
+        if (p1 !== p2) return 'Пароли сисадмина не совпадают'
+      }
+      return null
     }
 
     $('mHost').onclick = () => selectMode('host')
     $('mClient').onclick = () => selectMode('client')
+    $('hostPort').oninput = updateLanNote
 
-    window.settingsApi.get().then((cfg) => {
-      if (cfg && cfg.serverUrl) $('url').value = cfg.serverUrl
-      if (cfg && cfg.mode) selectMode(cfg.mode)
-    })
+    $('pickData').onclick = async () => {
+      const dir = await window.settingsApi.pickFolder('Папка данных базы')
+      if (dir) $('dataDir').value = dir
+    }
+    $('pickBackup').onclick = async () => {
+      const dir = await window.settingsApi.pickFolder('Папка резервных копий')
+      if (dir) $('backupDir').value = dir
+    }
 
     $('test').onclick = async () => {
       const url = $('url').value.trim()
-      if (!url) return setStatus('Введите адрес', 'err')
+      if (!url) return setStatus('Укажите адрес хоста', 'err')
       setStatus('Проверяю…')
       const r = await window.settingsApi.test(url)
-      if (r.ok) setStatus('✓ Сервер отвечает', 'ok')
-      else setStatus('✗ Недоступен: ' + (r.error || ('HTTP ' + r.status)), 'err')
+      if (r && r.ok) setStatus('Сервер отвечает', 'ok')
+      else setStatus('Сервер недоступен: ' + ((r && r.error) || ('HTTP ' + (r && r.status))), 'err')
     }
 
     $('save').onclick = async () => {
-      if (!mode) return
-      if (mode === 'client' && !$('url').value.trim()) return setStatus('Введите адрес хоста', 'err')
+      const err = validateForm()
+      if (err) return setStatus(err, 'err')
+
+      const payload = { mode: state.mode }
+      if (state.mode === 'host') {
+        payload.hostPort = Number($('hostPort').value)
+        payload.dataDir = $('dataDir').value.trim()
+        payload.backupDir = $('backupDir').value.trim()
+      } else {
+        payload.serverUrl = $('url').value.trim()
+      }
+      payload.updateUrl = $('updateUrl').value.trim()
+      const { p1, p2 } = passwordFields()
+      if (p1 || p2) { payload.sysadminPassword = p1; payload.sysadminPasswordConfirm = p2 }
+
       $('save').disabled = true
-      setStatus(mode === 'host' ? 'Запуск сервера…' : 'Подключение…')
-      await window.settingsApi.apply({ mode, serverUrl: $('url').value.trim() })
+      setStatus(state.firstRun
+        ? (state.mode === 'host' ? 'Запуск базы данных и сервера…' : 'Подключение…')
+        : 'Сохранение и перезапуск…')
+      try {
+        const r = await window.settingsApi.apply(payload)
+        if (!r || !r.ok) {
+          $('save').disabled = false
+          return setStatus((r && r.error) || 'Не удалось сохранить настройки', 'err')
+        }
+        if (r.relaunch) setStatus('Перезапуск приложения…', 'ok')
+      } catch (e) {
+        $('save').disabled = false
+        setStatus('Ошибка: ' + ((e && e.message) || e), 'err')
+      }
     }
 
-    $('url') && ($('url').onkeydown = (e) => { if (e.key === 'Enter') $('save').click() })
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target && e.target.tagName === 'INPUT' && !$('save').disabled) $('save').click()
+    })
+
+    init().catch((e) => setStatus('Не удалось загрузить настройки: ' + ((e && e.message) || e), 'err'))
   </script>
 </body>
 </html>

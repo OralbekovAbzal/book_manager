@@ -26,6 +26,10 @@ const today = new Date(Date.UTC(_todayNow.getUTCFullYear(), _todayNow.getUTCMont
 
 const LS_FILTERS = 'grid_filters'
 
+// Порядковый номер запроса сетки. При быстром листании ответы приходят не по порядку —
+// применяем только ответ на самый последний запрос (см. fetchGrid).
+let gridReqSeq = 0
+
 function loadFilters(): GridFilters {
   const defaults: GridFilters = { building: '', categoryId: '', floor: '', capacity: '', features: '' }
   try {
@@ -98,11 +102,17 @@ export const useGridStore = create<GridStore>((set, get) => ({
 
   fetchGrid: async () => {
     const { dateFrom, dateTo, filters, guestSearch } = get()
+    const seq = ++gridReqSeq
     set({ loading: true, error: null })
     try {
       const data = await fetchGrid(dateFrom, dateTo, filters, guestSearch)
+      // Пока ждали — ушёл более новый запрос: этот ответ устарел, ничего не трогаем
+      // (loading снимет актуальный запрос).
+      if (seq !== gridReqSeq) return
       set({ data, loading: false })
     } catch (err: unknown) {
+      // Ошибку устаревшего запроса тоже игнорируем — она не про текущий период
+      if (seq !== gridReqSeq) return
       const msg = err instanceof Error ? err.message : 'Ошибка загрузки данных'
       set({ error: msg, loading: false })
     }
@@ -231,10 +241,13 @@ export const useGridStore = create<GridStore>((set, get) => ({
 
 // — Immutable helpers —
 
+// Вставка в строку номера booking.roomId. Бронь с таким id сначала убираем отовсюду —
+// повторное событие (переезд шлёт updated+created) не должно плодить дубли.
 function insertBooking(data: GridData, booking: GridBooking): GridData {
+  const cleaned = removeBooking(data, booking.id)
   return {
-    ...data,
-    categories: data.categories.map((cat) => ({
+    ...cleaned,
+    categories: cleaned.categories.map((cat) => ({
       ...cat,
       rooms: cat.rooms.map((room) =>
         room.id === booking.roomId
@@ -245,19 +258,11 @@ function insertBooking(data: GridData, booking: GridBooking): GridData {
   }
 }
 
+// Замена = удалить старую версию из всех номеров + вставить в номер booking.roomId.
+// Бронь могла сменить номер (переезд, оптимизатор) — замена «на месте» оставляла её
+// в старой строке. Если номера нет в текущей выборке (фильтр) — бронь просто исчезает.
 function replaceBooking(data: GridData, booking: GridBooking): GridData {
-  return {
-    ...data,
-    categories: data.categories.map((cat) => ({
-      ...cat,
-      rooms: cat.rooms.map((room) => ({
-        ...room,
-        bookings: room.bookings.map((b) =>
-          b.id === booking.id ? normalizeBooking(booking) : b
-        ),
-      })),
-    })),
-  }
+  return insertBooking(data, booking)
 }
 
 function removeBooking(data: GridData, bookingId: number): GridData {

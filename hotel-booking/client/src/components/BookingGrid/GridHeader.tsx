@@ -6,6 +6,9 @@ import { useGridSettings } from './GridSettingsContext'
 interface Props {
   dates: string[]
   today: string
+  /** Ширина вертикальной полосы прокрутки тела сетки — добавляется отступом справа,
+   *  чтобы предельный scrollLeft шапки совпадал с телом (см. BookingGrid) */
+  scrollbarWidth?: number
 }
 
 interface MonthGroup {
@@ -15,7 +18,7 @@ interface MonthGroup {
 
 const MONTH_ROW_H = 30
 
-export const GridHeader: React.FC<Props> = ({ dates, today }) => {
+export const GridHeader: React.FC<Props> = ({ dates, today, scrollbarWidth = 0 }) => {
   const { DAY_WIDTH, ROOM_COL_WIDTH, HEADER_HEIGHT, FONT_SIZE } = useGridSettings()
 
   const monthGroups = useMemo<MonthGroup[]>(() => {
@@ -42,6 +45,7 @@ export const GridHeader: React.FC<Props> = ({ dates, today }) => {
       flexDirection: 'column',
       minWidth: 'max-content',
       height: totalHeight,
+      paddingRight: scrollbarWidth,
       background: 'var(--bg)',
       borderBottom: '1px solid var(--border)',
     }}>
@@ -113,7 +117,9 @@ export const GridHeader: React.FC<Props> = ({ dates, today }) => {
         {dates.map((date) => {
           const d         = parseISO(date)
           const isToday   = date === today
-          const dow       = d.getUTCDay()
+          // День недели считаем как в GridRow/DateSummary — от полудня UTC.
+          // parseISO даёт локальную полночь, и getUTCDay() в UTC+ сдвигал выходные на день назад.
+          const dow       = new Date(date + 'T12:00:00Z').getUTCDay()
           const isWeekend = dow === 0 || dow === 6
 
           return (

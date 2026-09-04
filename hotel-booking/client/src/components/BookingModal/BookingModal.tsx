@@ -12,10 +12,12 @@ import {
   checkInBooking,
   checkOutBooking,
   checkAvailability,
+  fetchBooking,
 } from '../../api/bookings'
-import type { Room, GridBooking } from '../../types'
+import type { Room, GridBooking, Booking } from '../../types'
 import { fetchRoomAvailability } from '../../api/occupancy'
-import { calculate } from '../../utils/calculator'
+import { calculate, buildCalcKey } from '../../utils/calculator'
+import type { CalcInput, CalcResult } from '../../utils/calculator'
 import { DatePicker } from '../ui/DatePicker'
 
 interface FormValues {
@@ -108,13 +110,79 @@ const CalcSection: React.FC<{ title: string; defaultOpen?: boolean; badge?: numb
 
 const fmt = (n: number) => n.toLocaleString('ru-RU') + ' ₸'
 
-interface ResultCardProps {
-  result: ReturnType<typeof calculate>
-  discountPercent: number
-  prepaymentPercent: number
+// Сохранённые суммы брони (edit без пересчёта). totalAmount/prepaidAmount могут отсутствовать,
+// если полную версию с сервера загрузить не удалось.
+interface SavedTotals {
+  totalAmount?: number
+  prepaidAmount?: number
+  paidAmount: number
 }
 
-const ResultCard: React.FC<ResultCardProps> = ({ result, discountPercent, prepaymentPercent }) => {
+interface ResultCardProps {
+  result: CalcResult
+  discountPercent: number
+  prepaymentPercent: number
+  categoryName: string
+  loading?: boolean
+  saved?: SavedTotals | null   // edit: показать сохранённые суммы вместо расчёта
+  onRecalc?: () => void        // кнопка «Пересчитать по тарифу»
+  willRecalc?: boolean         // edit: итог уйдёт на сервер при сохранении
+}
+
+const resultRowStyle: React.CSSProperties = {
+  display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280', marginBottom: 4,
+}
+
+const ResultCard: React.FC<ResultCardProps> = ({
+  result, discountPercent, prepaymentPercent, categoryName, loading, saved, onRecalc, willRecalc,
+}) => {
+  if (loading) {
+    return (
+      <div style={{ textAlign: 'center', color: '#9ca3af', fontSize: '1rem', padding: '12px 0' }}>
+        Загрузка…
+      </div>
+    )
+  }
+
+  // Edit без изменения входов калькулятора: итог не пересчитываем, показываем сохранённый
+  if (saved) {
+    const fmtOpt = (n?: number) => (n != null ? fmt(n) : '—')
+    const remaining = saved.totalAmount != null ? saved.totalAmount - saved.paidAmount : undefined
+    return (
+      <div>
+        <div style={{ fontSize: '0.8rem', color: '#9ca3af', marginBottom: 6 }}>Сохранённая сумма брони</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: '#111827', marginBottom: 6 }}>
+          <span>Итого</span>
+          <span style={{ color: '#6366f1' }}>{fmtOpt(saved.totalAmount)}</span>
+        </div>
+        <div style={resultRowStyle}>
+          <span>Предоплата</span>
+          <span style={{ color: '#059669', fontWeight: 600 }}>{fmtOpt(saved.prepaidAmount)}</span>
+        </div>
+        <div style={resultRowStyle}>
+          <span>Оплачено</span>
+          <span style={{ fontWeight: 600 }}>{fmt(saved.paidAmount)}</span>
+        </div>
+        <div style={{ ...resultRowStyle, marginBottom: 10 }}>
+          <span>Остаток</span>
+          <span style={{ color: '#dc2626', fontWeight: 600 }}>{fmtOpt(remaining)}</span>
+        </div>
+        <button type="button" onClick={onRecalc} style={{ ...cancelBtnStyle, width: '100%', fontSize: '0.9rem' }}>
+          Пересчитать по тарифу
+        </button>
+      </div>
+    )
+  }
+
+  // Категория без тарифа: 0 из калькулятора — не цена
+  if (result.nights > 0 && result.noRates && categoryName) {
+    return (
+      <div style={{ textAlign: 'center', color: '#b45309', fontSize: '0.95rem', padding: '12px 0' }}>
+        Для категории «{categoryName}» нет тарифа — итог не рассчитан
+      </div>
+    )
+  }
+
   const hasGuests = result.nights > 0 && result.total !== 0
   if (!hasGuests) {
     return (
@@ -126,6 +194,11 @@ const ResultCard: React.FC<ResultCardProps> = ({ result, discountPercent, prepay
 
   return (
     <div>
+      {result.missingNights > 0 && (
+        <div style={{ ...infoBoxStyle('#fffbeb', '#b45309'), fontSize: '0.85rem', marginBottom: 8 }}>
+          {result.missingNights} ноч. вне сезонов — посчитаны по тарифу «{result.fallbackPeriodName ?? '—'}»
+        </div>
+      )}
       {result.breakdown.map((line, i) => (
         <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280', marginBottom: 4 }}>
           <span>{line.label} ({line.nights} н.)</span>
@@ -157,6 +230,11 @@ const ResultCard: React.FC<ResultCardProps> = ({ result, discountPercent, prepay
           <span>Остаток</span>
           <span style={{ color: '#dc2626', fontWeight: 600 }}>{fmt(result.remaining)}</span>
         </div>
+        {willRecalc && (
+          <div style={{ marginTop: 8, fontSize: '0.8rem', color: '#9ca3af', textAlign: 'center' }}>
+            Итог будет пересчитан при сохранении
+          </div>
+        )}
       </div>
     </div>
   )
@@ -190,6 +268,12 @@ export const BookingModal: React.FC = () => {
   const [selectedFlags, setSelectedFlags] = useState<string[]>([])
   const [customFlag, setCustomFlag] = useState('')
 
+  // Edit: полная бронь с сервера (объект из сетки может быть частичным) и её загрузка
+  const [serverBooking, setServerBooking] = useState<Booking | null>(null)
+  const [loadingBooking, setLoadingBooking] = useState(false)
+  // Edit: админ явно нажал «Пересчитать по тарифу»
+  const [recalc, setRecalc] = useState(false)
+
   const isEdit        = modal.mode === 'edit'
   const isMaintenance = modal.mode === 'maintenance' ||
     (modal.mode === 'edit' && modal.booking?.source === 'ремонт')
@@ -213,10 +297,27 @@ export const BookingModal: React.FC = () => {
     fetchRooms({ isActive: true }).then(r => setRooms([...r].sort(compareRooms)))
   }, [])
 
+  // Счётчики гостей, скидка, предоплата, «Оплачено» — из брони; {} даёт сброс для create
+  const applyCalcFields = (b: Partial<Booking>) => {
+    setAdultsWithMeals(b.adultsWithMeals ?? 0)
+    setChildrenWithMeals(b.childrenWithMeals ?? 0)
+    setAdultsNoMeals(b.adultsNoMeals ?? 0)
+    setChildrenNoMeals(b.childrenNoMeals ?? 0)
+    setExtraBedsWithMeals(b.extraBedsWithMeals ?? 0)
+    setExtraBedsNoMeals(b.extraBedsNoMeals ?? 0)
+    setDisabledAdults(b.disabledAdults ?? 0)
+    setDisabledChildren(b.disabledChildren ?? 0)
+    setDiscountPercent(b.discountPercent ?? 0)
+    setPrepaymentPercent(b.prepaymentPercent ?? 50)
+    setPaidAmount(b.paidAmount ?? 0)
+  }
+
   // Pre-fill form for edit/create mode
   useEffect(() => {
     if (!modal.open) return
+    let cancelled = false
     if (isEdit && booking) {
+      // Форма — из объекта сетки: при перетаскивании в него уже подмешаны новые roomId/checkIn/checkOut
       reset({
         roomId: booking.roomId,
         guestName: booking.guestName,
@@ -227,23 +328,31 @@ export const BookingModal: React.FC = () => {
         notes: booking.notes ?? '',
         immediateCheckIn: false,
       })
-      // Pre-fill calculator state from booking
-      setAdultsWithMeals(booking.adultsWithMeals ?? 0)
-      setChildrenWithMeals(booking.childrenWithMeals ?? 0)
-      setAdultsNoMeals(booking.adultsNoMeals ?? 0)
-      setChildrenNoMeals(booking.childrenNoMeals ?? 0)
-      setExtraBedsWithMeals(booking.extraBedsWithMeals ?? 0)
-      setExtraBedsNoMeals(booking.extraBedsNoMeals ?? 0)
-      setDisabledAdults(booking.disabledAdults ?? 0)
-      setDisabledChildren(booking.disabledChildren ?? 0)
-      setDiscountPercent(booking.discountPercent ?? 0)
-      setPrepaymentPercent(booking.prepaymentPercent ?? 50)
-      setPaidAmount(booking.paidAmount ?? 0)
+      // Предварительно — из объекта сетки; ниже перезапишем полной серверной версией
+      applyCalcFields(booking)
       // Флаги: предустановленные отдельно, произвольный текст отдельно
       const allFlags = booking.flags ?? []
       const knownIds = new Set((roomFund.bookingFlags ?? []).map((f: BookingFlagItem) => f.id))
       setSelectedFlags(allFlags.filter((f: string) => knownIds.has(f)))
       setCustomFlag(allFlags.find((f: string) => !knownIds.has(f)) ?? '')
+
+      // Гостей и деньги ВСЕГДА берём с сервера: объект из сетки может быть частичным,
+      // и раньше `?? 0` обнулял их при сохранении. Пока грузится — «Сохранить» заблокирована.
+      setServerBooking(null)
+      setRecalc(false)
+      setLoadingBooking(true)
+      fetchBooking(booking.id)
+        .then(full => {
+          if (cancelled) return
+          setServerBooking(full)
+          applyCalcFields(full)
+        })
+        .catch(() => {
+          if (!cancelled) setApiError('Не удалось загрузить бронь целиком, суммы могут быть неточными')
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingBooking(false)
+        })
     } else {
       reset({
         roomId: modal.prefillRoomId ?? 0,
@@ -256,24 +365,21 @@ export const BookingModal: React.FC = () => {
         immediateCheckIn: modal.prefillImmediateCheckIn ?? false,
       })
       // Reset calculator
-      setAdultsWithMeals(0)
-      setChildrenWithMeals(0)
-      setAdultsNoMeals(0)
-      setChildrenNoMeals(0)
-      setExtraBedsWithMeals(0)
-      setExtraBedsNoMeals(0)
-      setDisabledAdults(0)
-      setDisabledChildren(0)
-      setDiscountPercent(0)
-      setPrepaymentPercent(50)
-      setPaidAmount(0)
+      applyCalcFields({})
       setSelectedFlags([])
       setCustomFlag('')
+      setServerBooking(null)
+      setRecalc(false)
+      setLoadingBooking(false)
     }
     setConflict(null)
     setApiError('')
     setRoomOccupied(false)
-  }, [modal.open, modal.mode])
+    // Диалог «Ранний выезд» не должен переживать закрытие формы и всплывать на другой брони
+    setEarlyCheckoutConfirm(false)
+    // Закрыли модалку (или открыли другую бронь) до ответа сервера — ответ игнорируем
+    return () => { cancelled = true }
+  }, [modal.open, modal.mode, booking?.id])
 
   // Watched form fields
   const watchedRoomId  = watch('roomId')
@@ -297,29 +403,59 @@ export const BookingModal: React.FC = () => {
     return Object.keys(rates.extraBedRates).length > 0
   }, [categoryName, pricing.categoryRates])
 
-  // Calculator result
-  const calcResult = useMemo(() => {
-    return calculate({
-      checkIn: watchedCheckIn,
-      checkOut: watchedCheckOut,
-      categoryName,
-      adultsWithMeals,
-      childrenWithMeals,
-      adultsNoMeals,
-      childrenNoMeals,
-      extraBedsWithMeals,
-      extraBedsNoMeals,
-      disabledAdults,
-      disabledChildren,
-      discountPercent,
-      prepaymentPercent,
-    }, pricing)
-  }, [
-    watchedCheckIn, watchedCheckOut, categoryName, pricing,
+  // Входы калькулятора — общие для расчёта и для ключа «изменились ли входы»
+  const calcInput = useMemo<CalcInput>(() => ({
+    checkIn: watchedCheckIn,
+    checkOut: watchedCheckOut,
+    categoryName,
+    adultsWithMeals,
+    childrenWithMeals,
+    adultsNoMeals,
+    childrenNoMeals,
+    extraBedsWithMeals,
+    extraBedsNoMeals,
+    disabledAdults,
+    disabledChildren,
+    discountPercent,
+    prepaymentPercent,
+  }), [
+    watchedCheckIn, watchedCheckOut, categoryName,
     adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
     extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
     discountPercent, prepaymentPercent,
   ])
+
+  // Calculator result
+  const calcResult = useMemo(() => calculate(calcInput, pricing), [calcInput, pricing])
+
+  // Базовый ключ входов — из СЕРВЕРНОЙ версии брони (категория: room.category.name из BOOKING_SELECT)
+  const baseCalcKey = useMemo(() => {
+    if (!serverBooking) return null
+    return buildCalcKey({
+      checkIn: serverBooking.checkIn.slice(0, 10),
+      checkOut: serverBooking.checkOut.slice(0, 10),
+      categoryName: serverBooking.room?.category?.name ?? '',
+      adultsWithMeals: serverBooking.adultsWithMeals ?? 0,
+      childrenWithMeals: serverBooking.childrenWithMeals ?? 0,
+      adultsNoMeals: serverBooking.adultsNoMeals ?? 0,
+      childrenNoMeals: serverBooking.childrenNoMeals ?? 0,
+      extraBedsWithMeals: serverBooking.extraBedsWithMeals ?? 0,
+      extraBedsNoMeals: serverBooking.extraBedsNoMeals ?? 0,
+      disabledAdults: serverBooking.disabledAdults ?? 0,
+      disabledChildren: serverBooking.disabledChildren ?? 0,
+      discountPercent: serverBooking.discountPercent ?? 0,
+      prepaymentPercent: serverBooking.prepaymentPercent ?? 50,
+    })
+  }, [serverBooking])
+
+  // В edit итог пересчитываем только если изменились входы калькулятора (даты, категория, гости,
+  // скидка, предоплата) или админ нажал «Пересчитать по тарифу». Иначе правка заметки на ноутбуке
+  // с другим тарифом в localStorage молча переоценивала бронь.
+  // rooms.length > 0: пока номера не загружены, categoryName пустой и ключи различались бы ложно.
+  const inputsChanged = isEdit && baseCalcKey !== null && rooms.length > 0 && baseCalcKey !== buildCalcKey(calcInput)
+  const sendTotals = !isEdit || recalc || inputsChanged
+  // Категория без тарифа: 0 из калькулятора — не цена, суммы не отправляем
+  const includeTotals = sendTotals && !calcResult.noRates
 
   // Real-time availability check
   useEffect(() => {
@@ -357,6 +493,8 @@ export const BookingModal: React.FC = () => {
 
   const onSubmit = async (values: FormValues) => {
     if (conflict) return
+    // Enter в поле формы обходит disabled-кнопку — не отправляем нули, пока бронь не загружена
+    if (isEdit && loadingBooking) return
 
     // Block past-date bookings and check-ins (only maintenance allowed retroactively).
     // Сравниваем с датой рабочей смены (effectiveToday), а не с датой устройства —
@@ -389,8 +527,10 @@ export const BookingModal: React.FC = () => {
         disabledChildren,
         discountPercent,
         prepaymentPercent,
-        totalAmount: calcResult.totalAfterDiscount,
-        prepaidAmount: calcResult.prepaidAmount,
+        // Итог и предоплата — только при создании, изменении входов или явном «Пересчитать»
+        ...(includeTotals
+          ? { totalAmount: calcResult.totalAfterDiscount, prepaidAmount: calcResult.prepaidAmount }
+          : {}),
         paidAmount,
         flags: [...selectedFlags, ...(customFlag.trim() ? [customFlag.trim()] : [])],
       }
@@ -502,6 +642,8 @@ export const BookingModal: React.FC = () => {
     >
       <div
         style={{
+          // relative — чтобы диалог «Ранний выезд» (absolute; inset: 0) накрывал только форму
+          position: 'relative',
           width: 960,
           maxWidth: '100%',
           maxHeight: 'calc(100vh - 56px)',
@@ -751,11 +893,11 @@ export const BookingModal: React.FC = () => {
                 <button
                   form="booking-form"
                   type="submit"
-                  disabled={submitting || !!conflict || roomOccupied}
+                  disabled={submitting || loadingBooking || !!conflict || roomOccupied}
                   title={conflict || roomOccupied ? 'Номер занят на выбранные даты' : undefined}
-                  style={submitBtnStyle(!!conflict || roomOccupied || submitting)}
+                  style={submitBtnStyle(!!conflict || roomOccupied || submitting || loadingBooking)}
                 >
-                  {submitting ? 'Сохранение...' : isEdit ? 'Сохранить' : 'Создать бронь'}
+                  {submitting ? 'Сохранение...' : loadingBooking ? 'Загрузка…' : isEdit ? 'Сохранить' : 'Создать бронь'}
                 </button>
               )}
             </div>
@@ -993,6 +1135,15 @@ export const BookingModal: React.FC = () => {
                 result={calcResult}
                 discountPercent={discountPercent}
                 prepaymentPercent={prepaymentPercent}
+                categoryName={categoryName}
+                loading={loadingBooking}
+                saved={isEdit && !sendTotals ? {
+                  totalAmount: (serverBooking ?? booking)?.totalAmount,
+                  prepaidAmount: (serverBooking ?? booking)?.prepaidAmount,
+                  paidAmount,
+                } : null}
+                onRecalc={() => setRecalc(true)}
+                willRecalc={isEdit && sendTotals}
               />
             </div>
           </div>

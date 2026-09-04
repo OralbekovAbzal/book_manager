@@ -1,5 +1,7 @@
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
+// Название/цвет категории входят в ответ сетки (кэш 30 с) — сбрасываем кэш после правок.
+const { invalidateGridCache } = require('./occupancyController')
 
 // GET /api/categories
 async function list(_req, res, next) {
@@ -21,6 +23,7 @@ async function create(req, res, next) {
     const category = await prisma.category.create({
       data: { name: name.trim(), color, description: description?.trim() || null },
     })
+    invalidateGridCache()
     res.status(201).json({ data: category })
   } catch (err) {
     next(err)
@@ -41,6 +44,7 @@ async function update(req, res, next) {
         ...(description !== undefined && { description: description?.trim() || null }),
       },
     })
+    invalidateGridCache()
     res.json({ data: category })
   } catch (err) {
     next(err)
@@ -51,11 +55,20 @@ async function update(req, res, next) {
 async function remove(req, res, next) {
   try {
     const id = parseInt(req.params.id)
-    const roomCount = await prisma.room.count({ where: { categoryId: id, isActive: true } })
+    // Считаем ВСЕ номера категории, включая скрытые (isActive=false): FK Room→Category
+    // без каскада, и удаление с одними скрытыми номерами раньше падало с 500.
+    const [roomCount, hiddenCount] = await prisma.$transaction([
+      prisma.room.count({ where: { categoryId: id } }),
+      prisma.room.count({ where: { categoryId: id, isActive: false } }),
+    ])
     if (roomCount > 0) {
-      return next(createError(`Нельзя удалить категорию: в ней ${roomCount} активных номеров`, 400))
+      return next(createError(
+        `Нельзя удалить категорию: в ней ${roomCount} номеров (из них ${hiddenCount} скрытых). Сначала переместите номера в другую категорию`,
+        400,
+      ))
     }
     await prisma.category.delete({ where: { id } })
+    invalidateGridCache()
     res.json({ message: 'Категория удалена' })
   } catch (err) {
     next(err)

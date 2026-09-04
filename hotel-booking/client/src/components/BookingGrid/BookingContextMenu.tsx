@@ -1,10 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useGridStore } from '../../store/useGridStore'
+import { useAuthStore } from '../../store/useAuthStore'
 
 const MENU_WIDTH = 180
 
 export const BookingContextMenu: React.FC = () => {
   const { contextMenu, closeContextMenu, openEditModal, openDeleteConfirm } = useGridStore()
+  const role = useAuthStore(s => s.admin?.role)
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
 
@@ -40,6 +42,13 @@ export const BookingContextMenu: React.FC = () => {
 
   const booking = contextMenu.booking
 
+  // Закрытые брони сервер не даёт ни редактировать («Нельзя редактировать закрытую бронь»),
+  // ни отменять — пункты не показываем. Отмена заселённого гостя — только администраторам (403).
+  const isClosed = ['CHECKED_OUT', 'CANCELLED', 'NO_SHOW'].includes(booking.status)
+  const isAdmin = role === 'SUPER_ADMIN' || role === 'ADMIN'
+  const canEdit = !isClosed
+  const canDelete = !isClosed && (booking.status !== 'CHECKED_IN' || isAdmin)
+
   return (
     <div
       ref={ref}
@@ -59,17 +68,26 @@ export const BookingContextMenu: React.FC = () => {
         visibility: pos ? 'visible' : 'hidden',
       }}
     >
-      <MenuItem
-        label="Редактировать"
-        icon="✎"
-        onClick={() => openEditModal(booking)}
-      />
-      <MenuItem
-        label="Удалить"
-        icon="🗑"
-        danger
-        onClick={() => openDeleteConfirm(booking)}
-      />
+      {canEdit && (
+        <MenuItem
+          label="Редактировать"
+          icon="✎"
+          onClick={() => openEditModal(booking)}
+        />
+      )}
+      {canDelete && (
+        <MenuItem
+          label="Удалить"
+          icon="🗑"
+          danger
+          onClick={() => openDeleteConfirm(booking)}
+        />
+      )}
+      {!canEdit && !canDelete && (
+        <div style={{ padding: '9px 12px', fontSize: '0.9rem', color: 'var(--text-faint)' }}>
+          Бронь закрыта
+        </div>
+      )}
     </div>
   )
 }

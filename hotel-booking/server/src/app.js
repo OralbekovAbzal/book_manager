@@ -18,8 +18,14 @@ const allotmentRoutes = require('./routes/allotments')
 const snapshotRoutes = require('./routes/snapshots')
 const bookingFlagRoutes = require('./routes/bookingFlags')
 const contactRoutes = require('./routes/contacts')
+const hotelRoutes = require('./routes/hotel')
+const rateRoutes = require('./routes/rates')
+const serviceRoutes = require('./routes/services')
+const setupRoutes = require('./routes/setup')
+const userRoutes = require('./routes/users')
 
 const { errorHandler } = require('./middleware/errorHandler')
+const { auditMiddleware } = require('./middleware/audit')
 const logger = require('./utils/logger')
 
 const app = express()
@@ -48,6 +54,9 @@ const apiLimiter = rateLimit({
   max: process.env.NODE_ENV === 'production' ? 500 : 10000,
 })
 
+// Журнал действий: ДО роутов, чтобы перехватить ответ любого из них (см. middleware/audit.js)
+app.use('/api', auditMiddleware)
+
 app.use('/api/auth', authLimiter, authRoutes)
 app.use('/api/bookings', apiLimiter, bookingRoutes)
 app.use('/api/rooms', apiLimiter, roomRoutes)
@@ -63,6 +72,12 @@ app.use('/api/allotments', apiLimiter, allotmentRoutes)
 app.use('/api/snapshots', apiLimiter, snapshotRoutes)
 app.use('/api/booking-flags', apiLimiter, bookingFlagRoutes)
 app.use('/api/contacts', apiLimiter, contactRoutes)
+app.use('/api/hotel', apiLimiter, hotelRoutes)
+app.use('/api/rates', apiLimiter, rateRoutes)
+app.use('/api/services', apiLimiter, serviceRoutes)
+// Мастер первичной настройки — публичный (без authenticate), см. routes/setup.js.
+app.use('/api/setup', apiLimiter, setupRoutes)
+app.use('/api/users', apiLimiter, userRoutes)
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() })

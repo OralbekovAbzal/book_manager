@@ -12,7 +12,12 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    if (err.response?.status === 401) {
+    // Вход и мастер настройки показывают ошибку сами — неверный пароль не должен
+    // перезагружать страницу. 5xx и сетевые ошибки токен не трогают: сервер вернётся,
+    // а сессия ещё жива.
+    const url: string = err.config?.url ?? ''
+    const isAuthFlow = url.includes('/auth/login') || url.includes('/setup/')
+    if (err.response?.status === 401 && !isAuthFlow) {
       localStorage.removeItem('token')
       window.location.reload()
     }

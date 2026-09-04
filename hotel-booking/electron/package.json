@@ -10,6 +10,7 @@
     "build": "electron-builder --win nsis"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "embedded-postgres": "^18.4.0-beta.17"
   },
   "devDependencies": {
@@ -59,6 +60,12 @@
     "win": {
       "target": "nsis"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://updates.example.invalid/hotel-booking/"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "perMachine": false,

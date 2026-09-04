@@ -1,6 +1,9 @@
 const { prisma } = require('../utils/prisma')
 const { findOverlapsBulk } = require('../utils/overlap')
 const { createError } = require('../middleware/errorHandler')
+// Сетка /api/occupancy/grid кэшируется на 30 с — после правки номеров сбрасываем кэш,
+// иначе новые/переименованные/скрытые номера появляются в сетке с задержкой.
+const { invalidateGridCache } = require('./occupancyController')
 
 const ROOM_SELECT = {
   id: true,
@@ -92,6 +95,7 @@ async function create(req, res, next) {
       select: ROOM_SELECT,
     })
 
+    invalidateGridCache()
     res.status(201).json({ data: room })
   } catch (err) {
     next(err)
@@ -118,6 +122,7 @@ async function update(req, res, next) {
       select: ROOM_SELECT,
     })
 
+    invalidateGridCache()
     res.json({ data: room })
   } catch (err) {
     next(err)
@@ -143,6 +148,7 @@ async function deactivate(req, res, next) {
       select: ROOM_SELECT,
     })
 
+    invalidateGridCache()
     res.json({ data: room })
   } catch (err) {
     next(err)

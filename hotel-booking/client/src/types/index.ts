@@ -226,3 +226,134 @@ export interface Contact {
   createdAt: string
   updatedAt: string
 }
+
+// ─── Ценообразование ──────────────────────────────────────────────────────────
+
+export type PricingBase = 'room' | 'person'
+
+export interface HotelSettings {
+  id: number
+  name: string
+  city: string | null
+  currency: string
+  pricingBase: PricingBase
+  lateArrivalHour: number | null
+  updatedAt: string
+}
+
+/** Цена на конкретную дату для категории. Какие поля значимы — зависит от pricingBase. */
+export interface RatePrice {
+  id: number
+  categoryId: number
+  date: string
+  roomPrice: number | null
+  adultPrice: number | null
+  childPrice: number | null
+  extraBedPrice: number | null
+  updatedAt: string
+}
+
+export type PriceField = 'roomPrice' | 'adultPrice' | 'childPrice' | 'extraBedPrice'
+
+// ─── Первичная настройка и пользователи ───────────────────────────────────────
+
+/** GET /api/setup/status: нужна ли первичная настройка и название отеля (если уже задано). */
+export interface SetupStatus {
+  needsSetup: boolean
+  hotelName: string | null
+}
+
+/** Учётная запись сотрудника (Настройки → Пользователи). */
+export interface User {
+  id: number
+  username: string
+  name: string
+  role: AdminRole
+  isActive: boolean
+  createdAt: string
+}
+
+/** Ошибка валидации сервера по полю: { error: 'Ошибка валидации', details: ApiFieldError[] }. */
+export interface ApiFieldError {
+  field: string
+  message: string
+}
+
+// ─── Журнал действий и резервные копии ────────────────────────────────────────
+
+/** Запись журнала действий (GET /api/audit/log). action — 'POST /bookings/12/move' и т.п. */
+export interface AuditLogEntry {
+  id: number
+  adminId: number | null
+  adminName: string
+  action: string
+  entity: string
+  entityId: number | null
+  details: unknown
+  ip: string | null
+  createdAt: string
+}
+
+/** Строка журнала копий (модель BackupLog): удалась ли последняя копия. */
+export interface BackupLogEntry {
+  id: number
+  path: string
+  size: number
+  success: boolean
+  error: string | null
+  createdAt: string
+}
+
+export interface BackupFile {
+  name: string
+  size: number
+  createdAt: string
+}
+
+/** GET /api/system/backups */
+export interface BackupsInfo {
+  last: BackupLogEntry | null
+  files: BackupFile[]
+}
+
+/** POST /api/system/backup */
+export interface BackupResult {
+  filename: string
+  path: string
+  size: number
+  createdAt: string
+}
+
+/** POST /api/system/backup/restore — сколько строк восстановлено по таблицам. */
+export interface RestoreResult {
+  restored: Record<string, number>
+  safetyBackup: string
+}
+
+/** Как начисляется услуга. */
+export type ServiceUnit = 'per_person_night' | 'per_night' | 'per_person' | 'per_booking'
+export type ServiceKind = 'meal' | 'extra'
+
+export interface Service {
+  id: number
+  code: string
+  name: string
+  price: number
+  /** null — считать по взрослой цене */
+  childPrice: number | null
+  unit: ServiceUnit
+  kind: ServiceKind
+  /** Добавлять в новую бронь автоматически */
+  includedByDefault: boolean
+  isActive: boolean
+  order: number
+}
+
+/** Пресет пансиона: кнопка, включающая набор услуг питания. */
+export interface MealPlan {
+  id: number
+  code: string
+  name: string
+  serviceCodes: string[]
+  order: number
+}

@@ -62,17 +62,32 @@ async function grid(req, res, next) {
     if (capacity) roomWhere.capacity = capacity
     if (features) roomWhere.features = { has: features }   // номер должен иметь эту особенность
 
-    // Если задан поиск по имени гостя — сначала ищем все брони (любые даты)
+    // Если задан поиск по гостю — сначала ищем все брони (любые даты)
     // с совпадением, и сужаем выборку номеров до тех, где такие брони есть.
     if (searchNormalized) {
-      const matchingBookings = await prisma.booking.findMany({
-        where: {
-          status: { notIn: ['CANCELLED'] },
-          guestName: { contains: searchNormalized, mode: 'insensitive' },
-        },
-        select: { roomId: true },
-        distinct: ['roomId'],
-      })
+      const digits = searchNormalized.replace(/\D/g, '')
+      let matchingBookings
+      if (digits.length >= 3) {
+        // Есть хотя бы 3 цифры — ищем и по телефону, сравнивая только цифры:
+        // «+7 (701) 123-45-67» в базе находится по «7011234567». Тегированный
+        // $queryRaw биндит параметры, строковой склейки SQL нет.
+        const namePattern = `%${searchNormalized}%`
+        const phonePattern = `%${digits}%`
+        matchingBookings = await prisma.$queryRaw`
+          SELECT DISTINCT "roomId" FROM "Booking"
+          WHERE status <> 'CANCELLED'
+            AND ("guestName" ILIKE ${namePattern}
+              OR regexp_replace(coalesce("guestPhone", ''), '[^0-9]', '', 'g') LIKE ${phonePattern})`
+      } else {
+        matchingBookings = await prisma.booking.findMany({
+          where: {
+            status: { notIn: ['CANCELLED'] },
+            guestName: { contains: searchNormalized, mode: 'insensitive' },
+          },
+          select: { roomId: true },
+          distinct: ['roomId'],
+        })
+      }
       const matchingRoomIds = matchingBookings.map(b => b.roomId)
       // Пересечение с уже наложенными фильтрами
       roomWhere.id = { in: matchingRoomIds }
@@ -115,6 +130,21 @@ async function grid(req, res, next) {
         flags: true,
         partnerId: true,
         partner: { select: { id: true, name: true, color: true } },
+        // Гости и деньги нужны модалке редактирования/просмотра: без них форма
+        // подставляла нули и затирала данные брони при сохранении из сетки.
+        adultsWithMeals: true,
+        childrenWithMeals: true,
+        adultsNoMeals: true,
+        childrenNoMeals: true,
+        extraBedsWithMeals: true,
+        extraBedsNoMeals: true,
+        disabledAdults: true,
+        disabledChildren: true,
+        discountPercent: true,
+        prepaymentPercent: true,
+        totalAmount: true,
+        prepaidAmount: true,
+        paidAmount: true,
       },
       orderBy: { checkIn: 'asc' },
     })

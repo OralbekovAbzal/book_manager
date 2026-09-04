@@ -1,7 +1,9 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useState } from 'react'
 import { differenceInCalendarDays, parseISO } from 'date-fns'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
+import { fetchBooking } from '../../api/bookings'
+import type { Booking } from '../../types'
 
 const STATUS_LABELS: Record<string, string> = {
   CONFIRMED:   'Подтверждена',
@@ -34,6 +36,9 @@ export const BookingViewModal: React.FC = () => {
   const open = modal.open && modal.mode === 'view'
   const booking = modal.booking
 
+  // Объект из сетки может прийти без гостей/сумм — тогда подгружаем полную бронь с сервера
+  const [full, setFull] = useState<Booking | null>(null)
+
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeModal() }
@@ -41,7 +46,20 @@ export const BookingViewModal: React.FC = () => {
     return () => document.removeEventListener('keydown', handler)
   }, [open, closeModal])
 
+  useEffect(() => {
+    setFull(null)
+    if (!open || !booking || booking.totalAmount !== undefined) return
+    let cancelled = false
+    fetchBooking(booking.id)
+      .then(b => { if (!cancelled) setFull(b) })
+      .catch(() => { /* секции «Гость»/«Оплата» покажут то, что есть в объекте сетки */ })
+    return () => { cancelled = true }
+  }, [open, booking?.id])
+
   if (!open || !booking) return null
+
+  // Гости и оплата — из полной версии, если она подгружена
+  const info = full ?? booking
 
   const nights = differenceInCalendarDays(
     parseISO(booking.checkOut.slice(0, 10)),
@@ -49,8 +67,8 @@ export const BookingViewModal: React.FC = () => {
   )
 
   const guestTotal =
-    (booking.adultsWithMeals ?? 0) + (booking.childrenWithMeals ?? 0) +
-    (booking.adultsNoMeals ?? 0) + (booking.childrenNoMeals ?? 0)
+    (info.adultsWithMeals ?? 0) + (info.childrenWithMeals ?? 0) +
+    (info.adultsNoMeals ?? 0) + (info.childrenNoMeals ?? 0)
 
   const flagLabels = (() => {
     const flags = booking.flags ?? []
@@ -59,7 +77,7 @@ export const BookingViewModal: React.FC = () => {
     return flags.map(f => map.get(f) ?? f)
   })()
 
-  const debt = (booking.totalAmount ?? 0) - (booking.paidAmount ?? 0)
+  const debt = (info.totalAmount ?? 0) - (info.paidAmount ?? 0)
 
   return (
     <Overlay onClose={closeModal}>
@@ -107,22 +125,22 @@ export const BookingViewModal: React.FC = () => {
             {booking.guestPhone && <Row label="Телефон" value={booking.guestPhone} />}
             {guestTotal > 0 && (
               <>
-                {(booking.adultsWithMeals ?? 0) > 0 && <Row label="Взрослые (с питанием)" value={String(booking.adultsWithMeals)} />}
-                {(booking.childrenWithMeals ?? 0) > 0 && <Row label="Дети (с питанием)" value={String(booking.childrenWithMeals)} />}
-                {(booking.adultsNoMeals ?? 0) > 0 && <Row label="Взрослые (без питания)" value={String(booking.adultsNoMeals)} />}
-                {(booking.childrenNoMeals ?? 0) > 0 && <Row label="Дети (без питания)" value={String(booking.childrenNoMeals)} />}
-                {(booking.extraBedsWithMeals ?? 0) > 0 && <Row label="Доп. места (с питанием)" value={String(booking.extraBedsWithMeals)} />}
-                {(booking.extraBedsNoMeals ?? 0) > 0 && <Row label="Доп. места (без питания)" value={String(booking.extraBedsNoMeals)} />}
+                {(info.adultsWithMeals ?? 0) > 0 && <Row label="Взрослые (с питанием)" value={String(info.adultsWithMeals)} />}
+                {(info.childrenWithMeals ?? 0) > 0 && <Row label="Дети (с питанием)" value={String(info.childrenWithMeals)} />}
+                {(info.adultsNoMeals ?? 0) > 0 && <Row label="Взрослые (без питания)" value={String(info.adultsNoMeals)} />}
+                {(info.childrenNoMeals ?? 0) > 0 && <Row label="Дети (без питания)" value={String(info.childrenNoMeals)} />}
+                {(info.extraBedsWithMeals ?? 0) > 0 && <Row label="Доп. места (с питанием)" value={String(info.extraBedsWithMeals)} />}
+                {(info.extraBedsNoMeals ?? 0) > 0 && <Row label="Доп. места (без питания)" value={String(info.extraBedsNoMeals)} />}
               </>
             )}
           </Section>
         )}
 
-        {(booking.totalAmount != null || booking.paidAmount != null) && (
+        {(info.totalAmount != null || info.paidAmount != null) && (
           <Section title="Оплата">
-            <Row label="Сумма" value={fmtMoney(booking.totalAmount)} />
-            <Row label="Оплачено" value={fmtMoney(booking.paidAmount)} />
-            {(booking.discountPercent ?? 0) > 0 && <Row label="Скидка" value={`${booking.discountPercent}%`} />}
+            <Row label="Сумма" value={fmtMoney(info.totalAmount)} />
+            <Row label="Оплачено" value={fmtMoney(info.paidAmount)} />
+            {(info.discountPercent ?? 0) > 0 && <Row label="Скидка" value={`${info.discountPercent}%`} />}
             {debt > 0 && <Row label="Задолженность" value={fmtMoney(debt)} valueColor="#dc2626" />}
           </Section>
         )}

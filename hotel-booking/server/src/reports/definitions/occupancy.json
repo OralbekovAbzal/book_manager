@@ -1,0 +1,50 @@
+{
+  "id": "occupancy",
+  "version": 2,
+  "title": "Загрузка",
+  "description": "Сколько номеро-ночей продано, сколько выбито ремонтом и какой процент доступного фонда занят.",
+  "icon": "chart",
+  "dataset": "roomNights",
+  "params": [
+    {
+      "key": "period",
+      "type": "dateRange",
+      "label": "Период",
+      "required": true,
+      "default": { "preset": "currentMonth" },
+      "presets": ["today", "last7", "last30", "currentMonth", "prevMonth", "currentYear"]
+    },
+    {
+      "key": "groupBy",
+      "type": "select",
+      "label": "Группировка",
+      "default": "date",
+      "options": [
+        { "value": "date", "label": "По дням" },
+        { "value": "month", "label": "По месяцам" },
+        { "value": "weekday", "label": "По дням недели" },
+        { "value": "categoryName", "label": "По категориям" },
+        { "value": "building", "label": "По корпусам" },
+        { "value": "floor", "label": "По этажам" },
+        { "value": "roomNumber", "label": "По номерам" }
+      ]
+    },
+    { "key": "building", "type": "select", "label": "Корпус", "optionsFrom": "buildings", "placeholder": "Все" },
+    { "key": "categoryName", "type": "select", "label": "Категория", "optionsFrom": "categories", "placeholder": "Все" }
+  ],
+  "filters": [
+    { "field": "building", "op": "eq", "param": "building" },
+    { "field": "categoryName", "op": "eq", "param": "categoryName" }
+  ],
+  "groupBy": { "param": "groupBy" },
+  "columns": [
+    { "key": "group", "field": "$group", "titleFrom": "$group", "width": 190, "total": false },
+    { "key": "sold", "title": "Продано", "metric": "sold" },
+    { "key": "blocked", "title": "Ремонт", "metric": "blocked" },
+    { "key": "available", "title": "Доступно", "metric": "available" },
+    { "key": "occupancy", "title": "Загрузка", "metric": "occupancy" }
+  ],
+  "sort": [{ "key": "group", "dir": "asc" }],
+  "chart": { "type": "bar", "x": "group", "y": "occupancy" },
+  "totalsLabel": "Итого за период"
+}

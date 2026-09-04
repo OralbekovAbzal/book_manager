@@ -27,11 +27,12 @@ model Room {
 }
 
 model Category {
-  id          Int     @id @default(autoincrement())
-  name        String  @unique
+  id          Int         @id @default(autoincrement())
+  name        String      @unique
   color       String
   description String?
   rooms       Room[]
+  rates       RatePrice[]
 }
 
 // Метки броней + их эффекты для алгоритма. Источник истины (раньше — localStorage).
@@ -81,6 +82,8 @@ model Booking {
   shift              Shift?        @relation(fields: [shiftId], references: [id])
   adminId            Int
   createdBy          Admin         @relation(fields: [adminId], references: [id])
+  /// Начисления. totalAmount — кэш их суммы, источник истины здесь.
+  charges            BookingCharge[]
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
 
@@ -111,8 +114,54 @@ model Admin {
   bookings      Booking[]
   shiftsCreated Shift[]   @relation("ShiftCreator")
   snapshots     Snapshot[]
+  charges       BookingCharge[]
+  auditLogs     AuditLog[]
+  reports       ReportDefinition[]
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+}
+
+/// Пользовательские отчёты: созданные в конструкторе, отредактированные копии
+/// встроенных, импортированные из JSON. Встроенные отчёты лежат файлами в
+/// `server/src/reports/definitions/` и в БД не дублируются.
+/// `key` — строковый id из определения (он же в URL `/api/reports/:id`); уникален
+/// и среди встроенных, за этим следит реестр. `definition` — само определение
+/// (параметры, фильтры, колонки…), которое исполняет движок отчётов.
+model ReportDefinition {
+  id          Int      @id @default(autoincrement())
+  key         String   @unique
+  title       String
+  description String?
+  definition  Json
+  createdById Int?
+  createdBy   Admin?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([title])
+}
+
+/// Журнал действий: кто, когда и что изменил (брони, переход дня, оптимизатор,
+/// пользователи, фонд, бэкапы). Пишется middleware/audit.js по успешным
+/// POST/PUT/PATCH/DELETE. adminName дублируется, чтобы запись читалась и после
+/// деактивации/удаления сотрудника (adminId тогда становится NULL).
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  adminId   Int?
+  admin     Admin?   @relation(fields: [adminId], references: [id], onDelete: SetNull)
+  adminName String
+  /// Например 'POST /bookings', 'PATCH /bookings/12/checkin'
+  action    String
+  /// Первый сегмент пути: 'bookings', 'users', 'system'…
+  entity    String
+  entityId  Int?
+  /// Тело запроса без паролей, не длиннее 2 КБ
+  details   Json?
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([adminId])
 }
 
 enum AdminRole {
@@ -237,4 +286,113 @@ model Contact {
 
   @@index([group, order])
   @@index([isPinned])
+}
+
+/// Настройки объекта. Одна строка (id = 1).
+/// Заодно убирает хардкод названия отеля из App.tsx.
+model HotelSettings {
+  id          Int      @id @default(1)
+  name        String   @default("Отель")
+  city        String?
+  currency    String   @default("KZT")
+  /// 'room' — цена за номер целиком, 'person' — за место.
+  /// Настройка на весь объект: меняется генератор начислений, вид строк одинаков.
+  pricingBase String   @default("person")
+  /// Час, до которого заезд считается «поздним» (для правила половины суток).
+  /// null — правило выключено.
+  lateArrivalHour Int?
+  /// Когда завершён мастер первичной настройки (создан главный администратор).
+  /// null — или строки id=1 нет вообще — значит мастер не пройден и
+  /// POST /api/setup/complete ещё открыт. После завершения он отвечает 403.
+  setupCompletedAt DateTime?
+  updatedAt   DateTime @updatedAt
+}
+
+/// Календарь цен: одна строка на (категория, дата).
+/// Храним по дням, а заполняем диапазонами — иначе год = 365 правок.
+/// Какие поля используются, зависит от HotelSettings.pricingBase.
+model RatePrice {
+  id            Int      @id @default(autoincrement())
+  categoryId    Int
+  category      Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  date          DateTime @db.Date
+  /// pricingBase = 'room'
+  roomPrice     Float?
+  /// pricingBase = 'person'
+  adultPrice    Float?
+  childPrice    Float?
+  extraBedPrice Float?
+  updatedAt     DateTime @updatedAt
+
+  @@unique([categoryId, date])
+  @@index([date])
+}
+
+/// Питание и дополнительные услуги. Питание — это НЕ флаг у брони,
+/// а обычные услуги: завтрак, обед, ужин по отдельности. Тогда «только завтрак»
+/// или «завтрак + ужин» выражаются без единой правки кода.
+model Service {
+  id         Int     @id @default(autoincrement())
+  code       String  @unique
+  name       String
+  price      Float   @default(0)
+  /// Цена для детей. null — считать как взрослую.
+  /// Отдельное поле, потому что детский обед дешевле почти везде.
+  childPrice Float?
+  /// Как начисляется:
+  /// 'per_person_night' — за человека за ночь (питание)
+  /// 'per_night'        — за ночь, независимо от числа гостей (парковка)
+  /// 'per_person'       — за человека однократно (трансфер)
+  /// 'per_booking'      — однократно за бронь (поздний выезд)
+  unit       String  @default("per_person_night")
+  /// 'meal' — питание (участвует в пресетах пансиона), 'extra' — прочее
+  kind       String  @default("extra")
+  /// Добавлять в новую бронь автоматически (например, завтрак «включён в тариф»)
+  includedByDefault Boolean @default(false)
+  isActive   Boolean @default(true)
+  order      Int     @default(0)
+
+  @@index([kind, order])
+}
+
+/// Пресет питания: «Полный пансион», «Полупансион», «Только завтрак».
+/// Кнопка, которая включает набор услуг — не отдельная сущность в брони.
+model MealPlan {
+  id           Int      @id @default(autoincrement())
+  code         String   @unique
+  name         String
+  serviceCodes String[] @default([])
+  order        Int      @default(0)
+}
+
+/// Начисление по брони. КЛЮЧЕВАЯ идея ценообразования:
+/// итог брони — это СУММА СТРОК, а не результат формулы.
+///
+/// Тариф лишь порождает строки (source='auto'); администратор может строку
+/// поправить, удалить или добавить свою (source='manual' + обязательная reason).
+/// Поэтому уступка «заехали в час ночи, беру полсуток» остаётся ВНУТРИ системы,
+/// а не в голове администратора — и деньги в системе сходятся с деньгами на руках.
+model BookingCharge {
+  id          Int       @id @default(autoincrement())
+  bookingId   Int
+  booking     Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  /// 'stay' — проживание, 'meal' — питание, 'extra' — услуга, 'discount' — скидка (amount < 0)
+  kind        String
+  label       String
+  quantity    Float     @default(1)
+  unitPrice   Float     @default(0)
+  /// quantity * unitPrice, храним посчитанным — итог не должен зависеть от версии кода
+  amount      Float     @default(0)
+  /// Для посуточных строк — за какую дату начислено (нужно для отчётов по дням)
+  date        DateTime? @db.Date
+  /// 'auto' — сгенерировано тарифом, 'manual' — правка администратора
+  source      String    @default("auto")
+  reason      String?
+  createdById Int?
+  createdBy   Admin?    @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([bookingId])
+  @@index([date])
 }

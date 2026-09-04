@@ -7,20 +7,34 @@ import {
 } from '../../api/occupancy'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
+import { useAuthStore } from '../../store/useAuthStore'
 
 interface Props {
   open: boolean
   onClose: () => void
 }
 
+/** Ход из плана, который сервер счёл неактуальным (409 от /optimize/apply). */
+interface StaleMove {
+  bookingId: number
+  guestName?: string
+  reason: string
+}
+
+type ApiError = { response?: { status?: number; data?: { error?: string; stale?: StaleMove[] } } }
+
 export const OptimizeModal: React.FC<Props> = ({ open, onClose }) => {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [stale, setStale] = useState<StaleMove[]>([])
   const [result, setResult] = useState<OptimizeResult | null>(null)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [applying, setApplying] = useState(false)
   const { fetchGrid, fetchToday } = useGridStore()
   const { optimizer, roomFund } = useSettingsStore()
+  // Применять перестановки может только администратор (сервер отвечает 403); расчёт — всем
+  const role = useAuthStore(s => s.admin?.role)
+  const canApply = role === 'SUPER_ADMIN' || role === 'ADMIN'
 
   // Карта эффектов меток для алгоритма: { flagId: { bufferAfter, bufferBefore, pin } }
   const flagEffects: Record<string, unknown> = {}
@@ -28,11 +42,11 @@ export const OptimizeModal: React.FC<Props> = ({ open, onClose }) => {
     if (f.effects) flagEffects[f.id] = f.effects
   }
 
-  // Запускаем оптимизацию при открытии
-  useEffect(() => {
-    if (!open) return
+  // Расчёт плана: при открытии и по кнопке «Пересчитать» (после устаревшего плана / ошибки)
+  const runCalc = () => {
     setLoading(true)
     setError('')
+    setStale([])
     setResult(null)
     setSelected(new Set())
     runOptimization(optimizer, flagEffects)
@@ -42,10 +56,16 @@ export const OptimizeModal: React.FC<Props> = ({ open, onClose }) => {
         setSelected(new Set(r.moves.map(m => m.bookingId)))
       })
       .catch((e: unknown) => {
-        const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
+        const msg = (e as ApiError)?.response?.data?.error
         setError(msg ?? 'Не удалось запустить оптимизацию')
       })
       .finally(() => setLoading(false))
+  }
+
+  // Запускаем оптимизацию при открытии
+  useEffect(() => {
+    if (!open) return
+    runCalc()
   }, [open])
 
   // Escape
@@ -83,8 +103,12 @@ export const OptimizeModal: React.FC<Props> = ({ open, onClose }) => {
       await Promise.all([fetchGrid(), fetchToday()])
       onClose()
     } catch (e: unknown) {
-      const msg = (e as { response?: { data?: { error?: string } } })?.response?.data?.error
-      setError(msg ?? 'Ошибка применения изменений')
+      // Текст ошибки сервера (409 «План устарел…» / «Номер уже занят…»); при устаревшем
+      // плане сервер присылает список причин по ходам
+      const data = (e as ApiError)?.response?.data
+      const staleList = data?.stale
+      setError(data?.error ?? 'Ошибка применения изменений')
+      setStale(Array.isArray(staleList) ? staleList : [])
     } finally {
       setApplying(false)
     }
@@ -125,7 +149,27 @@ export const OptimizeModal: React.FC<Props> = ({ open, onClose }) => {
           )}
 
           {error && (
-            <div style={errorBoxStyle}>{error}</div>
+            <div style={errorBoxStyle}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+                <div style={{ flex: 1 }}>{error}</div>
+                <button
+                  onClick={runCalc}
+                  disabled={loading || applying}
+                  style={{ ...miniBtnStyle, whiteSpace: 'nowrap', flexShrink: 0 }}
+                >
+                  Пересчитать
+                </button>
+              </div>
+              {stale.length > 0 && (
+                <ul style={{ margin: '8px 0 0', paddingLeft: 18, fontSize: '0.88rem' }}>
+                  {stale.map(s => (
+                    <li key={s.bookingId}>
+                      {s.guestName ? `«${s.guestName}»` : `Бронь #${s.bookingId}`}: {s.reason}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
 
           {!loading && result && (
@@ -227,18 +271,24 @@ export const OptimizeModal: React.FC<Props> = ({ open, onClose }) => {
         {/* Footer */}
         <div style={footerStyle}>
           <button onClick={onClose} style={cancelBtnStyle}>Отмена</button>
-          <button
-            onClick={onApply}
-            disabled={applying || !result || selected.size === 0}
-            style={applyBtnStyle(applying || !result || selected.size === 0)}
-          >
-            {applying
-              ? 'Применяем…'
-              : selected.size === 0
-                ? 'Применить'
-                : `Применить (${selected.size})`
-            }
-          </button>
+          {canApply ? (
+            <button
+              onClick={onApply}
+              disabled={applying || !result || selected.size === 0}
+              style={applyBtnStyle(applying || !result || selected.size === 0)}
+            >
+              {applying
+                ? 'Применяем…'
+                : selected.size === 0
+                  ? 'Применить'
+                  : `Применить (${selected.size})`
+              }
+            </button>
+          ) : (
+            <span style={{ alignSelf: 'center', fontSize: '0.9rem', color: 'var(--text-faint)' }}>
+              Применить перестановки может администратор
+            </span>
+          )}
         </div>
       </div>
     </div>

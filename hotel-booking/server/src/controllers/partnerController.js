@@ -1,5 +1,7 @@
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
+// Партнёр (name/color) отдаётся в бронях сетки (кэш 30 с) — сбрасываем кэш после правок.
+const { invalidateGridCache } = require('./occupancyController')
 
 // GET /api/partners
 async function list(_req, res, next) {
@@ -38,6 +40,7 @@ async function create(req, res, next) {
         notes:         notes?.trim()         || null,
       },
     })
+    invalidateGridCache()
     res.status(201).json({ data: partner })
   } catch (err) {
     if (err.code === 'P2002') return next(createError('Партнёр с таким именем уже существует', 400))
@@ -72,6 +75,7 @@ async function update(req, res, next) {
         ...(isActive      !== undefined && { isActive: !!isActive }),
       },
     })
+    invalidateGridCache()
     res.json({ data: partner })
   } catch (err) {
     if (err.code === 'P2002') return next(createError('Партнёр с таким именем уже существует', 400))
@@ -97,6 +101,7 @@ async function remove(req, res, next) {
 
     // Allotments и releases удалятся каскадно
     await prisma.partner.delete({ where: { id } })
+    invalidateGridCache()
     res.json({ message: 'Партнёр удалён' })
   } catch (err) {
     next(err)

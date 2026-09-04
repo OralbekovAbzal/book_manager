@@ -24,6 +24,23 @@ export interface CalcResult {
   prepaidAmount: number
   remaining: number
   breakdown: BreakdownLine[]
+  noRates: boolean                  // у категории нет тарифа — итог не рассчитан (0 — не цена)
+  missingNights: number             // ночи, не попавшие ни в один период (сезон)
+  fallbackPeriodName: string | null // какой период применён к таким ночам как запасной
+}
+
+/**
+ * Ключ входов калькулятора: если он не изменился с момента загрузки брони,
+ * итог при сохранении не пересчитываем (иначе правка заметки на другом ноутбуке
+ * с другим тарифом в localStorage молча переоценивала бронь).
+ */
+export function buildCalcKey(input: CalcInput): string {
+  return [
+    input.checkIn, input.checkOut, input.categoryName.toLowerCase(),
+    input.adultsWithMeals, input.childrenWithMeals, input.adultsNoMeals, input.childrenNoMeals,
+    input.extraBedsWithMeals, input.extraBedsNoMeals, input.disabledAdults, input.disabledChildren,
+    input.discountPercent, input.prepaymentPercent,
+  ].join('|')
 }
 
 export interface BreakdownLine {
@@ -43,7 +60,10 @@ function getPeriodId(date: Date, periods: PricingConfig['periods']): string | nu
 export function calculate(input: CalcInput, pricing: PricingConfig): CalcResult {
   const { checkIn, checkOut } = input
   if (!checkIn || !checkOut || checkOut <= checkIn) {
-    return { nights: 0, total: 0, totalAfterDiscount: 0, prepaidAmount: 0, remaining: 0, breakdown: [] }
+    return {
+      nights: 0, total: 0, totalAfterDiscount: 0, prepaidAmount: 0, remaining: 0, breakdown: [],
+      noRates: false, missingNights: 0, fallbackPeriodName: null,
+    }
   }
 
   const nights = differenceInCalendarDays(parseISO(checkOut), parseISO(checkIn))
@@ -104,5 +124,19 @@ export function calculate(input: CalcInput, pricing: PricingConfig): CalcResult 
   const prepaidAmount = totalAfterDiscount * (input.prepaymentPercent / 100)
   const remaining = totalAfterDiscount - prepaidAmount
 
-  return { nights, total, totalAfterDiscount, prepaidAmount, remaining, breakdown }
+  // Диагностика для UI (математика выше не меняется): ночи вне сезонов считаются
+  // по первому периоду тарифа категории — сообщаем, по какому именно.
+  const missingNights = nightsByPeriod['default'] ?? 0
+  let fallbackPeriodName: string | null = null
+  if (missingNights > 0 && rates) {
+    const fallbackId = Object.keys(rates.adultRates)[0]
+    fallbackPeriodName = fallbackId
+      ? (pricing.periods.find(p => p.id === fallbackId)?.name ?? fallbackId)
+      : null
+  }
+
+  return {
+    nights, total, totalAfterDiscount, prepaidAmount, remaining, breakdown,
+    noRates: !rates, missingNights, fallbackPeriodName,
+  }
 }

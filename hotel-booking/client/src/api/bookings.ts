@@ -23,7 +23,14 @@ export interface BookingPayload {
   totalAmount?: number
   prepaidAmount?: number
   paidAmount?: number
+  flags?: string[]
   shiftId?: number | null
+}
+
+/** Полная бронь с сервера (гости, суммы, room.category) — объект из сетки может быть частичным. */
+export async function fetchBooking(id: number): Promise<Booking> {
+  const { data } = await api.get(`/bookings/${id}`)
+  return data.data
 }
 
 export async function createBooking(payload: BookingPayload): Promise<Booking> {

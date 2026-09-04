@@ -1,6 +1,10 @@
 const { prisma } = require('../utils/prisma')
 const { getCurrentBusinessDate } = require('../utils/businessDate')
 const { getFlagEffectsMap } = require('../utils/flagEffects')
+const { createSnapshot } = require('../utils/snapshot')
+const { emitBookingEvent } = require('../socket/socketManager')
+const { BOOKING_SELECT } = require('./bookingController')
+const logger = require('../utils/logger')
 
 /**
  * Алгоритм оптимизации распределения броней.
@@ -721,27 +725,106 @@ async function optimize(req, res, next) {
 /**
  * POST /api/occupancy/optimize/apply
  * body: { moves: [{ bookingId, toRoomId }, ...] }
+ *
+ * Все ходы применяются одной транзакцией с ОТЛОЖЕННОЙ проверкой booking_no_overlap:
+ * обмен броней A↔B по одной даёт временное пересечение, которое неотложенное
+ * ограничение отклоняло на первом же UPDATE (любой план → 409). С
+ * SET CONSTRAINTS ... DEFERRED БД проверяет итоговую раскладку один раз на COMMIT.
  */
 async function applyOptimization(req, res, next) {
   try {
-    const { moves } = req.body
+    const { moves } = req.body || {}
+
+    // а) Валидация тела: непустой массив { bookingId, toRoomId } с целыми id
     if (!Array.isArray(moves) || moves.length === 0) {
-      return res.json({ applied: 0 })
+      return res.status(400).json({ error: 'Нет ходов для применения: moves должен быть непустым массивом' })
+    }
+    const parsed = []
+    const seen = new Set()
+    for (const m of moves) {
+      const bookingId = Number(m?.bookingId)
+      const toRoomId = Number(m?.toRoomId)
+      if (!Number.isInteger(bookingId) || bookingId <= 0 || !Number.isInteger(toRoomId) || toRoomId <= 0) {
+        return res.status(400).json({ error: 'Каждый ход должен содержать целые bookingId и toRoomId' })
+      }
+      if (seen.has(bookingId)) {
+        return res.status(400).json({ error: `Бронь #${bookingId} указана в плане дважды` })
+      }
+      seen.add(bookingId)
+      parsed.push({ bookingId, toRoomId })
+    }
+    const bookingIds = parsed.map(m => m.bookingId)
+
+    // б) Актуальность плана ДО записи — сетка могла измениться после расчёта
+    //    (те же условия подвижности, что и в optimize(), плюс состояние целевого номера)
+    const todayUTC = await getCurrentBusinessDate()
+    const [bookings, rooms] = await Promise.all([
+      prisma.booking.findMany({
+        where: { id: { in: bookingIds } },
+        select: {
+          id: true, guestName: true, status: true, source: true, checkIn: true, roomId: true,
+          room: { select: { categoryId: true } },
+        },
+      }),
+      prisma.room.findMany({
+        where: { id: { in: parsed.map(m => m.toRoomId) } },
+        select: { id: true, number: true, isActive: true, categoryId: true },
+      }),
+    ])
+    const bookingById = new Map(bookings.map(b => [b.id, b]))
+    const roomById = new Map(rooms.map(r => [r.id, r]))
+
+    const stale = []
+    for (const { bookingId, toRoomId } of parsed) {
+      const b = bookingById.get(bookingId)
+      if (!b) { stale.push({ bookingId, reason: 'бронь не найдена' }); continue }
+      const room = roomById.get(toRoomId)
+      let reason = null
+      if (b.status !== 'CONFIRMED') reason = `статус брони изменился (${b.status})`
+      else if (b.source === 'ремонт') reason = 'ремонтный блок нельзя перемещать'
+      else if (b.checkIn.getTime() < todayUTC.getTime()) reason = 'дата заезда уже прошла'
+      else if (b.roomId === toRoomId) reason = 'бронь уже в целевом номере'
+      else if (!room) reason = 'целевой номер не найден'
+      else if (!room.isActive) reason = `номер №${room.number} деактивирован`
+      else if (room.categoryId !== b.room.categoryId) reason = `номер №${room.number} другой категории`
+      if (reason) stale.push({ bookingId, guestName: b.guestName, reason })
+    }
+    if (stale.length > 0) {
+      const brief = stale.length === 1
+        ? `${stale[0].guestName ? `«${stale[0].guestName}» — ` : ''}${stale[0].reason}`
+        : `${stale.length} из ${parsed.length} ходов больше неактуальны`
+      return res.status(409).json({ error: `План устарел: ${brief}. Пересчитайте.`, stale })
     }
 
-    await prisma.$transaction(
-      moves.map(m =>
-        prisma.booking.update({
-          where: { id: parseInt(m.bookingId) },
-          data: { roomId: parseInt(m.toRoomId) },
-        })
-      )
-    )
+    // в) Защитный снимок — точка отката, если результат не понравится
+    try {
+      await createSnapshot({ kind: 'safety', label: 'Перед применением оптимизатора', createdById: req.admin.id })
+    } catch (err) {
+      logger.error('Snapshot before optimizer apply failed:', err.message)
+    }
 
+    // г) Все ходы одной транзакцией; booking_no_overlap проверяется один раз на COMMIT
+    await prisma.$transaction(async (tx) => {
+      await tx.$executeRawUnsafe('SET CONSTRAINTS booking_no_overlap DEFERRED')
+      for (const { bookingId, toRoomId } of parsed) {
+        await tx.booking.update({ where: { id: bookingId }, data: { roomId: toRoomId } })
+      }
+    }, { timeout: 30_000 })
+
+    // д) Сброс кэша сетки и рассылка изменений остальным рабочим местам
     const { invalidateGridCache } = require('./occupancyController')
     invalidateGridCache()
 
-    res.json({ applied: moves.length })
+    const updated = await prisma.booking.findMany({
+      where: { id: { in: bookingIds } },
+      select: BOOKING_SELECT,
+    })
+    for (const booking of updated) {
+      try { emitBookingEvent('booking:updated', { booking }) } catch { /* сокет не инициализирован — не критично */ }
+    }
+
+    // е) Ответ — как раньше
+    res.json({ applied: parsed.length })
   } catch (err) {
     next(err)
   }

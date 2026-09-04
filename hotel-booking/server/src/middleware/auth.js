@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken')
 const { prisma } = require('../utils/prisma')
+const logger = require('../utils/logger')
 
 async function authenticate(req, res, next) {
   const header = req.headers.authorization
@@ -8,22 +9,35 @@ async function authenticate(req, res, next) {
   }
 
   const token = header.slice(7)
+
+  // Битый/просроченный токен (JsonWebTokenError, TokenExpiredError) — это 401:
+  // клиент по нему стирает токен и уходит на вход.
+  let payload
   try {
-    const payload = jwt.verify(token, process.env.JWT_SECRET)
-    const admin = await prisma.admin.findUnique({
-      where: { id: payload.id },
-      select: { id: true, username: true, name: true, role: true, isActive: true },
-    })
-
-    if (!admin || !admin.isActive) {
-      return res.status(401).json({ error: 'Пользователь не найден или деактивирован' })
-    }
-
-    req.admin = admin
-    next()
+    payload = jwt.verify(token, process.env.JWT_SECRET)
   } catch {
     return res.status(401).json({ error: 'Недействительный токен' })
   }
+
+  // Ошибка базы — НЕ 401 (раньше любой сбой Postgres разлогинивал всех и клиент
+  // уходил в перезагрузку), а 503: токен на клиенте остаётся живым.
+  let admin
+  try {
+    admin = await prisma.admin.findUnique({
+      where: { id: payload.id },
+      select: { id: true, username: true, name: true, role: true, isActive: true },
+    })
+  } catch (err) {
+    logger.error(`authenticate: ошибка запроса к базе — ${err.message}`)
+    return res.status(503).json({ error: 'Сервер временно недоступен, попробуйте через минуту' })
+  }
+
+  if (!admin || !admin.isActive) {
+    return res.status(401).json({ error: 'Пользователь не найден или деактивирован' })
+  }
+
+  req.admin = admin
+  next()
 }
 
 function requireRole(...roles) {

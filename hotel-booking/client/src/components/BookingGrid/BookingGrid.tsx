@@ -66,6 +66,9 @@ function matchesStatusFilter(
 export const BookingGrid: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null)
   const [containerWidth, setContainerWidth] = useState(() => window.innerWidth)
+  // Ширина вертикальной полосы прокрутки тела сетки; измеряет BookingGridInner
+  // (offsetWidth − clientWidth), пока не измерена — undefined (контекст возьмёт запасные 17px).
+  const [scrollbarWidth, setScrollbarWidth] = useState<number | undefined>(undefined)
 
   useEffect(() => {
     if (!containerRef.current) return
@@ -82,19 +85,39 @@ export const BookingGrid: React.FC = () => {
 
   return (
     <div ref={containerRef} style={{ width: '100%', height: '100%', overflow: 'hidden' }}>
-      <GridSettingsProvider containerWidth={containerWidth}>
-        <BookingGridInner />
+      <GridSettingsProvider containerWidth={containerWidth} scrollbarWidth={scrollbarWidth}>
+        <BookingGridInner scrollbarWidth={scrollbarWidth ?? 0} onScrollbarWidth={setScrollbarWidth} />
       </GridSettingsProvider>
     </div>
   )
 }
 
-const BookingGridInner: React.FC = () => {
+interface InnerProps {
+  scrollbarWidth: number
+  onScrollbarWidth: (w: number) => void
+}
+
+const BookingGridInner: React.FC<InnerProps> = ({ scrollbarWidth, onScrollbarWidth }) => {
   const { data, loading, error, dateFrom, dateTo, fetchGrid, roomStatusFilter, shiftDate, hiddenCategoryIds } = useGridStore()
   const { ROW_HEIGHT, DAY_WIDTH, ROOM_COL_WIDTH } = useGridSettings()
   const parentRef = useRef<HTMLDivElement>(null)
+  // Обёртка шапки дат: шапка лежит вне прокручиваемого тела, её scrollLeft ведём вручную
+  const headerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => { fetchGrid() }, [])
+
+  // Измеряем вертикальную полосу прокрутки тела (offsetWidth − clientWidth). Она появляется
+  // и исчезает вместе с числом строк, поэтому следим через ResizeObserver, а не меряем один раз.
+  // Зависимость от error: при ошибке тело размонтируется, после «Повторить» — монтируется заново.
+  useEffect(() => {
+    const el = parentRef.current
+    if (!el) return
+    const measure = () => onScrollbarWidth(el.offsetWidth - el.clientWidth)
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [error, onScrollbarWidth])
 
   // Дата для фильтрации статуса — берём дату текущей смены, fallback = data.today
   const filterDate = shiftDate ?? data?.today ?? ''
@@ -168,12 +191,19 @@ const BookingGridInner: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg)' }}>
-      {/* Sticky date header */}
-      <GridHeader dates={dates} today={today} />
+      {/* Шапка дат — вне прокручиваемого тела (sticky там не работает), поэтому обёртка
+          с overflow:hidden и её scrollLeft синхронизируется из onScroll тела. Sticky-колонка
+          «Номер» внутри шапки прилипает к левому краю этой обёртки. */}
+      <div ref={headerRef} style={{ overflow: 'hidden', flexShrink: 0 }}>
+        <GridHeader dates={dates} today={today} scrollbarWidth={scrollbarWidth} />
+      </div>
 
       {/* Scrollable grid body */}
       <div
         ref={parentRef}
+        onScroll={(e) => {
+          if (headerRef.current) headerRef.current.scrollLeft = e.currentTarget.scrollLeft
+        }}
         style={{
           flex: 1,
           overflow: 'auto',

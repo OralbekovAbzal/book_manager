@@ -35,6 +35,10 @@ const BOOKING_SELECT = {
   prepaidAmount: true,
   paidAmount: true,
   flags: true,
+  // roomId нужен клиенту сетки: по нему socket-событие вставляет бронь в строку номера
+  roomId: true,
+  partnerId: true,
+  partner: { select: { id: true, name: true, color: true } },
   shiftId: true,
   createdAt: true,
   updatedAt: true,
@@ -223,6 +227,23 @@ async function update(req, res, next) {
       return next(createError('Для переезда заселившегося гостя используйте операцию «Переезд»', 400))
     }
 
+    // У заселённого гостя выезд можно двигать только вперёд от текущей рабочей даты:
+    // выезд «сегодня/вчера» освобождает номер в сетке, хотя гость ещё живёт → номер
+    // продадут второй раз. Фактический выезд оформляется кнопкой «Выезд» (checkOut).
+    if (existing.status === 'CHECKED_IN' && newCheckOut.getTime() !== existing.checkOut.getTime()) {
+      const businessDate = await getCurrentBusinessDate()
+      const newCoUTC = new Date(Date.UTC(newCheckOut.getUTCFullYear(), newCheckOut.getUTCMonth(), newCheckOut.getUTCDate()))
+      if (newCoUTC.getTime() <= businessDate.getTime()) {
+        return next(createError('У заселённого гостя дата выезда не может быть раньше завтрашнего рабочего дня. Для выезда используйте кнопку «Выезд»', 400))
+      }
+    }
+
+    // Проверка нового номера (как в create): несуществующий roomId раньше падал в FK-ошибку с 500
+    if (newRoomId !== existing.roomId) {
+      const room = await prisma.room.findUnique({ where: { id: newRoomId } })
+      if (!room || !room.isActive) return next(createError('Номер не найден или деактивирован', 404))
+    }
+
     // Запрет переноса заезда на прошедшую дату (как в create). Только ремонт — задним числом.
     if (newCheckIn.getTime() !== existing.checkIn.getTime() && existing.source !== 'ремонт') {
       const businessDate = await getCurrentBusinessDate()
@@ -320,6 +341,10 @@ async function cancel(req, res, next) {
     if (existing.status === 'CHECKED_OUT') {
       return next(createError('Нельзя отменить закрытую бронь', 400))
     }
+    // Отмена живущего гостя — операция с последствиями для расчётов, только администраторам
+    if (existing.status === 'CHECKED_IN' && !['SUPER_ADMIN', 'ADMIN'].includes(req.admin?.role)) {
+      return next(createError('Отменить заселённого гостя может только администратор', 403))
+    }
 
     const booking = await prisma.booking.update({
       where: { id },
@@ -393,6 +418,12 @@ async function checkOut(req, res, next) {
       existing.checkIn.getUTCDate(),
     ))
 
+    // Рабочая дата раньше заезда (бронь заселена «в будущее») — выезд оформить нельзя,
+    // иначе checkOut ушёл бы раньше checkIn
+    if (todayUTC.getTime() < checkInUTC.getTime()) {
+      return next(createError('Рабочая дата раньше даты заезда — выезд невозможен', 400))
+    }
+
     // Выезд день-в-день с заездом — гость не ночевал, просто удаляем запись
     if (todayUTC.getTime() === checkInUTC.getTime()) {
       await prisma.booking.delete({ where: { id } })
@@ -448,9 +479,15 @@ async function move(req, res, next) {
     if (moveDateD >= existing.checkOut) {
       return next(createError('Дата переезда должна быть до даты выезда', 400))
     }
+    // Переезд «в будущее» невозможен: гость физически переезжает не позже текущей смены
+    const businessDate = await getCurrentBusinessDate()
+    if (moveDateD.getTime() > businessDate.getTime()) {
+      return next(createError('Дата переезда не может быть позже текущего рабочего дня', 400))
+    }
 
     const targetRoom = await prisma.room.findUnique({ where: { id: parseInt(newRoomId) } })
     if (!targetRoom) return next(createError('Целевой номер не найден', 404))
+    if (!targetRoom.isActive) return next(createError('Целевой номер деактивирован', 404))
     if (targetRoom.id === existing.roomId && moveDateD.getTime() === existing.checkIn.getTime()) {
       return next(createError('Тот же номер и та же дата — переезд не требуется', 400))
     }
@@ -473,7 +510,7 @@ async function move(req, res, next) {
         select: BOOKING_SELECT,
       })
 
-      emitBookingEvent('booking:updated', updated)
+      emitBookingEvent('booking:updated', { booking: updated })
       return res.json({ data: { original: updated, created: null } })
     }
 
@@ -500,7 +537,7 @@ async function move(req, res, next) {
         select: BOOKING_SELECT,
       })
 
-      // 2. Создать новую в целевом номере
+      // 2. Создать новую в целевом номере (метки и партнёр переезжают вместе с гостем)
       const created = await tx.booking.create({
         data: {
           roomId: parseInt(newRoomId),
@@ -524,7 +561,10 @@ async function move(req, res, next) {
           totalAmount: 0,
           prepaidAmount: 0,
           paidAmount: 0,
-          createdById: req.admin.id,
+          flags: existing.flags,
+          partnerId: existing.partnerId,
+          // В модели Booking поле называется adminId (relation createdBy) — createdById Prisma отклонял → 500
+          adminId: req.admin.id,
           shiftId: existing.shiftId,
         },
         select: BOOKING_SELECT,
@@ -533,8 +573,9 @@ async function move(req, res, next) {
       return { original: updatedOriginal, created }
     })
 
-    emitBookingEvent('booking:updated', result.original)
-    emitBookingEvent('booking:created', result.created)
+    // Клиент ждёт форму { booking } (как у остальных операций) — без обёртки падал с TypeError
+    emitBookingEvent('booking:updated', { booking: result.original })
+    emitBookingEvent('booking:created', { booking: result.created })
     res.json({ data: result })
   } catch (err) {
     next(err)
@@ -568,4 +609,5 @@ async function checkAvailability(req, res, next) {
   }
 }
 
-module.exports = { list, getOne, create, update, cancel, checkIn, checkOut, checkAvailability, move }
+// BOOKING_SELECT экспортируется для optimizeController — payload socket-событий должен быть единым
+module.exports = { list, getOne, create, update, cancel, checkIn, checkOut, checkAvailability, move, BOOKING_SELECT }

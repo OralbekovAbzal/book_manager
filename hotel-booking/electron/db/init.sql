@@ -288,6 +288,9 @@ ALTER TABLE "Release" ADD CONSTRAINT "Release_allotmentId_fkey" FOREIGN KEY ("al
 -- ─────────────────────────────────────────────────────────────────────────────
 -- Защита от двойного бронирования на уровне БД (race condition).
 -- БД физически запрещает пересечение активных броней в одном номере.
+-- DEFERRABLE INITIALLY IMMEDIATE: проверка на каждом изменении, но транзакция может отложить
+-- её до COMMIT (SET CONSTRAINTS ... DEFERRED) — нужно оптимизатору для обмена броней A↔B.
+-- Должно совпадать с server/prisma/sql/booking_no_overlap.sql.
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
 ALTER TABLE "Booking"
@@ -296,7 +299,8 @@ ALTER TABLE "Booking"
     "roomId" WITH =,
     daterange("checkIn", "checkOut") WITH &&
   )
-  WHERE (status IN ('CONFIRMED', 'CHECKED_IN'));
+  WHERE (status IN ('CONFIRMED', 'CHECKED_IN'))
+  DEFERRABLE INITIALLY IMMEDIATE;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -325,3 +329,151 @@ CREATE INDEX "Contact_group_order_idx" ON "Contact"("group", "order");
 
 -- CreateIndex
 CREATE INDEX "Contact_isPinned_idx" ON "Contact"("isPinned");
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Ценообразование: настройки объекта, календарь цен, услуги, начисления.
+
+-- CreateTable
+CREATE TABLE "HotelSettings" (
+    "id" INTEGER NOT NULL DEFAULT 1,
+    "name" TEXT NOT NULL DEFAULT 'Отель',
+    "city" TEXT,
+    "currency" TEXT NOT NULL DEFAULT 'KZT',
+    "pricingBase" TEXT NOT NULL DEFAULT 'person',
+    "lateArrivalHour" INTEGER,
+    -- Когда пройден мастер первичной настройки; NULL (или нет строки) → мастер ещё нужен.
+    "setupCompletedAt" TIMESTAMP(3),
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "HotelSettings_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "RatePrice" (
+    "id" SERIAL NOT NULL,
+    "categoryId" INTEGER NOT NULL,
+    "date" DATE NOT NULL,
+    "roomPrice" DOUBLE PRECISION,
+    "adultPrice" DOUBLE PRECISION,
+    "childPrice" DOUBLE PRECISION,
+    "extraBedPrice" DOUBLE PRECISION,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "RatePrice_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "Service" (
+    "id" SERIAL NOT NULL,
+    "code" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "price" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "childPrice" DOUBLE PRECISION,
+    "unit" TEXT NOT NULL DEFAULT 'per_person_night',
+    "kind" TEXT NOT NULL DEFAULT 'extra',
+    "includedByDefault" BOOLEAN NOT NULL DEFAULT false,
+    "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "order" INTEGER NOT NULL DEFAULT 0,
+
+    CONSTRAINT "Service_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "MealPlan" (
+    "id" SERIAL NOT NULL,
+    "code" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "serviceCodes" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "order" INTEGER NOT NULL DEFAULT 0,
+
+    CONSTRAINT "MealPlan_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "BookingCharge" (
+    "id" SERIAL NOT NULL,
+    "bookingId" INTEGER NOT NULL,
+    "kind" TEXT NOT NULL,
+    "label" TEXT NOT NULL,
+    "quantity" DOUBLE PRECISION NOT NULL DEFAULT 1,
+    "unitPrice" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "amount" DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "date" DATE,
+    "source" TEXT NOT NULL DEFAULT 'auto',
+    "reason" TEXT,
+    "createdById" INTEGER,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "BookingCharge_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "RatePrice_categoryId_date_key" ON "RatePrice"("categoryId", "date");
+CREATE INDEX "RatePrice_date_idx" ON "RatePrice"("date");
+CREATE UNIQUE INDEX "Service_code_key" ON "Service"("code");
+CREATE INDEX "Service_kind_order_idx" ON "Service"("kind", "order");
+CREATE UNIQUE INDEX "MealPlan_code_key" ON "MealPlan"("code");
+CREATE INDEX "BookingCharge_bookingId_idx" ON "BookingCharge"("bookingId");
+CREATE INDEX "BookingCharge_date_idx" ON "BookingCharge"("date");
+
+-- AddForeignKey
+ALTER TABLE "RatePrice" ADD CONSTRAINT "RatePrice_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "BookingCharge" ADD CONSTRAINT "BookingCharge_bookingId_fkey" FOREIGN KEY ("bookingId") REFERENCES "Booking"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+ALTER TABLE "BookingCharge" ADD CONSTRAINT "BookingCharge_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "Admin"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Журнал действий сотрудников (кто, когда, что изменил). Пишет middleware/audit.js.
+-- Должно совпадать с моделью AuditLog в server/prisma/schema.prisma.
+
+-- CreateTable
+CREATE TABLE "AuditLog" (
+    "id" SERIAL NOT NULL,
+    "adminId" INTEGER,
+    "adminName" TEXT NOT NULL,
+    "action" TEXT NOT NULL,
+    "entity" TEXT NOT NULL,
+    "entityId" INTEGER,
+    "details" JSONB,
+    "ip" TEXT,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "AuditLog_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE INDEX "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");
+CREATE INDEX "AuditLog_adminId_idx" ON "AuditLog"("adminId");
+
+-- AddForeignKey
+ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_adminId_fkey" FOREIGN KEY ("adminId") REFERENCES "Admin"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Пользовательские отчёты (конструктор / редактор / импорт JSON).
+-- Встроенные отчёты лежат файлами в server/src/reports/definitions и в БД не дублируются.
+
+-- CreateTable
+CREATE TABLE "ReportDefinition" (
+    "id" SERIAL NOT NULL,
+    "key" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "description" TEXT,
+    "definition" JSONB NOT NULL,
+    "createdById" INTEGER,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+
+    CONSTRAINT "ReportDefinition_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ReportDefinition_key_key" ON "ReportDefinition"("key");
+
+-- CreateIndex
+CREATE INDEX "ReportDefinition_title_idx" ON "ReportDefinition"("title");
+
+-- AddForeignKey
+ALTER TABLE "ReportDefinition" ADD CONSTRAINT "ReportDefinition_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "Admin"("id") ON DELETE SET NULL ON UPDATE CASCADE;

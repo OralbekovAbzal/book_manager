@@ -1,18 +1,29 @@
 const { app, BrowserWindow, ipcMain, Menu, shell, dialog } = require('electron')
 const path = require('path')
 const fs = require('fs')
+const os = require('os')
 const crypto = require('crypto')
 const { spawn } = require('child_process')
 
 // ─── Пути к ресурсам (dev vs упакованное) ────────────────────────────────────
 const isDev = !app.isPackaged
+// В dev — отдельный userData: иначе dev и установленная версия делят config.json
+// и pgdata. Обязательно ДО первого app.getPath('userData') (CONFIG_PATH ниже).
+if (isDev) app.setPath('userData', app.getPath('userData') + '-dev')
+
 function resourcePath(...p) {
-  return isDev
-    ? path.join(__dirname, '..', ...p)        // dev: рядом с electron/
-    : path.join(process.resourcesPath, ...p)  // prod: resources/
+  if (!isDev) return path.join(process.resourcesPath, ...p)   // prod: resources/
+  // dev: init.sql/seed.sql лежат в electron/db, сервер — в hotel-booking/server
+  const [head, ...rest] = p
+  if (head === 'db') return path.join(__dirname, 'db', ...rest)
+  return path.join(__dirname, '..', head, ...rest)
 }
 const DB_PORT = 5433
+const DB_NAME = 'hotel_booking'
 const DEFAULT_HOST_PORT = 3001
+// Отметка «схема накатана» в папке данных: пишется ПОСЛЕ успешного init.sql + seed.sql
+const SCHEMA_MARKER = 'schema-ready.json'
+const APP_VERSION = app.getVersion()
 
 // ─── Конфиг (userData, переживает переустановку) ─────────────────────────────
 const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json')
@@ -22,11 +33,56 @@ function readConfig() {
 function writeConfig(cfg) {
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8')
 }
+// Значения по умолчанию для порта и папок хоста (сисадмин может переопределить).
+function defaultPaths() {
+  return {
+    hostPort: DEFAULT_HOST_PORT,
+    dataDir: path.join(app.getPath('userData'), 'pgdata'),
+    backupDir: path.join(app.getPath('userData'), 'backups'),
+  }
+}
 function ensureSecrets(cfg) {
+  const d = defaultPaths()
   if (!cfg.dbPassword) cfg.dbPassword = crypto.randomBytes(18).toString('hex')
   if (!cfg.jwtSecret)  cfg.jwtSecret  = crypto.randomBytes(48).toString('base64')
-  if (!cfg.hostPort)   cfg.hostPort   = DEFAULT_HOST_PORT
+  if (!cfg.hostPort)   cfg.hostPort   = d.hostPort
+  if (!cfg.dataDir)    cfg.dataDir    = d.dataDir
+  if (!cfg.backupDir)  cfg.backupDir  = d.backupDir
   return cfg
+}
+
+// ─── Пароль сисадмина (хранится ЛОКАЛЬНО, scrypt) ────────────────────────────
+// Сисадмин — тот, кто ставит программу и настраивает подключение. Его пароль
+// лежит в config.json, а не в базе: в системные настройки нужно попадать даже
+// когда сервер/база недоступны. Сотрудники отеля этот пароль не используют.
+const SYSADMIN_KEYLEN = 32
+function hasSysadmin(cfg) {
+  return !!(cfg && cfg.sysadmin && cfg.sysadmin.salt && cfg.sysadmin.hash)
+}
+function hashSysadminPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex')
+  const hash = crypto.scryptSync(String(password), salt, SYSADMIN_KEYLEN).toString('hex')
+  return { salt, hash }
+}
+function verifySysadminPassword(cfg, password) {
+  if (!hasSysadmin(cfg)) return false
+  let expected
+  try { expected = Buffer.from(String(cfg.sysadmin.hash), 'hex') } catch { return false }
+  if (expected.length !== SYSADMIN_KEYLEN) return false
+  const actual = crypto.scryptSync(String(password == null ? '' : password), String(cfg.sysadmin.salt), SYSADMIN_KEYLEN)
+  return crypto.timingSafeEqual(actual, expected)
+}
+
+// IPv4-адреса этого компьютера в локальной сети — подсказка «адрес для клиентов».
+function lanIps() {
+  const out = []
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) {
+      const isV4 = ni.family === 'IPv4' || ni.family === 4
+      if (isV4 && !ni.internal) out.push(ni.address)
+    }
+  }
+  return out
 }
 
 // ─── Диагностический лог (host-режим) ────────────────────────────────────────
@@ -35,6 +91,15 @@ function hlog(...a) {
   const line = `[${new Date().toISOString()}] ` +
     a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n'
   try { fs.appendFileSync(DEBUG_LOG, line) } catch {}
+}
+
+// Текст ошибки запуска для диалога. embedded-postgres иногда реджектит без объекта
+// ошибки — String(err.message || err) показывал пользователю «undefined».
+function describeStartError(err) {
+  const msg = err && (typeof err === 'string' ? err : err.message)
+  if (msg) return `${msg}\n\nПодробности: ${DEBUG_LOG}`
+  return `База данных не запустилась. Возможно, порт ${DB_PORT} занят или программа уже запущена. ` +
+    `Подробности: ${DEBUG_LOG}`
 }
 
 // ─── Состояние процессов хоста ───────────────────────────────────────────────
@@ -57,9 +122,13 @@ async function startHost(cfg) {
     throw e
   }
 
-  const dataDir = path.join(app.getPath('userData'), 'pgdata')
+  // Папка данных Postgres — из config.json (задаётся сисадмином в настройках системы).
+  const dataDir = cfg.dataDir || defaultPaths().dataDir
   const fresh = !fs.existsSync(path.join(dataDir, 'PG_VERSION'))
-  hlog('dataDir=', dataDir, 'fresh=', fresh)
+  // Есть PG_VERSION, но нет отметки → старая установка (до отметок) или прерванный
+  // первый запуск: решаем по факту существования базы после старта Postgres.
+  const markerPath = path.join(dataDir, SCHEMA_MARKER)
+  hlog('dataDir=', dataDir, 'fresh=', fresh, 'schemaReady=', fs.existsSync(markerPath))
 
   pgInstance = new EmbeddedPostgres({
     databaseDir: dataDir,
@@ -74,34 +143,84 @@ async function startHost(cfg) {
   })
 
   try {
-    if (fresh) { hlog('initialise (initdb)...'); await pgInstance.initialise(); hlog('initialise OK') }
+    if (fresh) {
+      // initdb требует пустую папку — устаревшая отметка без PG_VERSION ему помешает
+      try { fs.unlinkSync(markerPath) } catch {}
+      hlog('initialise (initdb)...'); await pgInstance.initialise(); hlog('initialise OK')
+    }
     hlog('start postgres...'); await pgInstance.start(); hlog('postgres started')
 
-    if (fresh) {
-      hlog('createDatabase...'); await pgInstance.createDatabase('hotel_booking')
-      const client = pgInstance.getPgClient('hotel_booking')
-      await client.connect()
-      hlog('apply init.sql from', resourcePath('db', 'init.sql'))
-      await client.query(fs.readFileSync(resourcePath('db', 'init.sql'), 'utf8'))
-      hlog('apply seed.sql'); await client.query(fs.readFileSync(resourcePath('db', 'seed.sql'), 'utf8'))
-      await client.end()
-      hlog('schema+seed applied')
+    let needSchema = fresh
+    if (!fresh && !fs.existsSync(markerPath)) {
+      const exists = await databaseExists(DB_NAME)
+      hlog('no schema marker; database exists=', exists)
+      needSchema = !exists   // база есть — считаем готовой, нет — создаём и накатываем
+    }
+    if (needSchema) await createDatabaseWithSchema()
+    if (needSchema || !fs.existsSync(markerPath)) {
+      fs.writeFileSync(markerPath, JSON.stringify({ appliedAt: new Date().toISOString(), initSql: 'v1' }, null, 2), 'utf8')
+      hlog('schema marker written:', markerPath)
     }
   } catch (e) {
     hlog('POSTGRES SETUP FAIL:', e && (e.stack || e.message || String(e)))
     throw e
   }
 
-  const dbUrl = `postgresql://postgres:${cfg.dbPassword}@127.0.0.1:${DB_PORT}/hotel_booking`
+  spawnServer(cfg)
+  await waitForHealth(cfg.hostPort, 30000)
+  hlog('health OK on port', cfg.hostPort)
+  return `http://localhost:${cfg.hostPort}`
+}
+
+async function databaseExists(name) {
+  const client = pgInstance.getPgClient('postgres')
+  await client.connect()
+  try {
+    const r = await client.query('SELECT 1 FROM pg_database WHERE datname = $1', [name])
+    return r.rowCount > 0
+  } finally {
+    await client.end()
+  }
+}
+
+// Создать базу и накатить схему + начальные данные. Если схема не накатилась —
+// базу удаляем, чтобы следующий запуск повторил всё с начала: иначе пустая база
+// без таблиц при следующем старте считалась бы готовой.
+async function createDatabaseWithSchema() {
+  hlog('createDatabase...'); await pgInstance.createDatabase(DB_NAME)
+  const client = pgInstance.getPgClient(DB_NAME)
+  try {
+    await client.connect()
+    hlog('apply init.sql from', resourcePath('db', 'init.sql'))
+    await client.query(fs.readFileSync(resourcePath('db', 'init.sql'), 'utf8'))
+    hlog('apply seed.sql'); await client.query(fs.readFileSync(resourcePath('db', 'seed.sql'), 'utf8'))
+    await client.end()
+    hlog('schema+seed applied')
+  } catch (e) {
+    hlog('SCHEMA APPLY FAIL, dropping database:', String(e && (e.message || e)))
+    try { await client.end() } catch {}
+    try { await pgInstance.dropDatabase(DB_NAME) } catch (de) { hlog('dropDatabase fail:', String(de && (de.message || de))) }
+    throw e
+  }
+}
+
+// Запуск Node-сервера как дочернего процесса + надзор: упавший сервер один раз
+// перезапускается через 1 с; если он поднялся и ответил на /api/health, следующее
+// падение снова получит одну попытку. Повторное падение подряд — диалог с путём
+// к логу и окно настроек. При завершении приложения не перезапускаем.
+let serverRestarted = false
+function spawnServer(cfg) {
+  const dbUrl = `postgresql://postgres:${cfg.dbPassword}@127.0.0.1:${DB_PORT}/${DB_NAME}`
   const serverEntry = resourcePath('server', 'server.js')
 
-  // Логи и бэкапы — в userData (resources/ в Program Files доступен только на чтение).
+  // Логи — в userData (resources/ в Program Files доступен только на чтение),
+  // папка резервных копий — из config.json.
   const logPath = path.join(app.getPath('userData'), 'logs')
-  const backupPath = path.join(app.getPath('userData'), 'backups')
+  const backupPath = cfg.backupDir || defaultPaths().backupDir
   fs.mkdirSync(logPath, { recursive: true })
   fs.mkdirSync(backupPath, { recursive: true })
 
-  serverProc = spawn(process.execPath, [serverEntry], {
+  const proc = spawn(process.execPath, [serverEntry], {
     cwd: resourcePath('server'),
     env: {
       ...process.env,
@@ -115,17 +234,48 @@ async function startHost(cfg) {
       TZ: 'UTC',
       LOG_PATH: logPath,
       BACKUP_PATH: backupPath,
+      // Ночная копия в 03:00 по местному времени хоста, а не по UTC
+      BACKUP_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
     },
   })
-  serverProc.stdout?.on('data', (d) => hlog('[server]', String(d).trim()))
-  serverProc.stderr?.on('data', (d) => hlog('[server-err]', String(d).trim()))
-  serverProc.on('exit', (code, sig) => hlog('[server] EXIT code=', code, 'sig=', sig))
-  serverProc.on('error', (e) => hlog('[server] SPAWN ERROR:', String(e && (e.stack || e.message))))
+  proc.stdout?.on('data', (d) => hlog('[server]', String(d).trim()))
+  proc.stderr?.on('data', (d) => hlog('[server-err]', String(d).trim()))
+  proc.on('error', (e) => hlog('[server] SPAWN ERROR:', String(e && (e.stack || e.message))))
+  proc.on('exit', (code, sig) => {
+    hlog('[server] EXIT code=', code, 'sig=', sig)
+    if (serverProc !== proc) return   // уже остановлен/заменён (stopHostProcesses)
+    serverProc = null
+    if (isQuitting || code === 0) return
+    if (!serverRestarted) {
+      serverRestarted = true
+      hlog('[server] crashed, restarting in 1s')
+      setTimeout(() => {
+        if (isQuitting) return
+        try {
+          spawnServer(cfg)
+          waitForHealth(cfg.hostPort, 30000).then(() => { serverRestarted = false }).catch(() => {})
+        } catch (e) {
+          hlog('[server] respawn fail:', String(e && (e.message || e)))
+        }
+      }, 1000)
+      return
+    }
+    dialog.showErrorBox('Сервер остановился',
+      `Сервер приложения дважды завершился с ошибкой (код ${code}). ` +
+      `Проверьте настройки системы и порт ${cfg.hostPort}.\n\nПодробности: ${DEBUG_LOG}`)
+    createSettingsWindow()
+  })
+  serverProc = proc
   hlog('server spawned, entry=', serverEntry, 'execPath=', process.execPath)
+  return proc
+}
 
-  await waitForHealth(cfg.hostPort, 30000)
-  hlog('health OK on port', cfg.hostPort)
-  return `http://localhost:${cfg.hostPort}`
+// Корректно гасим сервер и базу (иначе можно повредить данные Postgres).
+async function stopHostProcesses() {
+  try { serverProc?.kill() } catch {}
+  serverProc = null
+  try { if (pgInstance) await pgInstance.stop() } catch (e) { hlog('pg stop fail:', String(e && (e.message || e))) }
+  pgInstance = null
 }
 
 function waitForHealth(port, timeoutMs) {
@@ -165,20 +315,36 @@ function createMainWindow(serverUrl) {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
-      additionalArguments: [`--server-url=${serverUrl}`],
+      additionalArguments: [`--server-url=${serverUrl}`, `--app-version=${APP_VERSION}`],
     },
   })
   mainWindow.once('ready-to-show', () => { closeSplash(); mainWindow.show() })
   if (isDev) mainWindow.loadURL('http://localhost:5173')
   else mainWindow.loadFile(resourcePath('renderer', 'index.html'))
   mainWindow.webContents.setWindowOpenHandler(({ url }) => { shell.openExternal(url); return { action: 'deny' } })
+  attachShortcuts(mainWindow)
   mainWindow.on('closed', () => { mainWindow = null })
+}
+
+// Меню приложения убрано целиком, поэтому горячие клавиши вешаем вручную:
+// F12 — инструменты разработчика, Ctrl+R / F5 — перезагрузка окна.
+function attachShortcuts(win) {
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return
+    const key = String(input.key || '').toLowerCase()
+    if (key === 'f12') { win.webContents.toggleDevTools(); event.preventDefault(); return }
+    if (key === 'f5' || (input.control && !input.alt && !input.meta && key === 'r')) {
+      if (input.shift) win.webContents.reloadIgnoringCache()
+      else win.webContents.reload()
+      event.preventDefault()
+    }
+  })
 }
 
 function createSettingsWindow() {
   if (settingsWindow) { settingsWindow.focus(); return }
   settingsWindow = new BrowserWindow({
-    width: 560, height: 520, resizable: false, title: 'Настройка подключения',
+    width: 560, height: 720, resizable: false, title: 'Настройка системы',
     parent: mainWindow || undefined, modal: !!mainWindow,
     webPreferences: {
       preload: path.join(__dirname, 'settings-preload.js'),
@@ -187,6 +353,7 @@ function createSettingsWindow() {
   })
   settingsWindow.setMenuBarVisibility(false)
   settingsWindow.loadFile(path.join(__dirname, 'settings.html'))
+  attachShortcuts(settingsWindow)
   settingsWindow.on('closed', () => { settingsWindow = null })
 }
 
@@ -202,21 +369,136 @@ async function boot() {
   hlog('boot: HOST mode')
   createSplash('Запуск базы данных и сервера…')
   try {
-    const url = await startHost(ensureSecrets(cfg))
+    ensureSecrets(cfg)
+    writeConfig(cfg)   // секреты и пути должны быть одинаковыми от запуска к запуску
+    const url = await startHost(cfg)
     createMainWindow(url)
   } catch (err) {
     hlog('boot HOST FAIL:', String(err && (err.stack || err.message || err)))
     closeSplash()
-    dialog.showErrorBox('Не удалось запустить сервер', String(err && err.message || err))
+    dialog.showErrorBox('Не удалось запустить сервер', describeStartError(err))
     createSettingsWindow()
   }
 }
 
-// ─── IPC (окно настроек) ─────────────────────────────────────────────────────
-ipcMain.handle('config:get', () => readConfig())
+// ─── Обновления (electron-updater, generic-провайдер) ────────────────────────
+// Адрес сервера обновлений — cfg.updateUrl из config.json (задаёт сисадмин);
+// placeholder в package.json → build.publish нужен только сборщику для latest.yml.
+// Проверка тихая: через 30 с после старта и раз в сутки; скачивание — только по
+// команде пользователя (autoDownload = false). Статусы летят в renderer событием
+// 'update:status' { state, version?, percent?, error? }.
+let autoUpdater = null
+const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000
+
+function sendUpdateStatus(state, extra) {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('update:status', { state, ...(extra || {}) })
+}
+
+function setupAutoUpdater(cfg) {
+  if (autoUpdater || isDev || !cfg || !cfg.updateUrl) return
+  let updater
+  try { ({ autoUpdater: updater } = require('electron-updater')) } catch (e) {
+    hlog('electron-updater unavailable:', String(e && (e.message || e)))
+    return
+  }
+  updater.autoDownload = false
+  updater.autoInstallOnAppQuit = true
+  updater.logger = {
+    info: (m) => hlog('[upd]', String(m)), warn: (m) => hlog('[upd-warn]', String(m)),
+    error: (m) => hlog('[upd-err]', String(m)), debug: () => {},
+  }
+  try {
+    updater.setFeedURL({ provider: 'generic', url: cfg.updateUrl })
+  } catch (e) {
+    hlog('setFeedURL fail:', String(e && (e.message || e)))
+    return
+  }
+  updater.on('checking-for-update', () => sendUpdateStatus('checking'))
+  updater.on('update-available', (info) => sendUpdateStatus('available', { version: info && info.version }))
+  updater.on('update-not-available', (info) => sendUpdateStatus('not-available', { version: info && info.version }))
+  updater.on('download-progress', (p) => sendUpdateStatus('downloading', { percent: Math.round((p && p.percent) || 0) }))
+  updater.on('update-downloaded', (info) => sendUpdateStatus('downloaded', { version: info && info.version }))
+  updater.on('error', (err) => sendUpdateStatus('error', { error: String(err && (err.message || err)) }))
+  autoUpdater = updater
+
+  const check = () => autoUpdater.checkForUpdates().catch((e) => hlog('update check fail:', String(e && (e.message || e))))
+  setTimeout(check, 30000)
+  setInterval(check, UPDATE_CHECK_INTERVAL)
+  hlog('auto-updater configured; feed=', cfg.updateUrl)
+}
+
+const UPDATER_NOT_CONFIGURED = isDev
+  ? 'Обновления недоступны в режиме разработки'
+  : 'Сервер обновлений не настроен (окно «Настройка системы»)'
+
+// IPC: проверить / скачать / установить. Ответ { ok, state?, version?, error? }.
+ipcMain.handle('update:check', async () => {
+  if (!autoUpdater) return { ok: false, state: 'unavailable', error: UPDATER_NOT_CONFIGURED }
+  try {
+    const r = await autoUpdater.checkForUpdates()
+    const available = !!(r && r.isUpdateAvailable)
+    return { ok: true, state: available ? 'available' : 'not-available', version: r && r.updateInfo && r.updateInfo.version }
+  } catch (err) {
+    return { ok: false, state: 'error', error: String(err && (err.message || err)) }
+  }
+})
+
+ipcMain.handle('update:download', async () => {
+  if (!autoUpdater) return { ok: false, error: UPDATER_NOT_CONFIGURED }
+  try {
+    await autoUpdater.downloadUpdate()
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: String(err && (err.message || err)) }
+  }
+})
+
+ipcMain.handle('update:install', async () => {
+  if (!autoUpdater) return { ok: false, error: UPDATER_NOT_CONFIGURED }
+  // Гасим сервер и базу штатно, иначе установщик упрётся в занятые файлы
+  isQuitting = true
+  await stopHostProcesses()
+  autoUpdater.quitAndInstall(false, true)
+  return { ok: true }
+})
+
+// ─── IPC (окно настроек системы) ─────────────────────────────────────────────
+// Конфиг наружу — без секретов (dbPassword, jwtSecret) и без хеша сисадмина.
+ipcMain.handle('config:get', () => {
+  const cfg = readConfig()
+  const { dbPassword, jwtSecret, sysadmin, ...safe } = cfg // eslint-disable-line no-unused-vars
+  return {
+    ...safe,
+    hasSysadmin: hasSysadmin(cfg),
+    firstRun: !cfg.mode,
+    lanIps: lanIps(),
+    defaults: defaultPaths(),
+  }
+})
+
+// Выбор папки (данные базы / резервные копии). null — отмена.
+ipcMain.handle('config:pickFolder', async (_e, title) => {
+  const opts = {
+    title: String(title || 'Выберите папку'),
+    properties: ['openDirectory', 'createDirectory'],
+  }
+  const r = settingsWindow
+    ? await dialog.showOpenDialog(settingsWindow, opts)
+    : await dialog.showOpenDialog(opts)
+  return !r.canceled && r.filePaths && r.filePaths[0] ? r.filePaths[0] : null
+})
+
+// Адрес хоста для клиента: без схемы → добавляем http://, хвостовые слэши убираем.
+function normalizeServerUrl(raw) {
+  let url = String(raw || '').trim()
+  if (!url) return ''
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = 'http://' + url
+  return url.replace(/\/+$/, '')
+}
 
 ipcMain.handle('config:test', async (_e, serverUrl) => {
-  const url = String(serverUrl || '').trim().replace(/\/+$/, '')
+  const url = normalizeServerUrl(serverUrl)
   if (!url) return { ok: false, error: 'Пустой адрес' }
   try {
     const ctrl = new AbortController()
@@ -227,17 +509,82 @@ ipcMain.handle('config:test', async (_e, serverUrl) => {
   } catch (err) { return { ok: false, error: err.message } }
 })
 
-// Применить выбранный режим и (пере)загрузить приложение.
+// Сохранить настройки системы. Первый запуск — стартуем сразу; на работающей
+// установке — перезапуск приложения, чтобы порт и папки применились чисто.
+// Ответ: { ok: true, relaunch?: true } | { ok: false, error: string }.
 ipcMain.handle('config:apply', async (_e, payload) => {
+  const p = payload && typeof payload === 'object' ? payload : {}
   const cfg = ensureSecrets(readConfig())
-  cfg.mode = payload.mode
-  if (payload.mode === 'client') {
-    cfg.serverUrl = String(payload.serverUrl || '').trim().replace(/\/+$/, '')
-  }
-  writeConfig(cfg)
+  const firstRun = !cfg.mode
+  const d = defaultPaths()
 
+  if (p.mode !== 'host' && p.mode !== 'client') {
+    return { ok: false, error: 'Выберите режим работы: хост или клиент' }
+  }
+
+  // Пароль сисадмина обязателен, пока не задан (первый запуск / старая установка);
+  // дальше — только если решили сменить (заполнено хотя бы одно поле).
+  const pwd = p.sysadminPassword == null ? '' : String(p.sysadminPassword)
+  const pwd2 = p.sysadminPasswordConfirm == null ? '' : String(p.sysadminPasswordConfirm)
+  if (firstRun || !hasSysadmin(cfg) || pwd || pwd2) {
+    if (pwd.length < 8) return { ok: false, error: 'Пароль сисадмина: минимум 8 символов' }
+    if (pwd !== pwd2) return { ok: false, error: 'Пароли сисадмина не совпадают' }
+  }
+
+  if (p.mode === 'host') {
+    const port = p.hostPort === undefined || p.hostPort === null || p.hostPort === ''
+      ? cfg.hostPort : Number(p.hostPort)
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      return { ok: false, error: 'Порт сервера: целое число от 1024 до 65535' }
+    }
+    const dataDir = String(p.dataDir || '').trim() || d.dataDir
+    const backupDir = String(p.backupDir || '').trim() || d.backupDir
+    if (!path.isAbsolute(dataDir)) return { ok: false, error: 'Папка данных базы: укажите полный путь' }
+    if (!path.isAbsolute(backupDir)) return { ok: false, error: 'Папка резервных копий: укажите полный путь' }
+    if (path.resolve(dataDir) === path.resolve(backupDir)) {
+      return { ok: false, error: 'Папка данных и папка резервных копий должны быть разными' }
+    }
+    cfg.hostPort = port
+    cfg.dataDir = path.resolve(dataDir)
+    cfg.backupDir = path.resolve(backupDir)
+  } else {
+    const url = normalizeServerUrl(p.serverUrl)
+    if (!url) return { ok: false, error: 'Укажите адрес хоста' }
+    try { new URL(url) } catch { return { ok: false, error: 'Некорректный адрес хоста' } }
+    cfg.serverUrl = url
+  }
+
+  // Сервер обновлений — необязательный; пустое поле выключает проверку обновлений.
+  const updateUrl = String(p.updateUrl == null ? '' : p.updateUrl).trim()
+  if (updateUrl) {
+    let parsed
+    try { parsed = new URL(updateUrl) } catch { parsed = null }
+    if (!parsed || !/^https?:$/.test(parsed.protocol)) {
+      return { ok: false, error: 'Сервер обновлений: укажите адрес вида http(s)://…' }
+    }
+    cfg.updateUrl = updateUrl
+  } else {
+    delete cfg.updateUrl
+  }
+
+  cfg.mode = p.mode
+  if (pwd) cfg.sysadmin = hashSysadminPassword(pwd)
+  writeConfig(cfg)
+  hlog('config:apply saved; mode=', cfg.mode, 'firstRun=', firstRun)
+
+  // Настройки изменены на работающей установке → чистый перезапуск.
+  if (!firstRun) {
+    isQuitting = true
+    await stopHostProcesses()
+    app.relaunch()
+    app.exit(0)
+    return { ok: true, relaunch: true }
+  }
+
+  // Первый запуск: стартуем сразу, без перезапуска.
   if (settingsWindow) settingsWindow.close()
-  if (mainWindow) { mainWindow.close() }
+  if (mainWindow) mainWindow.close()
+  setupAutoUpdater(cfg)
 
   if (cfg.mode === 'host') {
     createSplash('Запуск базы данных и сервера…')
@@ -245,8 +592,10 @@ ipcMain.handle('config:apply', async (_e, payload) => {
       const url = serverProc ? `http://localhost:${cfg.hostPort}` : await startHost(cfg)
       createMainWindow(url)
     } catch (err) {
+      hlog('apply HOST FAIL:', String(err && (err.stack || err.message || err)))
       closeSplash()
-      dialog.showErrorBox('Не удалось запустить сервер', String(err && err.message || err))
+      dialog.showErrorBox('Не удалось запустить сервер', describeStartError(err))
+      createSettingsWindow()
     }
   } else {
     createMainWindow(cfg.serverUrl)
@@ -254,24 +603,79 @@ ipcMain.handle('config:apply', async (_e, payload) => {
   return { ok: true }
 })
 
-ipcMain.on('open-settings', () => createSettingsWindow())
+// Вход сисадмина. Старая установка без пароля → пускаем и просим задать его (needsSetup).
+ipcMain.handle('system:login', (_e, password) => {
+  const cfg = readConfig()
+  if (!hasSysadmin(cfg)) return { ok: true, needsSetup: true }
+  return { ok: verifySysadminPassword(cfg, password) }
+})
+
+// Открыть окно настроек системы — только по паролю сисадмина (из приложения, preload.js).
+ipcMain.handle('system:openSettings', (_e, password) => {
+  const cfg = readConfig()
+  if (hasSysadmin(cfg) && !verifySysadminPassword(cfg, password)) {
+    return { ok: false, error: 'Неверный пароль сисадмина' }
+  }
+  createSettingsWindow()
+  return { ok: true }
+})
+
+// ─── Отчёты ──────────────────────────────────────────────────────────────────
+
+// PDF отчёта. Печатаем ТЕКУЩЕЕ окно через printToPDF: Chromium применяет те же
+// @media print стили, что и обычная печать, поэтому лист и PDF совпадают.
+// Серверный рендер PDF означал бы второй движок вёрстки и расхождение с печатью.
+ipcMain.handle('report:savePdf', async (_e, options = {}) => {
+  const win = mainWindow
+  if (!win) return { ok: false, error: 'Окно приложения не найдено' }
+  try {
+    const pdf = await win.webContents.printToPDF({
+      landscape: options.landscape !== false,
+      printBackground: true,
+      pageSize: 'A4',
+      margins: { marginType: 'custom', top: 0.5, bottom: 0.5, left: 0.4, right: 0.4 },
+    })
+
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: 'Сохранить отчёт в PDF',
+      defaultPath: path.join(app.getPath('documents'), options.fileName || 'report.pdf'),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    })
+    if (canceled || !filePath) return { ok: false, canceled: true }
+
+    fs.writeFileSync(filePath, pdf)
+    return { ok: true, path: filePath }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
+// Сохранение готового файла отчёта (xlsx/docx/csv приходят с сервера в base64).
+// В упакованном приложении окно живёт на file://, где обычная загрузка по ссылке
+// молча ничего не делает — поэтому файл пишем из main и показываем в папке.
+ipcMain.handle('report:saveFile', async (_e, { fileName, base64 } = {}) => {
+  const win = mainWindow
+  if (!base64) return { ok: false, error: 'Пустой файл' }
+  try {
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      title: 'Сохранить отчёт',
+      defaultPath: path.join(app.getPath('documents'), fileName || 'report'),
+    })
+    if (canceled || !filePath) return { ok: false, canceled: true }
+
+    fs.writeFileSync(filePath, Buffer.from(base64, 'base64'))
+    shell.showItemInFolder(filePath)
+    return { ok: true, path: filePath }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
 
 // ─── Меню ────────────────────────────────────────────────────────────────────
+// Меню приложения убрано полностью: настройки системы открываются из приложения
+// по паролю сисадмина (IPC system:openSettings), горячие клавиши — attachShortcuts().
 function buildMenu() {
-  Menu.setApplicationMenu(Menu.buildFromTemplate([
-    { label: 'Файл', submenu: [
-      { label: 'Настройка подключения…', click: () => createSettingsWindow() },
-      { type: 'separator' }, { role: 'quit', label: 'Выход' },
-    ] },
-    { label: 'Вид', submenu: [
-      { role: 'reload', label: 'Обновить' },
-      { role: 'toggleDevTools', label: 'Инструменты разработчика' },
-      { type: 'separator' },
-      { role: 'resetZoom', label: 'Масштаб 100%' },
-      { role: 'zoomIn', label: 'Увеличить' }, { role: 'zoomOut', label: 'Уменьшить' },
-      { role: 'togglefullscreen', label: 'Полный экран' },
-    ] },
-  ]))
+  Menu.setApplicationMenu(null)
 }
 
 // ─── Жизненный цикл ──────────────────────────────────────────────────────────
@@ -283,7 +687,7 @@ if (!gotLock) {
     if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus() }
   })
 
-  app.whenReady().then(() => { buildMenu(); boot() })
+  app.whenReady().then(() => { buildMenu(); boot(); setupAutoUpdater(readConfig()) })
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) boot()
@@ -295,8 +699,7 @@ if (!gotLock) {
     if (!serverProc && !pgInstance) return
     e.preventDefault()
     isQuitting = true
-    try { serverProc?.kill() } catch {}
-    try { if (pgInstance) await pgInstance.stop() } catch {}
+    await stopHostProcesses()
     app.quit()
   })
 

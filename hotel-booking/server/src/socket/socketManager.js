@@ -49,6 +49,25 @@ const EVENT_LABELS = {
   'booking:checkout':  'Выезд гостя',
 }
 
+/**
+ * Приводит payload к единой форме { booking, ... } с гарантированным booking.roomId.
+ * Клиент деструктурирует ({ booking }) и вставляет бронь в строку по booking.roomId —
+ * «голая» бронь без обёртки или бронь без roomId на втором рабочем месте терялась.
+ */
+function normalizeBookingPayload(data) {
+  if (!data || typeof data !== 'object') return data
+  let payload = data
+  // Бронь передали без обёртки (есть id и guestName) — оборачиваем
+  if (payload.booking === undefined && payload.id != null && payload.guestName != null) {
+    payload = { booking: payload }
+  }
+  const b = payload.booking
+  if (b && typeof b === 'object' && b.roomId == null && b.room?.id != null) {
+    payload = { ...payload, booking: { ...b, roomId: b.room.id } }
+  }
+  return payload
+}
+
 function emitBookingEvent(event, data) {
   // Инвалидируем кэш сетки при любом изменении брони
   const { invalidateGridCache } = require('../controllers/occupancyController')
@@ -60,7 +79,17 @@ function emitBookingEvent(event, data) {
     scheduleAuto(EVENT_LABELS[event] || 'Изменение брони')
   } catch { /* snapshot недоступен — не критично */ }
 
-  getIO().to('bookings').emit(event, data)
+  getIO().to('bookings').emit(event, normalizeBookingPayload(data))
 }
 
-module.exports = { initSocket, getIO, emitBookingEvent }
+/** Смена рабочего дня — остальные рабочие места перецентрируют сетку на новую дату. */
+function emitShiftChanged(shift) {
+  getIO().to('bookings').emit('shift:changed', { shift: { id: shift.id, date: shift.date } })
+}
+
+/** Список отчётов изменился (создан/изменён/удалён/импортирован) — остальные рабочие места перечитывают его. */
+function emitReportsChanged() {
+  getIO().to('bookings').emit('reports:changed', {})
+}
+
+module.exports = { initSocket, getIO, emitBookingEvent, emitShiftChanged, emitReportsChanged }

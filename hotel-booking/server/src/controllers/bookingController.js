@@ -4,6 +4,7 @@ const { emitBookingEvent } = require('../socket/socketManager')
 const { createError } = require('../middleware/errorHandler')
 const { ensureCurrentShift, getCurrentBusinessDate } = require('../utils/businessDate')
 const { getFlagEffectsMap, findBufferConflict } = require('../utils/flagEffects')
+const { findAllotmentConflict, allotmentConflictMessage } = require('../utils/allotment')
 
 /** Resolve the shift id for a new booking — the current business day (manual-only). */
 async function resolveShiftId(explicitShiftId, adminId) {
@@ -158,6 +159,23 @@ async function create(req, res, next) {
       })
     }
 
+    // Квота партнёра. Не запрет намертво: отель вправе продать выделенный номер,
+    // но это должно быть осознанным решением, а не молчаливым — иначе партнёр
+    // приезжает к занятому номеру. Подтверждение приходит как allowAllotmentOverride.
+    if (!req.body.allowAllotmentOverride) {
+      // NB: partnerId в create/update из тела НЕ разбирается (бронь партнёру
+      // здесь не назначается) — берём напрямую, чтобы не ловить ReferenceError.
+      const allotHit = await findAllotmentConflict({
+        roomId, checkIn, checkOut, partnerId: req.body.partnerId,
+      })
+      if (allotHit) {
+        return res.status(409).json({
+          error: allotmentConflictMessage(allotHit),
+          code: 'ALLOTMENT_CONFLICT',
+        })
+      }
+    }
+
     const booking = await prisma.booking.create({
       data: {
         roomId,
@@ -289,6 +307,21 @@ async function update(req, res, next) {
       return res.status(409).json({
         error: `Нужен зазор минимум ${bufHitU.required} дн. рядом с бронью «${bufHitU.booking.guestName}» (метка с буфером). Выберите другие даты или номер.`,
       })
+    }
+
+    if (!req.body.allowAllotmentOverride) {
+      const allotHitU = await findAllotmentConflict({
+        roomId: newRoomId,
+        checkIn: newCheckIn,
+        checkOut: newCheckOut,
+        partnerId: req.body.partnerId !== undefined ? req.body.partnerId : existing.partnerId,
+      })
+      if (allotHitU) {
+        return res.status(409).json({
+          error: allotmentConflictMessage(allotHitU),
+          code: 'ALLOTMENT_CONFLICT',
+        })
+      }
     }
 
     const booking = await prisma.booking.update({
@@ -424,11 +457,22 @@ async function checkOut(req, res, next) {
       return next(createError('Рабочая дата раньше даты заезда — выезд невозможен', 400))
     }
 
-    // Выезд день-в-день с заездом — гость не ночевал, просто удаляем запись
+    // Выезд день-в-день с заездом: гость не ночевал.
+    // Раньше здесь было `booking.delete` — запись физически исчезала из базы вместе
+    // с историей, аудитом и деньгами, хотя обычная отмена принципиально ничего не
+    // удаляет. Теперь отменяем, как везде: номер освобождается (CANCELLED выведен
+    // из-под ограничения booking_no_overlap), а факт остаётся в базе.
     if (todayUTC.getTime() === checkInUTC.getTime()) {
-      await prisma.booking.delete({ where: { id } })
-      emitBookingEvent('booking:cancelled', { bookingId: id, roomId: existing.roomId })
-      return res.json({ data: { deleted: true } })
+      const booking = await prisma.booking.update({
+        where: { id },
+        data: {
+          status: 'CANCELLED',
+          notes: appendNote(existing.notes, 'Выезд в день заезда — гость не ночевал'),
+        },
+        select: BOOKING_SELECT,
+      })
+      emitBookingEvent('booking:cancelled', { bookingId: id, roomId: booking.room.id })
+      return res.json({ data: booking })
     }
 
     const data = { status: 'CHECKED_OUT' }
@@ -525,6 +569,36 @@ async function move(req, res, next) {
       return next(createError(`Целевой номер занят (${conflict.guestName})`, 409))
     }
 
+    if (!req.body.allowAllotmentOverride) {
+      const allotHitM = await findAllotmentConflict({
+        roomId: newRoomId,
+        checkIn: moveDateD,
+        checkOut: existing.checkOut,
+        partnerId: existing.partnerId,
+      })
+      if (allotHitM) {
+        return res.status(409).json({
+          error: allotmentConflictMessage(allotHitM),
+          code: 'ALLOTMENT_CONFLICT',
+        })
+      }
+    }
+
+    // Деньги делим пропорционально ночам. Раньше вторая часть получала нули, а
+    // первая сохраняла полную сумму за весь исходный срок: итог по брони переставал
+    // соответствовать её датам, и оплата выглядела как несуществующая на новой части.
+    // Остаток отдаём второй части, чтобы сумма частей ТОЧНО равнялась исходной
+    // и округление не съедало тенге.
+    const DAY_MS = 86400000
+    const nightsAll = Math.max(1, Math.round((existing.checkOut - existing.checkIn) / DAY_MS))
+    const nightsFirst = Math.max(0, Math.round((moveDateD - existing.checkIn) / DAY_MS))
+    const splitFirst = (value) => Math.round((value || 0) * nightsFirst / nightsAll)
+    const money = {
+      total: splitFirst(existing.totalAmount),
+      prepaid: splitFirst(existing.prepaidAmount),
+      paid: splitFirst(existing.paidAmount),
+    }
+
     const result = await prisma.$transaction(async (tx) => {
       // 1. Закрыть оригинальную бронь датой переезда
       const updatedOriginal = await tx.booking.update({
@@ -532,6 +606,9 @@ async function move(req, res, next) {
         data: {
           checkOut: moveDateD,
           status: 'CHECKED_OUT',
+          totalAmount: money.total,
+          prepaidAmount: money.prepaid,
+          paidAmount: money.paid,
           notes: appendNote(existing.notes, `Переезд в №${targetRoom.number} (${moveDate})`),
         },
         select: BOOKING_SELECT,
@@ -558,9 +635,9 @@ async function move(req, res, next) {
           disabledChildren: existing.disabledChildren,
           discountPercent: existing.discountPercent,
           prepaymentPercent: existing.prepaymentPercent,
-          totalAmount: 0,
-          prepaidAmount: 0,
-          paidAmount: 0,
+          totalAmount: (existing.totalAmount || 0) - money.total,
+          prepaidAmount: (existing.prepaidAmount || 0) - money.prepaid,
+          paidAmount: (existing.paidAmount || 0) - money.paid,
           flags: existing.flags,
           partnerId: existing.partnerId,
           // В модели Booking поле называется adminId (relation createdBy) — createdById Prisma отклонял → 500

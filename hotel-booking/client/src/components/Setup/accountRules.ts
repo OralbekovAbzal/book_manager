@@ -5,9 +5,16 @@ import type { AdminRole, ApiFieldError } from '../../types'
 
 export const USERNAME_MIN = 3
 export const USERNAME_MAX = 30
-export const PASSWORD_MIN = 8
+export const PASSWORD_MIN = 10
+/** bcrypt считает только первые 72 байта — всё, что длиннее, молча отбрасывается. */
+export const PASSWORD_MAX = 72
 
 const USERNAME_RE = /^[A-Za-z0-9._-]+$/
+const HAS_LETTER = /\p{L}/u
+const HAS_DIGIT = /\p{Nd}/u
+
+/** Подсказка под полем «Пароль» — один текст на все формы. */
+export const PASSWORD_HINT = `Не менее ${PASSWORD_MIN} символов, буквы и цифры`
 
 export const ROLE_LABELS: Record<AdminRole, string> = {
   SUPER_ADMIN: 'Главный администратор',
@@ -24,10 +31,35 @@ export function validateUsername(value: string): string {
   return ''
 }
 
+/**
+ * Проверка НОВОГО пароля. Применяется только там, где пароль ЗАДАЁТСЯ
+ * (мастер первого запуска, создание пользователя, сброс пароля, смена пароля),
+ * и никогда на экране входа: иначе владелец со старым коротким паролем
+ * не сможет войти в свою же систему.
+ *
+ * Зеркало на сервере: server/src/utils/passwordPolicy.js — тексты совпадают
+ * дословно, правку делать в обоих файлах.
+ */
 export function validatePassword(value: string): string {
-  if (!value) return 'Введите пароль'
-  if (value.length < PASSWORD_MIN) return `Пароль — не менее ${PASSWORD_MIN} символов`
-  return ''
+  if (!value) return 'Введите пароль'   // на сервере тот же случай — «Пароль обязателен»
+  const problems = passwordProblems(value)
+  return problems.length ? `Пароль не подходит: ${problems.join('; ')}` : ''
+}
+
+/** Список претензий к паролю — перечисляем ИМЕННО то, что не так. */
+export function passwordProblems(value: string): string[] {
+  if (!value) return ['введите пароль']
+
+  const problems: string[] = []
+  if (value.length < PASSWORD_MIN) {
+    problems.push(`нужно не менее ${PASSWORD_MIN} символов (сейчас ${value.length})`)
+  } else if (value.length > PASSWORD_MAX) {
+    problems.push(`не более ${PASSWORD_MAX} символов (сейчас ${value.length})`)
+  }
+  if (!HAS_LETTER.test(value)) problems.push('нет ни одной буквы')
+  if (!HAS_DIGIT.test(value)) problems.push('нет ни одной цифры')
+  if (value.trim() !== value) problems.push('пробелы в начале или в конце')
+  return problems
 }
 
 export function validateName(value: string): string {

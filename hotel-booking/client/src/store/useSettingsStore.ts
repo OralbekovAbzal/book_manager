@@ -78,59 +78,6 @@ export const ROOM_FUND_DEFAULTS: RoomFundConfig = {
   ],
 }
 
-// ─── Pricing types ────────────────────────────────────────────────────────────
-
-export interface PricingPeriod {
-  id: string
-  name: string
-  start: string  // "MM-DD"
-  end: string    // "MM-DD"
-}
-
-export interface PricingConfig {
-  noMealDiscount: number
-  disabledDiscountDefault: number
-  periods: PricingPeriod[]
-  categoryRates: Record<string, {
-    adultRates: Record<string, number>
-    childRates: Record<string, number>
-    extraBedRates: Record<string, number>
-    disabledDiscount: number
-  }>
-}
-
-export const PRICING_DEFAULTS: PricingConfig = {
-  noMealDiscount: 7000,
-  disabledDiscountDefault: 3000,
-  periods: [
-    { id: 'p1', name: '15–21 июн', start: '06-15', end: '06-21' },
-    { id: 'p2', name: '22 июн – 3 июл', start: '06-22', end: '07-03' },
-    { id: 'p3', name: '4 июл – 9 авг', start: '07-04', end: '08-09' },
-    { id: 'p4', name: '10–16 авг', start: '08-10', end: '08-16' },
-    { id: 'p5', name: '17–25 авг', start: '08-17', end: '08-25' },
-  ],
-  categoryRates: {
-    'стандарт': {
-      adultRates: { p1: 15000, p2: 17000, p3: 21000, p4: 17000, p5: 15000 },
-      childRates: { p1: 14000, p2: 15000, p3: 17000, p4: 15000, p5: 14000 },
-      extraBedRates: {},
-      disabledDiscount: 3000,
-    },
-    'комфорт': {
-      adultRates: { p1: 16000, p2: 19000, p3: 24000, p4: 19000, p5: 16000 },
-      childRates: { p1: 14000, p2: 16000, p3: 19000, p4: 16000, p5: 14000 },
-      extraBedRates: { p1: 15000, p2: 15000, p3: 17000, p4: 15000, p5: 15000 },
-      disabledDiscount: 3000,
-    },
-    'эконом': {
-      adultRates: { p1: 15000, p2: 15000, p3: 16000, p4: 15000, p5: 15000 },
-      childRates: { p1: 13000, p2: 13000, p3: 14000, p4: 13000, p5: 13000 },
-      extraBedRates: {},
-      disabledDiscount: 2000,
-    },
-  },
-}
-
 // ─── Optimizer settings ──────────────────────────────────────────────────────
 
 export type CompatRule = 'strict' | 'soft' | 'ignore'
@@ -215,10 +162,6 @@ interface SettingsStore {
   setRoomFund: (data: Partial<RoomFundConfig>) => void
   resetRoomFund: () => void
 
-  pricing: PricingConfig
-  setPricing: (data: Partial<PricingConfig>) => void
-  resetPricing: () => void
-
   filterSettings: FilterSettings
   setFilterSetting: <K extends keyof FilterSettings>(key: K, value: FilterSettings[K]) => void
   resetFilterSettings: () => void
@@ -244,11 +187,6 @@ export const useSettingsStore = create<SettingsStore>()(
       setRoomFund: (data) =>
         set((s) => ({ roomFund: { ...s.roomFund, ...data } })),
       resetRoomFund: () => set({ roomFund: ROOM_FUND_DEFAULTS }),
-
-      pricing: PRICING_DEFAULTS,
-      setPricing: (data) =>
-        set((s) => ({ pricing: { ...s.pricing, ...data } })),
-      resetPricing: () => set({ pricing: PRICING_DEFAULTS }),
 
       filterSettings: FILTER_DEFAULTS,
       setFilterSetting: (key, value) =>
@@ -279,7 +217,6 @@ export const useSettingsStore = create<SettingsStore>()(
           ...p,
           visual:         { ...current.visual,         ...(p.visual ?? {}) },
           roomFund:       { ...current.roomFund,       ...(p.roomFund ?? {}) },
-          pricing:        { ...current.pricing,        ...(p.pricing ?? {}) },
           filterSettings: { ...current.filterSettings, ...(p.filterSettings ?? {}) },
           optimizer:      { ...current.optimizer,      ...(p.optimizer ?? {}) },
         }

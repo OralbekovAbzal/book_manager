@@ -26,6 +26,10 @@ const bookingNumericRules = [
   body('flags.*').isString().isLength({ max: 60 }).withMessage('Метка — строка до 60 символов'),
   body('shiftId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('shiftId должен быть целым числом'),
   body('status').optional().isIn(['CONFIRMED', 'CHECKED_IN']).withMessage('Недопустимый статус'),
+  // Осознанное подтверждение продажи номера из квоты партнёра (409 ALLOTMENT_CONFLICT)
+  body('allowAllotmentOverride').optional().isBoolean().withMessage('allowAllotmentOverride — да/нет'),
+  // Явное «Пересчитать по тарифу»: пересобрать автоматические строки начислений
+  body('recalcCharges').optional().isBoolean().withMessage('recalcCharges — да/нет'),
 ]
 
 const bookingBodyRules = [
@@ -81,5 +85,39 @@ router.post('/:id/move',
   body('newRoomId').isInt({ min: 1 }),
   body('moveDate').isDate(),
   validate, ctrl.move)
+
+// ─── Начисления брони ────────────────────────────────────────────────────────
+// Итог брони = сумма строк. Ручная строка обязана нести причину: именно она
+// превращает уступку «беру полсуток» из устной договорённости в запись.
+
+const CHARGE_KINDS = ['stay', 'meal', 'extra', 'discount']
+
+const chargeMoneyRules = [
+  body('quantity').optional().isFloat({ min: 0 }).withMessage('Количество — неотрицательное число'),
+  body('unitPrice').optional().isFloat({ min: -100000000, max: 100000000 }).withMessage('Цена должна быть числом'),
+  body('date').optional({ nullable: true }).isDate().withMessage('Дата начисления в формате YYYY-MM-DD'),
+  body('reason').trim().notEmpty().withMessage('Укажите причину — без неё строка не сохраняется')
+    .isLength({ max: 300 }).withMessage('Причина — до 300 символов'),
+]
+
+const chargeCreateRules = [
+  body('kind').isIn(CHARGE_KINDS).withMessage('Недопустимый вид начисления'),
+  body('label').trim().notEmpty().withMessage('Укажите название строки').isLength({ max: 200 }),
+  ...chargeMoneyRules,
+]
+
+const chargeUpdateRules = [
+  body('kind').optional().isIn(CHARGE_KINDS).withMessage('Недопустимый вид начисления'),
+  body('label').optional().trim().notEmpty().withMessage('Название строки не может быть пустым').isLength({ max: 200 }),
+  ...chargeMoneyRules,
+]
+
+router.get('/:id/charges', param('id').isInt(), validate, ctrl.listCharges)
+router.post('/:id/charges/rebuild', param('id').isInt(), validate, ctrl.rebuildCharges)
+router.post('/:id/charges', param('id').isInt(), chargeCreateRules, validate, ctrl.addCharge)
+router.put('/:id/charges/:chargeId',
+  param('id').isInt(), param('chargeId').isInt(), chargeUpdateRules, validate, ctrl.updateCharge)
+router.delete('/:id/charges/:chargeId',
+  param('id').isInt(), param('chargeId').isInt(), validate, ctrl.removeCharge)
 
 module.exports = router

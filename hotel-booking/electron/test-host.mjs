@@ -16,6 +16,22 @@ const DB_URL = `postgresql://postgres:${PW}@127.0.0.1:5433/hotel_booking`
 let pg, srv
 function log(...a) { console.log('•', ...a) }
 
+// Prisma CLI напрямую по build/index.js — как в main.js (node_modules/.bin в сборку не попадает)
+function runPrisma(args) {
+  const serverDir = path.resolve(__dirname, '..', 'server')
+  const cli = path.join(serverDir, 'node_modules', 'prisma', 'build', 'index.js')
+  return new Promise((resolve, reject) => {
+    const p = spawn(process.execPath, [cli, ...args, '--schema=prisma/schema.prisma'], {
+      cwd: serverDir,
+      env: { ...process.env, DATABASE_URL: DB_URL, CHECKPOINT_DISABLE: '1', PRISMA_HIDE_UPDATE_MESSAGE: '1' },
+    })
+    p.stdout.on('data', (d) => process.stdout.write('  [prisma] ' + d))
+    p.stderr.on('data', (d) => process.stderr.write('  [prisma-err] ' + d))
+    p.on('error', reject)
+    p.on('exit', (c) => (c === 0 ? resolve() : reject(new Error(`prisma ${args.join(' ')} → код ${c}`))))
+  })
+}
+
 async function main() {
   pg = new EmbeddedPostgres({
     databaseDir: dataDir, user: 'postgres', password: PW,
@@ -29,10 +45,13 @@ async function main() {
   log('start postgres...');  await pg.start()
   log('create database...'); await pg.createDatabase('hotel_booking')
 
+  // Схема — только миграциями Prisma (init.sql больше нет). Ровно тот же вызов,
+  // что делает main.js при старте хоста.
+  log('prisma migrate deploy...')
+  await runPrisma(['migrate', 'deploy'])
+
   const client = pg.getPgClient('hotel_booking')
   await client.connect()
-  log('apply init.sql...')
-  await client.query(readFileSync(path.join(__dirname, 'db', 'init.sql'), 'utf8'))
   log('apply seed.sql...')
   await client.query(readFileSync(path.join(__dirname, 'db', 'seed.sql'), 'utf8'))
 
@@ -41,7 +60,11 @@ async function main() {
   // проверим, что constraint реально создан
   const con = (await client.query(
     `SELECT conname FROM pg_constraint WHERE conname = 'booking_no_overlap'`)).rowCount
+  // таблицы платежей и начислений — по ним сходятся деньги
+  const pay = (await client.query(`SELECT to_regclass('public."Payment"') IS NOT NULL AS ok`)).rows[0].ok
+  const migs = (await client.query('SELECT migration_name FROM _prisma_migrations ORDER BY started_at')).rows
   log(`данные: admins=${admins}, categories=${cats}, constraint booking_no_overlap=${con ? 'ЕСТЬ' : 'НЕТ!'}`)
+  log(`схема: Payment=${pay ? 'ЕСТЬ' : 'НЕТ!'}, миграций применено ${migs.length}: ${migs.map(m => m.migration_name).join(', ')}`)
   await client.end()
 
   log('запускаю сервер с встроенной базой...')

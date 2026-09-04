@@ -156,9 +156,27 @@ async function startHost(cfg) {
       hlog('no schema marker; database exists=', exists)
       needSchema = !exists   // база есть — считаем готовой, нет — создаём и накатываем
     }
-    if (needSchema) await createDatabaseWithSchema()
+    // Схема накатывается миграциями Prisma — и на пустой базе, и на базе клиента,
+    // где уже есть брони. Поэтому migrate deploy идёт на КАЖДОМ старте, а не
+    // только на свежей установке: иначе обновление программы не довезло бы
+    // до клиента новые таблицы (см. applyMigrations).
+    if (needSchema) await createEmptyDatabase()
+    try {
+      await applyMigrations(databaseUrl(cfg))
+      // Начальные данные (админ, категории, метки) — только для только что
+      // созданной базы. На рабочей базе seed не трогаем.
+      if (needSchema) await applySeed()
+    } catch (e) {
+      // Базу, созданную в ЭТОМ запуске, удаляем — иначе пустая база без таблиц
+      // при следующем старте считалась бы готовой.
+      if (needSchema) {
+        hlog('SCHEMA APPLY FAIL, dropping database:', String(e && (e.message || e)))
+        try { await pgInstance.dropDatabase(DB_NAME) } catch (de) { hlog('dropDatabase fail:', String(de && (de.message || de))) }
+      }
+      throw e
+    }
     if (needSchema || !fs.existsSync(markerPath)) {
-      fs.writeFileSync(markerPath, JSON.stringify({ appliedAt: new Date().toISOString(), initSql: 'v1' }, null, 2), 'utf8')
+      fs.writeFileSync(markerPath, JSON.stringify({ appliedAt: new Date().toISOString(), schema: 'prisma-migrate' }, null, 2), 'utf8')
       hlog('schema marker written:', markerPath)
     }
   } catch (e) {
@@ -183,25 +201,97 @@ async function databaseExists(name) {
   }
 }
 
-// Создать базу и накатить схему + начальные данные. Если схема не накатилась —
-// базу удаляем, чтобы следующий запуск повторил всё с начала: иначе пустая база
-// без таблиц при следующем старте считалась бы готовой.
-async function createDatabaseWithSchema() {
+// Пустая база. Таблицы в ней создадут миграции (applyMigrations).
+async function createEmptyDatabase() {
   hlog('createDatabase...'); await pgInstance.createDatabase(DB_NAME)
+}
+
+// Начальные данные свежей установки: главный администратор, категории, метки.
+// Схемы здесь больше нет — только данные (init.sql удалён, см. applyMigrations).
+async function applySeed() {
   const client = pgInstance.getPgClient(DB_NAME)
   try {
     await client.connect()
-    hlog('apply init.sql from', resourcePath('db', 'init.sql'))
-    await client.query(fs.readFileSync(resourcePath('db', 'init.sql'), 'utf8'))
-    hlog('apply seed.sql'); await client.query(fs.readFileSync(resourcePath('db', 'seed.sql'), 'utf8'))
-    await client.end()
-    hlog('schema+seed applied')
-  } catch (e) {
-    hlog('SCHEMA APPLY FAIL, dropping database:', String(e && (e.message || e)))
+    hlog('apply seed.sql from', resourcePath('db', 'seed.sql'))
+    await client.query(fs.readFileSync(resourcePath('db', 'seed.sql'), 'utf8'))
+    hlog('seed applied')
+  } finally {
     try { await client.end() } catch {}
-    try { await pgInstance.dropDatabase(DB_NAME) } catch (de) { hlog('dropDatabase fail:', String(de && (de.message || de))) }
-    throw e
   }
+}
+
+// ─── Миграции Prisma ─────────────────────────────────────────────────────────
+// Единственный источник схемы — server/prisma/migrations. Раньше свежая установка
+// разворачивалась из написанного руками electron/db/init.sql, а schema.prisma жила
+// отдельно: новая таблица требовала ДВУХ правок, а обновить базу у клиента,
+// где уже есть брони, было нечем. Теперь оба сценария — одни и те же файлы.
+//
+// Prisma CLI зовём напрямую по build/index.js: node_modules/.bin в сборку не
+// попадает, а сам Electron умеет работать как node (ELECTRON_RUN_AS_NODE).
+const BASELINE_MIGRATION = '0_init'
+
+function databaseUrl(cfg) {
+  return `postgresql://postgres:${cfg.dbPassword}@127.0.0.1:${DB_PORT}/${DB_NAME}`
+}
+
+function runPrisma(args, dbUrl) {
+  const cli = resourcePath('server', 'node_modules', 'prisma', 'build', 'index.js')
+  if (!fs.existsSync(cli)) {
+    throw new Error(`Не найден Prisma CLI: ${cli}. Схему базы обновить нечем — переустановите программу.`)
+  }
+  return new Promise((resolve, reject) => {
+    const proc = spawn(process.execPath, [cli, ...args, '--schema=prisma/schema.prisma'], {
+      cwd: resourcePath('server'),
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
+        DATABASE_URL: dbUrl,
+        // Без этого CLI при каждом старте лезет в сеть за проверкой версии
+        CHECKPOINT_DISABLE: '1',
+        PRISMA_HIDE_UPDATE_MESSAGE: '1',
+      },
+    })
+    proc.stdout?.on('data', (d) => hlog('[prisma]', String(d).trim()))
+    proc.stderr?.on('data', (d) => hlog('[prisma-err]', String(d).trim()))
+    proc.on('error', (e) => reject(new Error(`Не удалось запустить миграции: ${e.message}`)))
+    proc.on('exit', (code) => {
+      if (code === 0) return resolve()
+      reject(new Error(`Обновление схемы базы не удалось (prisma ${args.join(' ')}, код ${code}).\nПодробности: ${DEBUG_LOG}`))
+    })
+  })
+}
+
+// Есть ли в базе таблица учёта миграций и вообще таблицы приложения.
+async function inspectSchemaState() {
+  const client = pgInstance.getPgClient(DB_NAME)
+  await client.connect()
+  try {
+    const r = await client.query(
+      `SELECT to_regclass('public._prisma_migrations') IS NOT NULL AS managed,
+              to_regclass('public."Booking"')          IS NOT NULL AS "hasTables"`
+    )
+    return r.rows[0] || { managed: false, hasTables: false }
+  } finally {
+    try { await client.end() } catch {}
+  }
+}
+
+async function applyMigrations(dbUrl) {
+  const { managed, hasTables } = await inspectSchemaState()
+  hlog('schema state: managed=', managed, 'hasTables=', hasTables)
+
+  // База со старой установки: таблицы созданы прежним init.sql, но Prisma о них
+  // не знает. Помечаем базовую миграцию применённой — SQL при этом НЕ выполняется,
+  // данные не трогаются. Без этого шага migrate deploy отвечает P3005
+  // («schema is not empty») и обновление у клиента не проходит.
+  if (!managed && hasTables) {
+    hlog('baseline: mark', BASELINE_MIGRATION, 'as applied')
+    await runPrisma(['migrate', 'resolve', '--applied', BASELINE_MIGRATION], dbUrl)
+  }
+
+  hlog('prisma migrate deploy...')
+  await runPrisma(['migrate', 'deploy'], dbUrl)
+  hlog('migrations applied')
 }
 
 // Запуск Node-сервера как дочернего процесса + надзор: упавший сервер один раз
@@ -210,7 +300,7 @@ async function createDatabaseWithSchema() {
 // к логу и окно настроек. При завершении приложения не перезапускаем.
 let serverRestarted = false
 function spawnServer(cfg) {
-  const dbUrl = `postgresql://postgres:${cfg.dbPassword}@127.0.0.1:${DB_PORT}/${DB_NAME}`
+  const dbUrl = databaseUrl(cfg)
   const serverEntry = resourcePath('server', 'server.js')
 
   // Логи — в userData (resources/ в Program Files доступен только на чтение),

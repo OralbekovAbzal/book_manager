@@ -25,6 +25,10 @@ export interface BookingPayload {
   paidAmount?: number
   flags?: string[]
   shiftId?: number | null
+  /** Осознанная продажа номера из квоты партнёра (после 409 ALLOTMENT_CONFLICT) */
+  allowAllotmentOverride?: boolean
+  /** Явное «Пересчитать по тарифу»: пересобрать автоматические строки начислений */
+  recalcCharges?: boolean
 }
 
 /** Полная бронь с сервера (гости, суммы, room.category) — объект из сетки может быть частичным. */

@@ -19,6 +19,7 @@ import { SnapshotsModal } from './components/Snapshots/SnapshotsModal'
 import { ReferenceWindow } from './components/Reference/ReferenceWindow'
 import { RatesScreen } from './components/Rates/RatesScreen'
 import { ReportsScreen } from './components/Reports/ReportsScreen'
+import { PaymentsScreen } from './components/Payments/PaymentsScreen'
 import { NavDrawer, type NavSection } from './components/NavDrawer/NavDrawer'
 import { fetchBookingFlags } from './api/bookingFlags'
 import { fetchSetupStatus } from './api/setup'
@@ -238,7 +239,8 @@ export const App: React.FC = () => {
       {section === 'reference' && <ReferenceWindow open onClose={() => setSection('grid')} />}
       {section === 'settings'  && <SettingsPanel  open onClose={() => setSection('grid')} />}
 
-      {section === 'rates'   && <RatesScreen onBack={() => setSection('grid')} />}
+      {section === 'rates'    && <RatesScreen onBack={() => setSection('grid')} />}
+      {section === 'payments' && <PaymentsScreen onBack={() => setSection('grid')} />}
       {section === 'reports' && <ReportsScreen onBack={() => setSection('grid')} />}
 
       {/* Действия остаются модалками: это не места, а операции над бронью. */}

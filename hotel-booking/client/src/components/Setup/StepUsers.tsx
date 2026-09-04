@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import type { AdminForm, FieldErrors, StaffDraft, StaffInput, StaffRole } from './setupModel'
 import { emptyStaff, newStaffKey, validateStaff } from './setupModel'
-import { ROLE_LABELS } from './accountRules'
+import { PASSWORD_HINT, ROLE_LABELS } from './accountRules'
 import { Field, StepHeading, hintStyle, linkBtn, wizardInput, wizardSecondary } from './setupUi'
 
 interface Props {
@@ -48,7 +48,7 @@ export const StepUsers: React.FC<Props> = ({ staff, admin, onAdd, onRemove }) =>
           <Field label="Логин" error={errors.username}>
             <input value={draft.username} onChange={e => patch({ username: e.target.value })} placeholder="латиница, цифры, . _ -" style={wizardInput} maxLength={30} autoComplete="off" spellCheck={false} />
           </Field>
-          <Field label="Пароль" error={errors.password} hint="Не менее 8 символов">
+          <Field label="Пароль" error={errors.password} hint={PASSWORD_HINT}>
             <input type={showPasswords ? 'text' : 'password'} value={draft.password} onChange={e => patch({ password: e.target.value })} style={wizardInput} autoComplete="new-password" />
           </Field>
           <Field label="Роль">

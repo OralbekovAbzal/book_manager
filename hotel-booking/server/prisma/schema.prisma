@@ -84,6 +84,8 @@ model Booking {
   createdBy          Admin         @relation(fields: [adminId], references: [id])
   /// Начисления. totalAmount — кэш их суммы, источник истины здесь.
   charges            BookingCharge[]
+  /// Принятые деньги. paidAmount — кэш их суммы, источник истины здесь.
+  payments           Payment[]
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
 
@@ -115,6 +117,8 @@ model Admin {
   shiftsCreated Shift[]   @relation("ShiftCreator")
   snapshots     Snapshot[]
   charges       BookingCharge[]
+  payments      Payment[]          @relation("PaymentTaker")
+  paymentsVoid  Payment[]          @relation("PaymentVoider")
   auditLogs     AuditLog[]
   reports       ReportDefinition[]
   createdAt     DateTime  @default(now())
@@ -185,6 +189,8 @@ model Shift {
   createdById Int
   createdBy   Admin     @relation("ShiftCreator", fields: [createdById], references: [id])
   bookings    Booking[]
+  /// Касса смены: всё, что принято и возвращено за этот рабочий день.
+  payments    Payment[]
   createdAt   DateTime  @default(now())
 
   @@unique([date])
@@ -395,4 +401,69 @@ model BookingCharge {
 
   @@index([bookingId])
   @@index([date])
+}
+
+/// Платёж по брони — журнал ПРИНЯТЫХ денег.
+///
+/// Вторая половина задачи «суммы в программе сходятся с деньгами на руках»:
+/// начисления (BookingCharge) отвечают на вопрос «сколько гость должен»,
+/// платежи — «сколько с него принято». Долг = сумма начислений − сумма платежей.
+///
+/// До этой модели у брони были три числа (totalAmount / prepaidAmount / paidAmount)
+/// без истории: по ним нельзя закрыть смену и нельзя сказать, кто принял деньги.
+/// Теперь `Booking.paidAmount` — КЭШ суммы платежей, а не самостоятельное число.
+model Payment {
+  id           Int       @id @default(autoincrement())
+  bookingId    Int
+  booking      Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  /// 'payment' — приём денег, 'refund' — возврат гостю.
+  /// `amount` ВСЕГДА положительная, знак задаёт kind: в отчёте по кассе нужно
+  /// видеть оборот и возвраты по отдельности, а не одну нетто-цифру.
+  kind         String    @default("payment")
+  amount       Float
+
+  /// Способ: 'cash' | 'card' | 'transfer'. По нему сводится касса в конце смены:
+  /// наличные пересчитывают в ящике, карта и перевод сверяются с выпиской.
+  method       String    @default("cash")
+
+  /// Кто принял. adminName продублирован строкой, чтобы запись читалась и после
+  /// деактивации сотрудника (adminId тогда становится NULL) — как в AuditLog.
+  adminId      Int?
+  admin        Admin?    @relation("PaymentTaker", fields: [adminId], references: [id], onDelete: SetNull)
+  adminName    String
+
+  /// Смена, в которую попал платёж. Касса закрывается по СМЕНЕ, а не по
+  /// календарным суткам: сутки в отеле не равны календарным (см. businessDate.js).
+  shiftId      Int?
+  shift        Shift?    @relation(fields: [shiftId], references: [id], onDelete: SetNull)
+  /// Копия shift.date на момент приёма: отчёт за период не требует join
+  /// и переживает удаление смены.
+  businessDate DateTime? @db.Date
+
+  /// Фактический момент приёма денег (реальные часы, не рабочая дата).
+  paidAt       DateTime  @default(now())
+  comment      String?
+
+  /// Возврат ссылается на исходный платёж — видно, по какой оплате вернули.
+  refundOfId   Int?
+  refundOf     Payment?  @relation("PaymentRefund", fields: [refundOfId], references: [id], onDelete: SetNull)
+  refunds      Payment[] @relation("PaymentRefund")
+
+  /// Отмена ОШИБОЧНОЙ записи (не тот номер, не та сумма). Платёж не удаляется
+  /// никогда: дыра в нумерации кассы хуже лишней строки. Отменённый в суммы
+  /// не входит, но остаётся виден вместе с причиной и автором отмены.
+  voidedAt     DateTime?
+  voidedById   Int?
+  voidedBy     Admin?    @relation("PaymentVoider", fields: [voidedById], references: [id], onDelete: SetNull)
+  voidReason   String?
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([bookingId])
+  @@index([shiftId])
+  @@index([businessDate])
+  @@index([paidAt])
+  @@index([refundOfId])
 }

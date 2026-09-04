@@ -1,10 +1,24 @@
 import { parseISO, addDays, format, differenceInCalendarDays } from 'date-fns'
-import type { PricingConfig } from '../store/useSettingsStore'
+import type { PricingBase, RatePrice, Service } from '../types'
+
+/**
+ * Расчёт стоимости брони.
+ *
+ * Источник цены — календарь `RatePrice` (одна цена на КАЖДУЮ дату), а не «сезоны»
+ * из localStorage. Никакого запасного периода больше нет: если на ночь цены нет,
+ * это дырка в тарифе, и её видно, а не ноль в итоге.
+ *
+ * Это ПРЕДПРОСМОТР. Источник истины по деньгам — строки `BookingCharge` на сервере
+ * (`server/src/utils/charges.js`), которые генерируются по тем же правилам.
+ * Правя правила здесь, правь и там — иначе предпросмотр разойдётся с тем,
+ * что запишется в бронь при сохранении.
+ */
 
 export interface CalcInput {
   checkIn: string   // YYYY-MM-DD
   checkOut: string  // YYYY-MM-DD
-  categoryName: string  // room category name (will be matched case-insensitively)
+  categoryId: number
+  categoryName: string
   adultsWithMeals: number
   childrenWithMeals: number
   adultsNoMeals: number
@@ -17,126 +31,229 @@ export interface CalcInput {
   prepaymentPercent: number
 }
 
-export interface CalcResult {
-  nights: number
-  total: number            // before discount
-  totalAfterDiscount: number
-  prepaidAmount: number
-  remaining: number
-  breakdown: BreakdownLine[]
-  noRates: boolean                  // у категории нет тарифа — итог не рассчитан (0 — не цена)
-  missingNights: number             // ночи, не попавшие ни в один период (сезон)
-  fallbackPeriodName: string | null // какой период применён к таким ночам как запасной
-}
-
-/**
- * Ключ входов калькулятора: если он не изменился с момента загрузки брони,
- * итог при сохранении не пересчитываем (иначе правка заметки на другом ноутбуке
- * с другим тарифом в localStorage молча переоценивала бронь).
- */
-export function buildCalcKey(input: CalcInput): string {
-  return [
-    input.checkIn, input.checkOut, input.categoryName.toLowerCase(),
-    input.adultsWithMeals, input.childrenWithMeals, input.adultsNoMeals, input.childrenNoMeals,
-    input.extraBedsWithMeals, input.extraBedsNoMeals, input.disabledAdults, input.disabledChildren,
-    input.discountPercent, input.prepaymentPercent,
-  ].join('|')
+/** Цены и услуги, по которым считаем. Приходят с сервера, а не из localStorage. */
+export interface RateContext {
+  pricingBase: PricingBase
+  /** 'YYYY-MM-DD' → цена этой даты для выбранной категории */
+  ratesByDate: Record<string, RatePrice>
+  /** Услуги, начисляемые автоматически (includedByDefault) */
+  services: Service[]
 }
 
 export interface BreakdownLine {
   label: string
   nights: number
   amount: number
+  /** 'stay' — проживание, 'meal'/'extra' — услуги */
+  kind: 'stay' | 'meal' | 'extra'
+  /** Для услуг: сколько единиц и по какой цене (в названии их больше нет) */
+  quantity?: number
+  unitPrice?: number
 }
 
-function getPeriodId(date: Date, periods: PricingConfig['periods']): string | null {
-  const mmdd = format(date, 'MM-dd')
-  for (const p of periods) {
-    if (mmdd >= p.start && mmdd <= p.end) return p.id
+/** Одна ночь проживания — то, из чего потом складываются строки начислений. */
+export interface NightLine {
+  date: string
+  amount: number
+  /** На эту ночь цены нет (нет строки календаря или пусты нужные поля) */
+  missing: boolean
+}
+
+export interface CalcResult {
+  nights: number
+  /** Проживание + услуги, до скидки */
+  total: number
+  totalAfterDiscount: number
+  prepaidAmount: number
+  remaining: number
+  breakdown: BreakdownLine[]
+  nightLines: NightLine[]
+  /** Ни на одну ночь нет цены — итог не рассчитан (0 — это не цена, а отсутствие тарифа) */
+  noRates: boolean
+  /** Ночи, для которых цена не задана целиком или частично */
+  missingNights: number
+  missingDates: string[]
+}
+
+export const EMPTY_RATE_CONTEXT: RateContext = {
+  pricingBase: 'person',
+  ratesByDate: {},
+  services: [],
+}
+
+/**
+ * Ключ входов калькулятора: если он не изменился с момента загрузки брони,
+ * итог при сохранении не пересчитываем. Иначе правка заметки молча переоценила бы
+ * бронь по текущему тарифу (раньше — по чужому localStorage, теперь — по календарю,
+ * который мог измениться уже после заезда гостя).
+ */
+export function buildCalcKey(input: CalcInput): string {
+  return [
+    input.checkIn, input.checkOut, input.categoryId,
+    input.adultsWithMeals, input.childrenWithMeals, input.adultsNoMeals, input.childrenNoMeals,
+    input.extraBedsWithMeals, input.extraBedsNoMeals, input.disabledAdults, input.disabledChildren,
+    input.discountPercent, input.prepaymentPercent,
+  ].join('|')
+}
+
+/** Список дат-ночей брони: [checkIn, checkOut). */
+export function nightsOf(checkIn: string, checkOut: string): string[] {
+  if (!checkIn || !checkOut || checkOut <= checkIn) return []
+  const n = differenceInCalendarDays(parseISO(checkOut), parseISO(checkIn))
+  const out: string[] = []
+  for (let i = 0; i < n; i++) out.push(format(addDays(parseISO(checkIn), i), 'yyyy-MM-dd'))
+  return out
+}
+
+/** Цена одной ночи. missing — нужное поле цены не заполнено (в итог войдёт неполная сумма). */
+function priceNight(
+  rate: RatePrice | undefined,
+  base: PricingBase,
+  counts: { adults: number; children: number; extraBeds: number },
+): { amount: number; missing: boolean } {
+  if (!rate) return { amount: 0, missing: true }
+
+  let amount = 0
+  let missing = false
+
+  const take = (value: number | null | undefined, qty: number) => {
+    if (qty <= 0) return
+    if (value == null) { missing = true; return }
+    amount += value * qty
   }
-  return null
+
+  if (base === 'room') {
+    // Цена за номер целиком: гости на неё не влияют, доп. места — влияют.
+    if (rate.roomPrice == null) missing = true
+    else amount += rate.roomPrice
+    take(rate.extraBedPrice, counts.extraBeds)
+  } else {
+    take(rate.adultPrice, counts.adults)
+    take(rate.childPrice, counts.children)
+    take(rate.extraBedPrice, counts.extraBeds)
+  }
+
+  return { amount, missing }
 }
 
-export function calculate(input: CalcInput, pricing: PricingConfig): CalcResult {
-  const { checkIn, checkOut } = input
-  if (!checkIn || !checkOut || checkOut <= checkIn) {
-    return {
-      nights: 0, total: 0, totalAfterDiscount: 0, prepaidAmount: 0, remaining: 0, breakdown: [],
-      noRates: false, missingNights: 0, fallbackPeriodName: null,
+/** Начисления по услугам — те же правила, что и в server/src/utils/charges.js. */
+export function serviceLines(
+  input: CalcInput,
+  services: Service[],
+  nights: number,
+): BreakdownLine[] {
+  if (nights <= 0) return []
+
+  // Питание считаем по тем, кто «с питанием»; прочие услуги — по всем гостям.
+  const mealAdults = input.adultsWithMeals + input.extraBedsWithMeals
+  const mealChildren = input.childrenWithMeals
+  const allAdults = input.adultsWithMeals + input.adultsNoMeals
+    + input.extraBedsWithMeals + input.extraBedsNoMeals
+  const allChildren = input.childrenWithMeals + input.childrenNoMeals
+
+  const lines: BreakdownLine[] = []
+
+  for (const s of services) {
+    if (!s.isActive) continue
+    const kind: 'meal' | 'extra' = s.kind === 'meal' ? 'meal' : 'extra'
+    const adults = kind === 'meal' ? mealAdults : allAdults
+    const children = kind === 'meal' ? mealChildren : allChildren
+    // childPrice = null означает «считать по взрослой цене» — детей вливаем во взрослую строку
+    const splitChildren = s.childPrice != null && children > 0
+    const adultHeads = splitChildren ? adults : adults + children
+
+    const push = (label: string, qty: number, unit: number) => {
+      if (qty <= 0 || unit <= 0) return
+      lines.push({ label, nights, amount: Math.round(qty * unit), kind, quantity: qty, unitPrice: unit })
+    }
+
+    // Названия — как у генератора начислений: короткие и стабильные
+    const childLabel = `${s.name} (дети)`
+    switch (s.unit) {
+      case 'per_person_night':
+        push(s.name, adultHeads * nights, s.price)
+        if (splitChildren) push(childLabel, children * nights, s.childPrice!)
+        break
+      case 'per_night':
+        push(s.name, nights, s.price)
+        break
+      case 'per_person':
+        push(s.name, adultHeads, s.price)
+        if (splitChildren) push(childLabel, children, s.childPrice!)
+        break
+      case 'per_booking':
+      default:
+        push(s.name, 1, s.price)
+        break
     }
   }
 
-  const nights = differenceInCalendarDays(parseISO(checkOut), parseISO(checkIn))
+  return lines
+}
 
-  // Find category rates (case-insensitive match)
-  const catKey = Object.keys(pricing.categoryRates).find(
-    k => k.toLowerCase() === input.categoryName.toLowerCase()
-  )
-  const rates = catKey ? pricing.categoryRates[catKey] : null
+export function calculate(input: CalcInput, ctx: RateContext): CalcResult {
+  const dates = nightsOf(input.checkIn, input.checkOut)
+  const nights = dates.length
 
-  // Group nights by period
-  const nightsByPeriod: Record<string, number> = {}
-  for (let i = 0; i < nights; i++) {
-    const date = addDays(parseISO(checkIn), i)
-    const pid = getPeriodId(date, pricing.periods)
-    const key = pid ?? 'default'
-    nightsByPeriod[key] = (nightsByPeriod[key] || 0) + 1
+  if (nights === 0) {
+    return {
+      nights: 0, total: 0, totalAfterDiscount: 0, prepaidAmount: 0, remaining: 0,
+      breakdown: [], nightLines: [], noRates: false, missingNights: 0, missingDates: [],
+    }
   }
 
-  // Default rate (if no period match or no config)
-  const defaultAdultRate = rates ? (Object.values(rates.adultRates)[0] ?? 0) : 0
-  const defaultChildRate = rates ? (Object.values(rates.childRates)[0] ?? 0) : 0
-  const defaultExtraRate = rates ? (Object.values(rates.extraBedRates)[0] ?? 0) : 0
+  const counts = {
+    adults: input.adultsWithMeals + input.adultsNoMeals,
+    children: input.childrenWithMeals + input.childrenNoMeals,
+    extraBeds: input.extraBedsWithMeals + input.extraBedsNoMeals,
+  }
+  const hasGuests = counts.adults + counts.children + counts.extraBeds > 0
+
+  const nightLines: NightLine[] = []
+  const missingDates: string[] = []
+  let stayTotal = 0
+  let pricedNights = 0
+
+  for (const date of dates) {
+    const { amount, missing } = priceNight(ctx.ratesByDate[date], ctx.pricingBase, counts)
+    nightLines.push({ date, amount: Math.round(amount), missing })
+    stayTotal += Math.round(amount)
+    if (missing) missingDates.push(date)
+    else pricedNights++
+  }
 
   const breakdown: BreakdownLine[] = []
-  let total = 0
-
-  for (const [pid, n] of Object.entries(nightsByPeriod)) {
-    const adultRate = rates?.adultRates[pid] ?? defaultAdultRate
-    const childRate = rates?.childRates[pid] ?? defaultChildRate
-    const extraRate = rates?.extraBedRates[pid] ?? defaultExtraRate
-    const noMealDisc = pricing.noMealDiscount
-
-    const lineAdultMeal = adultRate * input.adultsWithMeals * n
-    const lineChildMeal = childRate * input.childrenWithMeals * n
-    const lineAdultNoMeal = (adultRate - noMealDisc) * input.adultsNoMeals * n
-    const lineChildNoMeal = (childRate - noMealDisc) * input.childrenNoMeals * n
-    const lineExtraMeal = extraRate * input.extraBedsWithMeals * n
-    const lineExtraNoMeal = (extraRate - noMealDisc) * input.extraBedsNoMeals * n
-
-    const disabledDisc = (rates?.disabledDiscount ?? pricing.disabledDiscountDefault)
-    const lineDisabled = -disabledDisc * (input.disabledAdults + input.disabledChildren) * n
-
-    const lineTotal = lineAdultMeal + lineChildMeal + lineAdultNoMeal + lineChildNoMeal + lineExtraMeal + lineExtraNoMeal + lineDisabled
-
-    if (lineTotal !== 0) {
-      const period = pricing.periods.find(p => p.id === pid)
-      breakdown.push({
-        label: period ? period.name : `${n} ночей`,
-        nights: n,
-        amount: lineTotal,
-      })
-    }
-    total += lineTotal
+  if (stayTotal !== 0) {
+    breakdown.push({
+      label: ctx.pricingBase === 'room' ? 'Проживание (за номер)' : 'Проживание',
+      nights: pricedNights || nights,
+      amount: stayTotal,
+      kind: 'stay',
+    })
   }
+  const svc = serviceLines(input, ctx.services, nights)
+  breakdown.push(...svc)
 
-  const totalAfterDiscount = total * (1 - input.discountPercent / 100)
-  const prepaidAmount = totalAfterDiscount * (input.prepaymentPercent / 100)
+  const total = stayTotal + svc.reduce((s, l) => s + l.amount, 0)
+  // Скидка округляется отдельной строкой — так же, как её пишет генератор начислений
+  // (server/src/utils/charges.js). Иначе предпросмотр расходился бы с итогом на тенге.
+  const discount = input.discountPercent > 0 ? Math.round(total * input.discountPercent / 100) : 0
+  const totalAfterDiscount = total - discount
+  const prepaidAmount = Math.round(totalAfterDiscount * (input.prepaymentPercent / 100))
   const remaining = totalAfterDiscount - prepaidAmount
 
-  // Диагностика для UI (математика выше не меняется): ночи вне сезонов считаются
-  // по первому периоду тарифа категории — сообщаем, по какому именно.
-  const missingNights = nightsByPeriod['default'] ?? 0
-  let fallbackPeriodName: string | null = null
-  if (missingNights > 0 && rates) {
-    const fallbackId = Object.keys(rates.adultRates)[0]
-    fallbackPeriodName = fallbackId
-      ? (pricing.periods.find(p => p.id === fallbackId)?.name ?? fallbackId)
-      : null
-  }
-
   return {
-    nights, total, totalAfterDiscount, prepaidAmount, remaining, breakdown,
-    noRates: !rates, missingNights, fallbackPeriodName,
+    nights,
+    total,
+    totalAfterDiscount,
+    prepaidAmount,
+    remaining,
+    breakdown,
+    nightLines,
+    // Тариф отсутствует, если гости есть, а цены нет ни на одну ночь.
+    // Ноль при нулевых гостях — это «нечего считать», а не «нет тарифа».
+    noRates: hasGuests && pricedNights === 0,
+    missingNights: missingDates.length,
+    missingDates,
   }
 }

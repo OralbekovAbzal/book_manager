@@ -1,5 +1,6 @@
 import React from 'react'
 import type { AdminForm, FieldErrors } from './setupModel'
+import { PASSWORD_HINT } from './accountRules'
 import { Field, StepHeading, wizardInput } from './setupUi'
 
 interface Props {
@@ -39,7 +40,7 @@ export const StepAdmin: React.FC<Props> = ({ value, errors, onChange }) => (
         />
       </Field>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-        <Field label="Пароль" error={errors.password} hint="Не менее 8 символов">
+        <Field label="Пароль" error={errors.password} hint={PASSWORD_HINT}>
           <input
             type="password"
             value={value.password}

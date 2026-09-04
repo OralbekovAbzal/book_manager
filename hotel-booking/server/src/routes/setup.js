@@ -2,6 +2,7 @@ const router = require('express').Router()
 const { body } = require('express-validator')
 const ctrl = require('../controllers/setupController')
 const { validate } = require('../middleware/validate')
+const { passwordRule } = require('../utils/passwordPolicy')
 
 // Публичные эндпоинты мастера первичной настройки — БЕЗ authenticate (см. контроллер).
 // Подключается в app.js: app.use('/api/setup', apiLimiter, setupRoutes)
@@ -22,11 +23,8 @@ function nameRule(field, label) {
     .trim()
     .isLength({ min: 1, max: 100 }).withMessage(`${label}: имя от 1 до 100 символов`)
 }
-function passwordRule(field) {
-  return body(field)
-    .isString().withMessage('Пароль обязателен').bail()
-    .isLength({ min: 8 }).withMessage('Пароль: минимум 8 символов')
-}
+// Парольная политика — общая для всех мест, где задаётся пароль (utils/passwordPolicy.js)
+const passwordFor = (field) => passwordRule(body, field)
 
 const completeRules = [
   body('hotel').isObject().withMessage('Укажите данные отеля'),
@@ -43,12 +41,12 @@ const completeRules = [
   body('mainAdmin').isObject().withMessage('Укажите данные главного администратора'),
   usernameRule('mainAdmin.username'),
   nameRule('mainAdmin.name', 'Главный администратор'),
-  passwordRule('mainAdmin.password'),
+  passwordFor('mainAdmin.password'),
 
   body('users').optional().isArray({ max: 50 }).withMessage('Сотрудники: список не более 50 записей'),
   usernameRule('users.*.username'),
   nameRule('users.*.name', 'Сотрудник'),
-  passwordRule('users.*.password'),
+  passwordFor('users.*.password'),
   body('users.*.role').isIn(STAFF_ROLES).withMessage("Роль сотрудника: 'ADMIN' или 'STAFF'"),
 ]
 

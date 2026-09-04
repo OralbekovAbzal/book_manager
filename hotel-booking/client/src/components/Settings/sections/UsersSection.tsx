@@ -3,7 +3,7 @@ import { createUser, fetchUsers, resetUserPassword, updateUser } from '../../../
 import { useAuthStore } from '../../../store/useAuthStore'
 import type { AdminRole, User } from '../../../types'
 import {
-  ROLE_LABELS, formatApiError, sameUsername, validateName, validatePassword, validateUsername,
+  PASSWORD_HINT, ROLE_LABELS, formatApiError, sameUsername, validateName, validatePassword, validateUsername,
 } from '../../Setup/accountRules'
 import {
   SectionHeader, AddButton, EmptyBox, listRow, itemTitle, itemSub,
@@ -138,7 +138,8 @@ const UsersManager: React.FC<{ currentId: number }> = ({ currentId }) => {
             </div>
             <div>
               <label style={labelStyle}>Пароль</label>
-              <input type="password" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} placeholder="не менее 8 символов" autoComplete="new-password" style={inputStyle} />
+              <input type="password" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))} autoComplete="new-password" style={inputStyle} />
+              <div style={hintStyle}>{PASSWORD_HINT}</div>
             </div>
             <div>
               <label style={labelStyle}>Роль</label>
@@ -170,43 +171,49 @@ const UsersManager: React.FC<{ currentId: number }> = ({ currentId }) => {
             const busy = busyId === u.id
             return (
               <div key={u.id}>
-                <div style={{ ...listRow, opacity: u.isActive ? 1 : 0.6 }}>
-                  <div style={avatar}>{initials(u.name)}</div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={itemTitle}>
-                      {u.name}
-                      {isMe && <span style={tag}>это вы</span>}
-                      {!u.isActive && <span style={tag}>неактивен</span>}
-                    </div>
-                    <div style={itemSub}>
-                      <span className="mono">{u.username}</span> · с {formatDate(u.createdAt)}
+                <div style={{ ...listRow, ...rowWrap, opacity: u.isActive ? 1 : 0.6 }}>
+                  {/* Имя и логин ужимаются до многоточия, бейджи не сжимаются.
+                      Когда на строку уже не хватает — блок управления уезжает вниз (flexWrap). */}
+                  <div style={identityCell}>
+                    <div style={avatar}>{initials(u.name)}</div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ ...itemTitle, display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                        <span style={ellipsis} title={u.name}>{u.name}</span>
+                        {isMe && <span style={tag}>это вы</span>}
+                        {!u.isActive && <span style={tag}>неактивен</span>}
+                      </div>
+                      <div style={{ ...itemSub, ...ellipsis }}>
+                        <span className="mono">{u.username}</span> · с {formatDate(u.createdAt)}
+                      </div>
                     </div>
                   </div>
 
-                  <select
-                    value={u.role}
-                    disabled={isMe || busy}
-                    onChange={e => patch(u, { role: e.target.value as AdminRole })}
-                    title={isMe ? 'Свою роль изменить нельзя' : 'Роль'}
-                    style={{ ...inputStyle, width: 200, height: 34, flexShrink: 0 }}
-                  >
-                    {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
-                  </select>
+                  <div style={controlsCell}>
+                    <select
+                      value={u.role}
+                      disabled={isMe || busy}
+                      onChange={e => patch(u, { role: e.target.value as AdminRole })}
+                      title={isMe ? 'Свою роль изменить нельзя' : 'Роль'}
+                      style={{ ...inputStyle, width: 190, height: 34, flexShrink: 0 }}
+                    >
+                      {ROLE_OPTIONS.map(r => <option key={r} value={r}>{ROLE_LABELS[r]}</option>)}
+                    </select>
 
-                  <Switch
-                    checked={u.isActive}
-                    disabled={isMe || busy}
-                    onChange={() => patch(u, { isActive: !u.isActive })}
-                    title={isMe ? 'Нельзя деактивировать себя' : u.isActive ? 'Активен — нажмите, чтобы закрыть доступ' : 'Неактивен — нажмите, чтобы открыть доступ'}
-                  />
+                    <Switch
+                      checked={u.isActive}
+                      disabled={isMe || busy}
+                      onChange={() => patch(u, { isActive: !u.isActive })}
+                      title={isMe ? 'Нельзя деактивировать себя' : u.isActive ? 'Активен — нажмите, чтобы закрыть доступ' : 'Неактивен — нажмите, чтобы открыть доступ'}
+                    />
 
-                  <button
-                    onClick={() => (resetId === u.id ? setResetId(null) : startReset(u.id))}
-                    disabled={busy}
-                    style={{ ...secondaryBtn, height: 32, padding: '0 12px', fontSize: '0.8rem', whiteSpace: 'nowrap' }}
-                  >
-                    Сбросить пароль
-                  </button>
+                    <button
+                      onClick={() => (resetId === u.id ? setResetId(null) : startReset(u.id))}
+                      disabled={busy}
+                      style={{ ...secondaryBtn, height: 32, padding: '0 12px', fontSize: '0.8rem', whiteSpace: 'nowrap', flexShrink: 0 }}
+                    >
+                      Сбросить пароль
+                    </button>
+                  </div>
                 </div>
 
                 {rowError?.id === u.id && <div style={{ ...errorStyle, padding: '4px 14px 0' }}>{rowError.text}</div>}
@@ -222,11 +229,11 @@ const UsersManager: React.FC<{ currentId: number }> = ({ currentId }) => {
                         value={resetPassword}
                         onChange={e => setResetPassword(e.target.value)}
                         onKeyDown={e => { if (e.key === 'Enter') doReset(u) }}
-                        placeholder="не менее 8 символов"
                         autoComplete="new-password"
                         style={inputStyle}
                         autoFocus
                       />
+                      <div style={hintStyle}>{PASSWORD_HINT}</div>
                     </div>
                     {resetError && <div style={errorStyle}>{resetError}</div>}
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -280,6 +287,26 @@ const avatar: React.CSSProperties = {
   fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-muted)',
 }
 const tag: React.CSSProperties = {
-  marginLeft: 8, padding: '1px 7px', borderRadius: 5, fontSize: '0.72rem', fontWeight: 500,
-  color: 'var(--text-faint)', border: '1px solid var(--border-subtle)', verticalAlign: 'middle',
+  padding: '1px 7px', borderRadius: 5, fontSize: '0.72rem', fontWeight: 500, flexShrink: 0,
+  color: 'var(--text-faint)', border: '1px solid var(--border-subtle)', whiteSpace: 'nowrap',
+}
+
+const hintStyle: React.CSSProperties = {
+  marginTop: 5, fontSize: '0.75rem', color: 'var(--text-faint)', lineHeight: 1.35,
+}
+
+// Строка пользователя должна держать ~800px ширины окна: сначала ужимается имя,
+// затем блок управления (роль/доступ/пароль) целиком переносится на вторую строку.
+const rowWrap: React.CSSProperties = { flexWrap: 'wrap', rowGap: 10 }
+
+const identityCell: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 200px', minWidth: 0,
+}
+
+const controlsCell: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0, marginLeft: 'auto',
+}
+
+const ellipsis: React.CSSProperties = {
+  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0,
 }

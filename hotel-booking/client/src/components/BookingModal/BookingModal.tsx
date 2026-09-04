@@ -14,10 +14,14 @@ import {
   checkAvailability,
   fetchBooking,
 } from '../../api/bookings'
-import type { Room, GridBooking, Booking } from '../../types'
+import type { Room, GridBooking, Booking, RatePrice, Service, PricingBase } from '../../types'
 import { fetchRoomAvailability } from '../../api/occupancy'
-import { calculate, buildCalcKey } from '../../utils/calculator'
-import type { CalcInput, CalcResult } from '../../utils/calculator'
+import { fetchRates } from '../../api/rates'
+import { fetchServices } from '../../api/services'
+import { fetchHotel } from '../../api/hotel'
+import { calculate, buildCalcKey, nightsOf } from '../../utils/calculator'
+import type { CalcInput, CalcResult, RateContext } from '../../utils/calculator'
+import { ChargesPanel } from './ChargesPanel'
 import { DatePicker } from '../ui/DatePicker'
 
 interface FormValues {
@@ -174,11 +178,14 @@ const ResultCard: React.FC<ResultCardProps> = ({
     )
   }
 
-  // Категория без тарифа: 0 из калькулятора — не цена
+  // Ни на одну ночь нет цены в календаре: 0 из калькулятора — это не цена
   if (result.nights > 0 && result.noRates && categoryName) {
     return (
       <div style={{ textAlign: 'center', color: '#b45309', fontSize: '0.95rem', padding: '12px 0' }}>
-        Для категории «{categoryName}» нет тарифа — итог не рассчитан
+        Для категории «{categoryName}» на эти даты нет цен в календаре — итог не рассчитан.
+        <div style={{ fontSize: '0.82rem', color: '#9ca3af', marginTop: 4 }}>
+          Цены заполняются в разделе «Тарифы и наличие».
+        </div>
       </div>
     )
   }
@@ -196,13 +203,24 @@ const ResultCard: React.FC<ResultCardProps> = ({
     <div>
       {result.missingNights > 0 && (
         <div style={{ ...infoBoxStyle('#fffbeb', '#b45309'), fontSize: '0.85rem', marginBottom: 8 }}>
-          {result.missingNights} ноч. вне сезонов — посчитаны по тарифу «{result.fallbackPeriodName ?? '—'}»
+          На {result.missingNights} ноч. цена не задана — итог неполный.
+          <div style={{ fontSize: '0.78rem', marginTop: 2 }}>
+            {result.missingDates.slice(0, 6).join(', ')}
+            {result.missingDates.length > 6 ? ` и ещё ${result.missingDates.length - 6}` : ''}
+          </div>
         </div>
       )}
       {result.breakdown.map((line, i) => (
-        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280', marginBottom: 4 }}>
-          <span>{line.label} ({line.nights} н.)</span>
-          <span>{fmt(line.amount)}</span>
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: line.kind === 'stay' ? '#374151' : '#6b7280', marginBottom: 4 }}>
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={line.label}>
+            {line.label}
+            {line.kind === 'stay'
+              ? ` (${line.nights} н.)`
+              : line.quantity && line.quantity !== 1
+                ? ` (${line.quantity} × ${line.unitPrice?.toLocaleString('ru-RU')})`
+                : ''}
+          </span>
+          <span style={{ whiteSpace: 'nowrap' }}>{fmt(line.amount)}</span>
         </div>
       ))}
       <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 8, paddingTop: 8 }}>
@@ -244,7 +262,7 @@ const ResultCard: React.FC<ResultCardProps> = ({
 
 export const BookingModal: React.FC = () => {
   const { modal, closeModal, fetchGrid, fetchToday, shiftDate } = useGridStore()
-  const { pricing, roomFund, hiddenFlagCodes } = useSettingsStore()
+  const { roomFund, hiddenFlagCodes } = useSettingsStore()
   const [rooms, setRooms] = useState<Room[]>([])
   const [conflict, setConflict] = useState<GridBooking | null>(null)
   const [checking, setChecking] = useState(false)
@@ -252,6 +270,15 @@ export const BookingModal: React.FC = () => {
   const [apiError, setApiError] = useState('')
   const [earlyCheckoutConfirm, setEarlyCheckoutConfirm] = useState(false)
   const [roomOccupied, setRoomOccupied] = useState(false)
+  // Квота партнёра: сервер вернул 409 ALLOTMENT_CONFLICT, ждём осознанного подтверждения
+  const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
+  const pendingValues = useRef<FormValues | null>(null)
+
+  // Цены — из календаря RatePrice, а не из localStorage: одна цена на каждую ночь
+  const [pricingBase, setPricingBase] = useState<PricingBase>('person')
+  const [autoServices, setAutoServices] = useState<Service[]>([])
+  const [ratesByDate, setRatesByDate] = useState<Record<string, RatePrice>>({})
+  const [ratesLoading, setRatesLoading] = useState(false)
 
   // Calculator state
   const [adultsWithMeals, setAdultsWithMeals] = useState(0)
@@ -295,6 +322,15 @@ export const BookingModal: React.FC = () => {
   // Load rooms once (натуральная сортировка номеров)
   useEffect(() => {
     fetchRooms({ isActive: true }).then(r => setRooms([...r].sort(compareRooms)))
+  }, [])
+
+  // Настройки объекта и автоматически начисляемые услуги — общие для всей формы.
+  // pricingBase решает, какие поля цены значимы: 'room' — за номер, 'person' — за место.
+  useEffect(() => {
+    fetchHotel().then(h => setPricingBase(h.pricingBase)).catch(() => {})
+    fetchServices()
+      .then(list => setAutoServices(list.filter(s => s.isActive && s.includedByDefault)))
+      .catch(() => setAutoServices([]))
   }, [])
 
   // Счётчики гостей, скидка, предоплата, «Оплачено» — из брони; {} даёт сброс для create
@@ -377,6 +413,8 @@ export const BookingModal: React.FC = () => {
     setRoomOccupied(false)
     // Диалог «Ранний выезд» не должен переживать закрытие формы и всплывать на другой брони
     setEarlyCheckoutConfirm(false)
+    setAllotmentWarning(null)
+    pendingValues.current = null
     // Закрыли модалку (или открыли другую бронь) до ответа сервера — ответ игнорируем
     return () => { cancelled = true }
   }, [modal.open, modal.mode, booking?.id])
@@ -392,21 +430,48 @@ export const BookingModal: React.FC = () => {
     [rooms, watchedRoomId]
   )
   const categoryName = selectedRoom?.category?.name ?? ''
+  const categoryId = selectedRoom?.category?.id ?? 0
 
-  // Check if category has extra beds
-  const hasExtraBeds = useMemo(() => {
-    const catKey = Object.keys(pricing.categoryRates).find(
-      k => k.toLowerCase() === categoryName.toLowerCase()
-    )
-    if (!catKey) return false
-    const rates = pricing.categoryRates[catKey]
-    return Object.keys(rates.extraBedRates).length > 0
-  }, [categoryName, pricing.categoryRates])
+  // Цены на ночи брони. Спрашиваем ровно ночи [checkIn, checkOut): последняя ночь —
+  // это checkOut минус день, за сам день выезда не платят.
+  useEffect(() => {
+    const dates = nightsOf(watchedCheckIn, watchedCheckOut)
+    if (!categoryId || dates.length === 0) {
+      setRatesByDate({})
+      setRatesLoading(false)
+      return
+    }
+    let cancelled = false
+    setRatesLoading(true)
+    fetchRates(dates[0], dates[dates.length - 1], categoryId)
+      .then(list => {
+        if (cancelled) return
+        const map: Record<string, RatePrice> = {}
+        for (const r of list) map[String(r.date).slice(0, 10)] = r
+        setRatesByDate(map)
+      })
+      .catch(() => { if (!cancelled) setRatesByDate({}) })
+      .finally(() => { if (!cancelled) setRatesLoading(false) })
+    return () => { cancelled = true }
+  }, [categoryId, watchedCheckIn, watchedCheckOut])
+
+  const rateCtx = useMemo<RateContext>(
+    () => ({ pricingBase, ratesByDate, services: autoServices }),
+    [pricingBase, ratesByDate, autoServices],
+  )
+
+  // Доп. места показываем, если цена на них есть в календаре (или они уже проставлены в брони)
+  const hasExtraBeds = useMemo(
+    () => extraBedsWithMeals + extraBedsNoMeals > 0
+      || Object.values(ratesByDate).some(r => r.extraBedPrice != null),
+    [ratesByDate, extraBedsWithMeals, extraBedsNoMeals],
+  )
 
   // Входы калькулятора — общие для расчёта и для ключа «изменились ли входы»
   const calcInput = useMemo<CalcInput>(() => ({
     checkIn: watchedCheckIn,
     checkOut: watchedCheckOut,
+    categoryId,
     categoryName,
     adultsWithMeals,
     childrenWithMeals,
@@ -419,14 +484,14 @@ export const BookingModal: React.FC = () => {
     discountPercent,
     prepaymentPercent,
   }), [
-    watchedCheckIn, watchedCheckOut, categoryName,
+    watchedCheckIn, watchedCheckOut, categoryId, categoryName,
     adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
     extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
     discountPercent, prepaymentPercent,
   ])
 
   // Calculator result
-  const calcResult = useMemo(() => calculate(calcInput, pricing), [calcInput, pricing])
+  const calcResult = useMemo(() => calculate(calcInput, rateCtx), [calcInput, rateCtx])
 
   // Базовый ключ входов — из СЕРВЕРНОЙ версии брони (категория: room.category.name из BOOKING_SELECT)
   const baseCalcKey = useMemo(() => {
@@ -434,6 +499,7 @@ export const BookingModal: React.FC = () => {
     return buildCalcKey({
       checkIn: serverBooking.checkIn.slice(0, 10),
       checkOut: serverBooking.checkOut.slice(0, 10),
+      categoryId: serverBooking.room?.category?.id ?? 0,
       categoryName: serverBooking.room?.category?.name ?? '',
       adultsWithMeals: serverBooking.adultsWithMeals ?? 0,
       childrenWithMeals: serverBooking.childrenWithMeals ?? 0,
@@ -454,8 +520,9 @@ export const BookingModal: React.FC = () => {
   // rooms.length > 0: пока номера не загружены, categoryName пустой и ключи различались бы ложно.
   const inputsChanged = isEdit && baseCalcKey !== null && rooms.length > 0 && baseCalcKey !== buildCalcKey(calcInput)
   const sendTotals = !isEdit || recalc || inputsChanged
-  // Категория без тарифа: 0 из калькулятора — не цена, суммы не отправляем
-  const includeTotals = sendTotals && !calcResult.noRates
+  // Цен на эти даты нет (или ещё грузятся): 0 из калькулятора — не цена, суммы не отправляем.
+  // Итог всё равно соберёт сервер из строк начислений — он и есть источник истины.
+  const includeTotals = sendTotals && !calcResult.noRates && !ratesLoading
 
   // Real-time availability check
   useEffect(() => {
@@ -480,18 +547,24 @@ export const BookingModal: React.FC = () => {
     return () => clearTimeout(timer)
   }, [watchedRoomId, watchedCheckIn, watchedCheckOut])
 
-  // Escape key to close
+  // Escape закрывает сначала диалог подтверждения, и только потом саму форму —
+  // иначе одно нажатие выбрасывало бы из недописанной брони.
   useEffect(() => {
     if (!modal.open) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeModal() }
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (allotmentWarning) { setAllotmentWarning(null); return }
+      if (earlyCheckoutConfirm) { setEarlyCheckoutConfirm(false); return }
+      closeModal()
+    }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [modal.open])
+  }, [modal.open, allotmentWarning, earlyCheckoutConfirm])
 
   const todayStr = format(new Date(), 'yyyy-MM-dd')
   const effectiveToday = shiftDate ?? todayStr
 
-  const onSubmit = async (values: FormValues) => {
+  const submitValues = async (values: FormValues, allowAllotmentOverride = false) => {
     if (conflict) return
     // Enter в поле формы обходит disabled-кнопку — не отправляем нули, пока бронь не загружена
     if (isEdit && loadingBooking) return
@@ -533,6 +606,10 @@ export const BookingModal: React.FC = () => {
           : {}),
         paidAmount,
         flags: [...selectedFlags, ...(customFlag.trim() ? [customFlag.trim()] : [])],
+        // Строки начислений сервер пересобирает сам при изменении дат/гостей/скидки;
+        // здесь просим это явно, когда админ нажал «Пересчитать по тарифу».
+        ...(recalc ? { recalcCharges: true } : {}),
+        ...(allowAllotmentOverride ? { allowAllotmentOverride: true } : {}),
       }
 
       if (isEdit && booking) {
@@ -544,11 +621,26 @@ export const BookingModal: React.FC = () => {
       closeModal()
       await Promise.all([fetchGrid(), fetchToday()])
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error
-      setApiError(msg ?? 'Ошибка сохранения')
+      const res = (err as { response?: { status?: number; data?: { error?: string; code?: string } } })?.response
+      // Номер выделен партнёру. Это не запрет: отель вправе его продать, но осознанно —
+      // поэтому спрашиваем подтверждение, а не упираемся в красную ошибку.
+      if (res?.status === 409 && res?.data?.code === 'ALLOTMENT_CONFLICT') {
+        pendingValues.current = values
+        setAllotmentWarning(res.data.error ?? 'Номер выделен партнёру по квоте')
+        return
+      }
+      setApiError(res?.data?.error ?? 'Ошибка сохранения')
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const onSubmit = (values: FormValues) => submitValues(values, false)
+
+  const confirmAllotmentOverride = () => {
+    const values = pendingValues.current
+    setAllotmentWarning(null)
+    if (values) submitValues(values, true)
   }
 
   const handleCancel = async () => {
@@ -1038,6 +1130,64 @@ export const BookingModal: React.FC = () => {
           </div>
         )}
 
+        {/* ── Partner allotment confirmation dialog ── */}
+        {/* Квота партнёра — не глухой запрет: отель вправе продать выделенный номер,
+            но это должно быть решением администратора, а не молчаливым обходом. */}
+        {allotmentWarning && (
+          <div style={{
+            position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 200,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>
+            <div style={{
+              background: 'var(--bg)', borderRadius: 14, padding: '28px 26px', maxWidth: 440, width: '90%',
+              boxShadow: '0 20px 60px rgba(0,0,0,0.25)', display: 'flex', flexDirection: 'column', gap: 18,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{
+                  width: 44, height: 44, borderRadius: 12, background: '#fef3c7', flexShrink: 0,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.6rem',
+                }}>🤝</div>
+                <div>
+                  <div style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text)', marginBottom: 2 }}>
+                    Номер выделен партнёру
+                  </div>
+                  <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>Требуется подтверждение</div>
+                </div>
+              </div>
+
+              <div style={{
+                background: 'var(--surface-2)', borderRadius: 10, padding: '12px 14px',
+                fontSize: '0.95rem', color: 'var(--text)', lineHeight: 1.5,
+              }}>
+                {allotmentWarning}
+              </div>
+
+              <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                Если продать этот номер, партнёр приедет к занятому номеру. Подтвердите,
+                только если это согласовано.
+              </div>
+
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                <button type="button" onClick={() => setAllotmentWarning(null)} style={cancelBtnStyle}>
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmAllotmentOverride}
+                  disabled={submitting}
+                  style={{
+                    padding: '9px 20px', background: '#d97706', color: '#fff', border: 'none',
+                    borderRadius: 8, fontSize: '1rem', fontWeight: 600,
+                    cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.7 : 1,
+                  }}
+                >
+                  {submitting ? 'Сохраняем…' : 'Всё равно забронировать'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ── RIGHT: Calculator ── */}
         {!isMaintenance && (
           <div style={{ width: 340, flexShrink: 0, display: 'flex', flexDirection: 'column', background: 'var(--surface)', minWidth: 0 }}>
@@ -1059,6 +1209,16 @@ export const BookingModal: React.FC = () => {
             {/* Calculator form (scrollable) */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
 
+              {/* Начисления существуют только у сохранённой брони: строки привязаны к её id.
+                  Для новой брони справа виден предпросмотр по тарифу, а строки создаст сервер. */}
+              {isEdit && booking && (
+                <ChargesPanel
+                  bookingId={booking.id}
+                  readOnly={isClosed}
+                  onChanged={(b) => { if (b) setServerBooking(b) }}
+                />
+              )}
+
               <CalcSection title="Гости с питанием" badge={adultsWithMeals + childrenWithMeals}>
                 <GuestCounter label="Взрослые" value={adultsWithMeals} onChange={setAdultsWithMeals} />
                 <GuestCounter label="Дети" value={childrenWithMeals} onChange={setChildrenWithMeals} />
@@ -1067,6 +1227,10 @@ export const BookingModal: React.FC = () => {
               <CalcSection title="Гости без питания" defaultOpen={adultsNoMeals + childrenNoMeals > 0} badge={adultsNoMeals + childrenNoMeals}>
                 <GuestCounter label="Взрослые" value={adultsNoMeals} onChange={setAdultsNoMeals} />
                 <GuestCounter label="Дети" value={childrenNoMeals} onChange={setChildrenNoMeals} />
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', padding: '2px 4px 6px', lineHeight: 1.4 }}>
+                  Проживание считается всем одинаково. Питание начисляется только гостям
+                  «с питанием» — отдельными строками по услугам.
+                </div>
               </CalcSection>
 
               {hasExtraBeds && (
@@ -1079,6 +1243,10 @@ export const BookingModal: React.FC = () => {
               <CalcSection title="Гости с инвалидностью" defaultOpen={disabledAdults + disabledChildren > 0} badge={disabledAdults + disabledChildren}>
                 <GuestCounter label="Взрослые" value={disabledAdults} onChange={setDisabledAdults} />
                 <GuestCounter label="Дети" value={disabledChildren} onChange={setDisabledChildren} />
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', padding: '2px 4px 6px', lineHeight: 1.4 }}>
+                  Учётное поле. Льгота оформляется отдельной строкой скидки с причиной —
+                  так видно, кто и на каком основании её дал.
+                </div>
               </CalcSection>
 
               {/* Discount & Prepayment */}
@@ -1136,7 +1304,7 @@ export const BookingModal: React.FC = () => {
                 discountPercent={discountPercent}
                 prepaymentPercent={prepaymentPercent}
                 categoryName={categoryName}
-                loading={loadingBooking}
+                loading={loadingBooking || ratesLoading}
                 saved={isEdit && !sendTotals ? {
                   totalAmount: (serverBooking ?? booking)?.totalAmount,
                   prepaidAmount: (serverBooking ?? booking)?.prepaidAmount,

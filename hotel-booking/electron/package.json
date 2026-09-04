@@ -48,7 +48,6 @@
           "!**/.env",
           "!**/.env.*",
           "!node_modules/.bin/**",
-          "!node_modules/prisma/**",
           "!node_modules/nodemon/**",
           "!node_modules/.prisma/client/*.tmp*",
           "!logs/**",

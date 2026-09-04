@@ -5,6 +5,9 @@ const { createError } = require('../middleware/errorHandler')
 const { ensureCurrentShift, getCurrentBusinessDate } = require('../utils/businessDate')
 const { getFlagEffectsMap, findBufferConflict } = require('../utils/flagEffects')
 const { findAllotmentConflict, allotmentConflictMessage } = require('../utils/allotment')
+const {
+  rebuildAutoCharges, recalcBookingTotals, chargeInputsChanged, toUTCDate,
+} = require('../utils/charges')
 
 /** Resolve the shift id for a new booking — the current business day (manual-only). */
 async function resolveShiftId(explicitShiftId, adminId) {
@@ -176,34 +179,48 @@ async function create(req, res, next) {
       }
     }
 
-    const booking = await prisma.booking.create({
-      data: {
-        roomId,
-        guestName: guestName.trim(),
-        guestPhone: guestPhone?.trim() || null,
-        checkIn: new Date(checkIn),
-        checkOut: new Date(checkOut),
-        status: initialStatus,
-        source: source || null,
-        notes: notes?.trim() || null,
-        adultsWithMeals: adultsWithMeals ?? 0,
-        childrenWithMeals: childrenWithMeals ?? 0,
-        adultsNoMeals: adultsNoMeals ?? 0,
-        childrenNoMeals: childrenNoMeals ?? 0,
-        extraBedsWithMeals: extraBedsWithMeals ?? 0,
-        extraBedsNoMeals: extraBedsNoMeals ?? 0,
-        disabledAdults: disabledAdults ?? 0,
-        disabledChildren: disabledChildren ?? 0,
-        discountPercent: discountPercent ?? 0,
-        prepaymentPercent: prepaymentPercent ?? 50,
-        totalAmount: totalAmount ?? 0,
-        prepaidAmount: prepaidAmount ?? 0,
-        paidAmount: paidAmount ?? 0,
-        flags: Array.isArray(flags) ? flags : [],
-        shiftId: await resolveShiftId(shiftId, req.admin.id),
-        adminId: req.admin.id,
-      },
-      select: BOOKING_SELECT,
+    // Смену определяем ДО транзакции: ensureCurrentShift может создать строку сам,
+    // и внутри транзакции это было бы лишней записью в общий счётчик.
+    const resolvedShiftId = await resolveShiftId(shiftId, req.admin.id)
+
+    // Бронь и её начисления создаём одной транзакцией: бронь без строк — это бронь
+    // с нулевой суммой, и такую «полупустую» запись пришлось бы чинить руками.
+    const booking = await prisma.$transaction(async (tx) => {
+      const created = await tx.booking.create({
+        data: {
+          roomId,
+          guestName: guestName.trim(),
+          guestPhone: guestPhone?.trim() || null,
+          checkIn: new Date(checkIn),
+          checkOut: new Date(checkOut),
+          status: initialStatus,
+          source: source || null,
+          notes: notes?.trim() || null,
+          adultsWithMeals: adultsWithMeals ?? 0,
+          childrenWithMeals: childrenWithMeals ?? 0,
+          adultsNoMeals: adultsNoMeals ?? 0,
+          childrenNoMeals: childrenNoMeals ?? 0,
+          extraBedsWithMeals: extraBedsWithMeals ?? 0,
+          extraBedsNoMeals: extraBedsNoMeals ?? 0,
+          disabledAdults: disabledAdults ?? 0,
+          disabledChildren: disabledChildren ?? 0,
+          discountPercent: discountPercent ?? 0,
+          prepaymentPercent: prepaymentPercent ?? 50,
+          totalAmount: totalAmount ?? 0,
+          prepaidAmount: prepaidAmount ?? 0,
+          paidAmount: paidAmount ?? 0,
+          flags: Array.isArray(flags) ? flags : [],
+          shiftId: resolvedShiftId,
+          adminId: req.admin.id,
+        },
+        select: { id: true },
+      })
+
+      // keepIfEmpty: тариф на эти даты может быть не заполнен — тогда строк нет,
+      // и сумму, посчитанную администратором вручную, мы не обнуляем.
+      await rebuildAutoCharges(created.id, { adminId: req.admin.id, client: tx, keepIfEmpty: true })
+
+      return tx.booking.findUnique({ where: { id: created.id }, select: BOOKING_SELECT })
     })
 
     emitBookingEvent('booking:created', { booking })
@@ -324,33 +341,57 @@ async function update(req, res, next) {
       }
     }
 
-    const booking = await prisma.booking.update({
-      where: { id },
-      data: {
-        roomId: newRoomId,
-        guestName: guestName?.trim() ?? existing.guestName,
-        guestPhone: guestPhone !== undefined ? guestPhone?.trim() || null : existing.guestPhone,
-        checkIn: newCheckIn,
-        checkOut: newCheckOut,
-        source: source !== undefined ? source : existing.source,
-        notes: notes !== undefined ? notes?.trim() || null : existing.notes,
-        ...(adultsWithMeals !== undefined && { adultsWithMeals }),
-        ...(childrenWithMeals !== undefined && { childrenWithMeals }),
-        ...(adultsNoMeals !== undefined && { adultsNoMeals }),
-        ...(childrenNoMeals !== undefined && { childrenNoMeals }),
-        ...(extraBedsWithMeals !== undefined && { extraBedsWithMeals }),
-        ...(extraBedsNoMeals !== undefined && { extraBedsNoMeals }),
-        ...(disabledAdults !== undefined && { disabledAdults }),
-        ...(disabledChildren !== undefined && { disabledChildren }),
-        ...(discountPercent !== undefined && { discountPercent }),
-        ...(prepaymentPercent !== undefined && { prepaymentPercent }),
-        ...(totalAmount !== undefined && { totalAmount }),
-        ...(prepaidAmount !== undefined && { prepaidAmount }),
-        ...(paidAmount !== undefined && { paidAmount }),
-        ...(flags !== undefined && { flags: Array.isArray(flags) ? flags : [] }),
-        ...(shiftId !== undefined && { shiftId: shiftId ? parseInt(shiftId) : null }),
-      },
-      select: BOOKING_SELECT,
+    // Пересобирать автоматические строки нужно только если изменились входы тарифа
+    // (номер, даты, гости, скидка) или администратор явно нажал «Пересчитать».
+    // Иначе правка заметки молча переоценила бы бронь по сегодняшнему календарю цен.
+    const nextInputs = {
+      roomId: newRoomId,
+      checkIn: newCheckIn,
+      checkOut: newCheckOut,
+      adultsWithMeals: adultsWithMeals ?? existing.adultsWithMeals,
+      childrenWithMeals: childrenWithMeals ?? existing.childrenWithMeals,
+      adultsNoMeals: adultsNoMeals ?? existing.adultsNoMeals,
+      childrenNoMeals: childrenNoMeals ?? existing.childrenNoMeals,
+      extraBedsWithMeals: extraBedsWithMeals ?? existing.extraBedsWithMeals,
+      extraBedsNoMeals: extraBedsNoMeals ?? existing.extraBedsNoMeals,
+      discountPercent: discountPercent ?? existing.discountPercent,
+    }
+    const needsRebuild = req.body.recalcCharges === true || chargeInputsChanged(existing, nextInputs)
+
+    const booking = await prisma.$transaction(async (tx) => {
+      const updated = await tx.booking.update({
+        where: { id },
+        data: {
+          roomId: newRoomId,
+          guestName: guestName?.trim() ?? existing.guestName,
+          guestPhone: guestPhone !== undefined ? guestPhone?.trim() || null : existing.guestPhone,
+          checkIn: newCheckIn,
+          checkOut: newCheckOut,
+          source: source !== undefined ? source : existing.source,
+          notes: notes !== undefined ? notes?.trim() || null : existing.notes,
+          ...(adultsWithMeals !== undefined && { adultsWithMeals }),
+          ...(childrenWithMeals !== undefined && { childrenWithMeals }),
+          ...(adultsNoMeals !== undefined && { adultsNoMeals }),
+          ...(childrenNoMeals !== undefined && { childrenNoMeals }),
+          ...(extraBedsWithMeals !== undefined && { extraBedsWithMeals }),
+          ...(extraBedsNoMeals !== undefined && { extraBedsNoMeals }),
+          ...(disabledAdults !== undefined && { disabledAdults }),
+          ...(disabledChildren !== undefined && { disabledChildren }),
+          ...(discountPercent !== undefined && { discountPercent }),
+          ...(prepaymentPercent !== undefined && { prepaymentPercent }),
+          ...(totalAmount !== undefined && { totalAmount }),
+          ...(prepaidAmount !== undefined && { prepaidAmount }),
+          ...(paidAmount !== undefined && { paidAmount }),
+          ...(flags !== undefined && { flags: Array.isArray(flags) ? flags : [] }),
+          ...(shiftId !== undefined && { shiftId: shiftId ? parseInt(shiftId) : null }),
+        },
+        select: BOOKING_SELECT,
+      })
+
+      if (!needsRebuild) return updated
+
+      await rebuildAutoCharges(id, { adminId: req.admin.id, client: tx, keepIfEmpty: true })
+      return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
     })
 
     emitBookingEvent('booking:updated', { booking })
@@ -647,6 +688,30 @@ async function move(req, res, next) {
         select: BOOKING_SELECT,
       })
 
+      // Начисления делим по датам, а не пропорцией: посуточные строки проживания
+      // сами знают, к какой ночи относятся. Услуги и скидки остаются на исходной
+      // брони — делить их «на глаз» значит выдумывать деньги.
+      // Если строк нет вообще (старая бронь до перехода на начисления), остаётся
+      // пропорциональный расчёт выше.
+      const charges = await tx.bookingCharge.findMany({ where: { bookingId: id } })
+      if (charges.length > 0) {
+        const moving = charges.filter(c => c.kind === 'stay' && c.date && c.date >= moveDateD)
+        if (moving.length > 0) {
+          await tx.bookingCharge.updateMany({
+            where: { id: { in: moving.map(c => c.id) } },
+            data: { bookingId: created.id },
+          })
+        }
+        // paidAmount не трогаем: это реально принятые деньги, их делит пропорция выше.
+        await recalcBookingTotals(id, { client: tx })
+        await recalcBookingTotals(created.id, { client: tx, keepIfEmpty: true })
+
+        return {
+          original: await tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT }),
+          created: await tx.booking.findUnique({ where: { id: created.id }, select: BOOKING_SELECT }),
+        }
+      }
+
       return { original: updatedOriginal, created }
     })
 
@@ -686,5 +751,219 @@ async function checkAvailability(req, res, next) {
   }
 }
 
+// ─── Начисления брони (BookingCharge) ────────────────────────────────────────
+//
+// Итог брони = СУММА СТРОК (NOTES, 2026-09-02). Тариф порождает строки
+// (source='auto'), администратор правит их и добавляет свои (source='manual'
+// + обязательная причина). `Booking.totalAmount` — кэш суммы, пересчитывается
+// после КАЖДОЙ операции со строками, иначе деньги в программе разойдутся с кассой.
+
+const CHARGE_KINDS = ['stay', 'meal', 'extra', 'discount']
+
+const CHARGE_SELECT = {
+  id: true,
+  bookingId: true,
+  kind: true,
+  label: true,
+  quantity: true,
+  unitPrice: true,
+  amount: true,
+  date: true,
+  source: true,
+  reason: true,
+  createdById: true,
+  createdBy: { select: { id: true, name: true } },
+  createdAt: true,
+  updatedAt: true,
+}
+
+/** Строки по дате (посуточное проживание), затем услуги и скидки (date = null → NULLS LAST). */
+function loadCharges(bookingId, client = prisma) {
+  return client.bookingCharge.findMany({
+    where: { bookingId },
+    select: CHARGE_SELECT,
+    orderBy: [{ date: 'asc' }, { id: 'asc' }],
+  })
+}
+
+/** Общий ответ всех операций со строками: строки, их сумма и свежая бронь. */
+async function respondWithCharges(bookingId, res, { emit = true } = {}) {
+  const [charges, booking] = await Promise.all([
+    loadCharges(bookingId),
+    prisma.booking.findUnique({ where: { id: bookingId }, select: BOOKING_SELECT }),
+  ])
+  if (emit && booking) emitBookingEvent('booking:updated', { booking })
+  res.json({
+    data: charges,
+    total: charges.reduce((s, c) => s + (c.amount || 0), 0),
+    booking,
+  })
+}
+
+/** Бронь под правку начислений: отменённую не трогаем, у закрытой деньги править можно. */
+async function loadBookingForCharges(id, next) {
+  const booking = await prisma.booking.findUnique({ where: { id }, select: { id: true, status: true } })
+  if (!booking) { next(createError('Бронь не найдена', 404)); return null }
+  if (booking.status === 'CANCELLED') {
+    next(createError('Нельзя менять начисления отменённой брони', 400))
+    return null
+  }
+  return booking
+}
+
+/** amount храним посчитанным (см. схему). Скидка не может быть плюсом — иначе «скидка» увеличит счёт. */
+function normalizeCharge(kind, quantity, unitPrice) {
+  const q = Number(quantity)
+  let u = Number(unitPrice)
+  if (kind === 'discount') u = -Math.abs(u)
+  return { quantity: q, unitPrice: u, amount: Math.round(q * u) }
+}
+
+// GET /api/bookings/:id/charges
+async function listCharges(req, res, next) {
+  try {
+    const id = parseInt(req.params.id)
+    const exists = await prisma.booking.findUnique({ where: { id }, select: { id: true } })
+    if (!exists) return next(createError('Бронь не найдена', 404))
+    await respondWithCharges(id, res, { emit: false })
+  } catch (err) {
+    next(err)
+  }
+}
+
+// POST /api/bookings/:id/charges — ручная строка (обязательно с причиной)
+async function addCharge(req, res, next) {
+  try {
+    const id = parseInt(req.params.id)
+    const booking = await loadBookingForCharges(id, next)
+    if (!booking) return
+
+    const { kind, label, quantity = 1, unitPrice = 0, date, reason } = req.body
+    if (!CHARGE_KINDS.includes(kind)) return next(createError('Недопустимый вид начисления', 400))
+    if (!reason || !String(reason).trim()) {
+      return next(createError('Укажите причину — ручная строка без причины не сохраняется', 400))
+    }
+
+    const money = normalizeCharge(kind, quantity, unitPrice)
+    if (!Number.isFinite(money.amount)) return next(createError('Некорректная сумма', 400))
+
+    await prisma.$transaction(async (tx) => {
+      await tx.bookingCharge.create({
+        data: {
+          bookingId: id,
+          kind,
+          label: String(label).trim(),
+          ...money,
+          date: date ? toUTCDate(date) : null,
+          source: 'manual',
+          reason: String(reason).trim(),
+          createdById: req.admin.id,
+        },
+      })
+      await recalcBookingTotals(id, { client: tx })
+    })
+
+    await respondWithCharges(id, res)
+  } catch (err) {
+    next(err)
+  }
+}
+
+// PUT /api/bookings/:id/charges/:chargeId
+// Правка автоматической строки делает её ручной: это уже решение администратора,
+// и оно должно пережить пересборку по тарифу (иначе «полсуток» молча вернутся в сутки).
+async function updateCharge(req, res, next) {
+  try {
+    const id = parseInt(req.params.id)
+    const chargeId = parseInt(req.params.chargeId)
+    const booking = await loadBookingForCharges(id, next)
+    if (!booking) return
+
+    const existing = await prisma.bookingCharge.findUnique({ where: { id: chargeId } })
+    if (!existing || existing.bookingId !== id) return next(createError('Строка начисления не найдена', 404))
+
+    const { label, quantity, unitPrice, date, reason, kind } = req.body
+    if (kind !== undefined && !CHARGE_KINDS.includes(kind)) {
+      return next(createError('Недопустимый вид начисления', 400))
+    }
+    if (!reason || !String(reason).trim()) {
+      return next(createError('Укажите причину правки — без неё изменение не сохраняется', 400))
+    }
+
+    const nextKind = kind ?? existing.kind
+    const money = normalizeCharge(
+      nextKind,
+      quantity !== undefined ? quantity : existing.quantity,
+      unitPrice !== undefined ? unitPrice : existing.unitPrice,
+    )
+    if (!Number.isFinite(money.amount)) return next(createError('Некорректная сумма', 400))
+
+    await prisma.$transaction(async (tx) => {
+      await tx.bookingCharge.update({
+        where: { id: chargeId },
+        data: {
+          kind: nextKind,
+          ...(label !== undefined && { label: String(label).trim() }),
+          ...money,
+          ...(date !== undefined && { date: date ? toUTCDate(date) : null }),
+          source: 'manual',
+          reason: String(reason).trim(),
+          createdById: req.admin.id,
+        },
+      })
+      await recalcBookingTotals(id, { client: tx })
+    })
+
+    await respondWithCharges(id, res)
+  } catch (err) {
+    next(err)
+  }
+}
+
+// DELETE /api/bookings/:id/charges/:chargeId
+async function removeCharge(req, res, next) {
+  try {
+    const id = parseInt(req.params.id)
+    const chargeId = parseInt(req.params.chargeId)
+    const booking = await loadBookingForCharges(id, next)
+    if (!booking) return
+
+    const existing = await prisma.bookingCharge.findUnique({ where: { id: chargeId } })
+    if (!existing || existing.bookingId !== id) return next(createError('Строка начисления не найдена', 404))
+
+    await prisma.$transaction(async (tx) => {
+      await tx.bookingCharge.delete({ where: { id: chargeId } })
+      await recalcBookingTotals(id, { client: tx })
+    })
+
+    await respondWithCharges(id, res)
+  } catch (err) {
+    next(err)
+  }
+}
+
+// POST /api/bookings/:id/charges/rebuild — пересобрать автоматические строки по тарифу.
+// Ручные строки остаются. Удалённые автоматические (например, снятый обед) вернутся —
+// это осознанное действие администратора, а не фон.
+async function rebuildCharges(req, res, next) {
+  try {
+    const id = parseInt(req.params.id)
+    const booking = await loadBookingForCharges(id, next)
+    if (!booking) return
+
+    await prisma.$transaction(async (tx) => {
+      await rebuildAutoCharges(id, { adminId: req.admin.id, client: tx })
+    })
+
+    await respondWithCharges(id, res)
+  } catch (err) {
+    next(err)
+  }
+}
+
 // BOOKING_SELECT экспортируется для optimizeController — payload socket-событий должен быть единым
-module.exports = { list, getOne, create, update, cancel, checkIn, checkOut, checkAvailability, move, BOOKING_SELECT }
+module.exports = {
+  list, getOne, create, update, cancel, checkIn, checkOut, checkAvailability, move,
+  listCharges, addCharge, updateCharge, removeCharge, rebuildCharges,
+  BOOKING_SELECT,
+}

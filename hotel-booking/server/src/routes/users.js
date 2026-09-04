@@ -3,6 +3,7 @@ const { body, param } = require('express-validator')
 const ctrl = require('../controllers/userController')
 const { authenticate, requireRole } = require('../middleware/auth')
 const { validate } = require('../middleware/validate')
+const { passwordRule } = require('../utils/passwordPolicy')
 
 // Учётные записи сотрудников: только главный администратор.
 // Подключается в app.js: app.use('/api/users', apiLimiter, userRoutes)
@@ -24,9 +25,7 @@ const createRules = [
     .isString().withMessage('Имя обязательно').bail()
     .trim()
     .isLength({ min: 1, max: 100 }).withMessage('Имя: от 1 до 100 символов'),
-  body('password')
-    .isString().withMessage('Пароль обязателен').bail()
-    .isLength({ min: 8 }).withMessage('Пароль: минимум 8 символов'),
+  passwordRule(body, 'password'),
   body('role').isIn(ROLES).withMessage(ROLE_MSG),
 ]
 
@@ -42,9 +41,7 @@ const updateRules = [
 
 const passwordRules = [
   idRule,
-  body('password')
-    .isString().withMessage('Пароль обязателен').bail()
-    .isLength({ min: 8 }).withMessage('Пароль: минимум 8 символов'),
+  passwordRule(body, 'password'),
 ]
 
 router.get('/', ctrl.list)

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
-import { useSettingsStore } from '../../../store/useSettingsStore'
+import { useRoomFundStore } from '../../../store/useRoomFundStore'
 import { fetchCategories, CategoryWithCount } from '../../../api/categories'
 import { fetchAllRooms, createRoom, updateRoom, deactivateRoom } from '../../../api/roomsAdmin'
+import type { FeatureRow, CapacityRow } from '../../../api/roomFund'
 import { compareRooms, naturalCompare } from '../../../utils/sortRooms'
 import type { Room } from '../../../types'
 
@@ -10,8 +11,13 @@ type Segment = 'all' | 'active' | 'hidden'
 const GRID_COLS = '80px 1fr 90px 1.5fr 120px 36px'
 
 export const RoomsSection: React.FC = () => {
-  const { roomFund } = useSettingsStore()
-  const { buildings, features, capacities } = roomFund
+  // Справочник — общий, с сервера. Скрытые записи в сторе тоже есть: они нужны,
+  // чтобы расшифровать вместимость номера, чью запись уже убрали из списков.
+  const { buildings, features, capacities, ensureLoaded } = useRoomFundStore()
+  useEffect(() => { ensureLoaded() }, [ensureLoaded])
+
+  const activeFeatures = features.filter(f => f.isActive)
+  const activeCapacities = capacities.filter(c => c.isActive)
 
   const [rooms, setRooms] = useState<Room[]>([])
   const [cats, setCats] = useState<CategoryWithCount[]>([])
@@ -36,8 +42,10 @@ export const RoomsSection: React.FC = () => {
   const startNew = () => {
     setEditId('new')
     setForm({
-      number: '', categoryId: cats[0]?.id ?? 0, building: buildings[0]?.name ?? '',
-      floor: 1, features: [], capacity: capacities[0]?.id ?? '',
+      // В номер идут НАЗВАНИЕ корпуса и КОД вместимости — так номера связаны
+      // со справочником (внешних ключей между ними нет).
+      number: '', categoryId: cats[0]?.id ?? 0, building: buildings.find(b => b.isActive)?.name ?? '',
+      floor: 1, features: [], capacity: activeCapacities[0]?.code ?? '',
     })
     setError('')
   }
@@ -91,13 +99,28 @@ export const RoomsSection: React.FC = () => {
     }
   }
 
+  // К справочнику добавляем корпуса, которые встречаются у номеров, но которых
+  // в справочнике нет (или их скрыли): иначе форма не покажет текущее значение.
   const buildingKeys = [...new Set(rooms.map(r => r.building))].sort(naturalCompare)
   const buildingOptions = [
-    ...buildings.map(b => b.name),
-    ...buildingKeys.filter(k => !buildings.find(b => b.name === k)),
+    ...buildings.filter(b => b.isActive).map(b => b.name),
+    ...buildingKeys.filter(k => !buildings.find(b => b.isActive && b.name === k)),
   ]
 
-  const getCapacityLabel = (capacityId: string) => capacities.find(c => c.id === capacityId)?.label ?? capacityId
+  // Номер хранит КОД вместимости; если запись справочника скрыли или её нет —
+  // показываем сам код, а не пустоту (именно так и выглядела «1781675520618»).
+  const getCapacityLabel = (code: string) => capacities.find(c => c.code === code)?.label ?? code
+
+  // Скрытая запись, которая уже стоит у редактируемого номера, всё равно должна
+  // быть в списке — иначе форма молча заменит её на «не указано» при сохранении.
+  const capacityOptions = [
+    ...activeCapacities,
+    ...capacities.filter(c => !c.isActive && c.code === form.capacity),
+  ]
+  const featureOptions = [
+    ...activeFeatures,
+    ...features.filter(f => !f.isActive && form.features.includes(f.name)),
+  ]
 
   // Фильтрация по сегменту + поиску
   const q = search.trim().toLowerCase()
@@ -166,7 +189,7 @@ export const RoomsSection: React.FC = () => {
       </div>
 
       {/* New-room form (вверху) */}
-      {editId === 'new' && <RoomForm {...{ form, setForm, cats, capacities, features, buildingOptions, error, save, toggleFeature, onCancel: () => setEditId(null), title: 'Новый номер' }} />}
+      {editId === 'new' && <RoomForm {...{ form, setForm, cats, capacityOptions, featureOptions, buildingOptions, error, save, toggleFeature, onCancel: () => setEditId(null), title: 'Новый номер' }} />}
 
       {/* Table */}
       <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 12, overflow: 'hidden' }}>
@@ -230,7 +253,7 @@ export const RoomsSection: React.FC = () => {
                   </div>
                   {editId === room.id && (
                     <div style={{ padding: '4px 16px 16px', borderBottom: '1px solid var(--border-subtle)' }}>
-                      <RoomForm {...{ form, setForm, cats, capacities, features, buildingOptions, error, save, toggleFeature, onCancel: () => setEditId(null), title: '' }} />
+                      <RoomForm {...{ form, setForm, cats, capacityOptions, featureOptions, buildingOptions, error, save, toggleFeature, onCancel: () => setEditId(null), title: '' }} />
                     </div>
                   )}
                 </div>
@@ -255,8 +278,8 @@ interface FormProps {
   form: { number: string; categoryId: number; building: string; floor: number; features: string[]; capacity: string }
   setForm: React.Dispatch<React.SetStateAction<FormProps['form']>>
   cats: CategoryWithCount[]
-  capacities: { id: string; label: string; value: number }[]
-  features: { id: string; name: string; emoji: string }[]
+  capacityOptions: CapacityRow[]
+  featureOptions: FeatureRow[]
   buildingOptions: string[]
   error: string
   save: () => void
@@ -265,7 +288,7 @@ interface FormProps {
   title: string
 }
 
-const RoomForm: React.FC<FormProps> = ({ form, setForm, cats, capacities, features, buildingOptions, error, save, toggleFeature, onCancel, title }) => (
+const RoomForm: React.FC<FormProps> = ({ form, setForm, cats, capacityOptions, featureOptions, buildingOptions, error, save, toggleFeature, onCancel, title }) => (
   <div style={{
     padding: 16, background: 'var(--bg)', border: '1px solid var(--border)',
     borderRadius: 12, display: 'flex', flexDirection: 'column', gap: 14, marginBottom: title ? 12 : 0,
@@ -298,7 +321,12 @@ const RoomForm: React.FC<FormProps> = ({ form, setForm, cats, capacities, featur
       <Field label="Вместимость">
         <select value={form.capacity} onChange={e => setForm(f => ({ ...f, capacity: e.target.value }))} style={inputStyle}>
           <option value="">— не указано —</option>
-          {capacities.map(c => <option key={c.id} value={c.id}>{c.label} ({c.value} чел.)</option>)}
+          {/* value — КОД: именно он лежит в Room.capacity. */}
+          {capacityOptions.map(c => (
+            <option key={c.id} value={c.code}>
+              {c.label}{c.value > 0 ? ` (${c.value} чел.)` : ''}{c.isActive ? '' : ' — скрыт'}
+            </option>
+          ))}
         </select>
       </Field>
       <Field label="Этаж">
@@ -306,10 +334,10 @@ const RoomForm: React.FC<FormProps> = ({ form, setForm, cats, capacities, featur
       </Field>
     </div>
 
-    {features.length > 0 && (
+    {featureOptions.length > 0 && (
       <Field label="Особенности">
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-          {features.map(f => {
+          {featureOptions.map(f => {
             const on = form.features.includes(f.name)
             return (
               <button key={f.id} type="button" onClick={() => toggleFeature(f.name)} style={{
@@ -320,7 +348,7 @@ const RoomForm: React.FC<FormProps> = ({ form, setForm, cats, capacities, featur
                 color: on ? 'var(--accent-text)' : 'var(--text-muted)',
                 fontWeight: on ? 600 : 500,
               }}>
-                <span>{f.emoji}</span> {f.name}
+                <span>{f.emoji ?? '✦'}</span> {f.name}
               </button>
             )
           })}

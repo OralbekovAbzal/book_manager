@@ -29,10 +29,13 @@ export const VISUAL_DEFAULTS: VisualSettings = {
 }
 
 // ─── Room Fund types ───────────────────────────────────────────────────────────
+//
+// Корпуса, особенности и вместимости отсюда УБРАНЫ (волна 3): они жили в
+// localStorage и на двух рабочих местах молча разъезжались. Теперь источник
+// истины — сервер, состояние — в `useRoomFundStore` (`api/roomFund.ts`).
+// Метки броней остались: они уже в БД, сюда лишь складываются после загрузки,
+// и на них завязаны сетка, форма брони и оптимизатор.
 
-export interface BuildingItem { id: string; name: string; description: string }
-export interface FeatureItem { id: string; name: string; emoji: string }
-export interface CapacityItem { id: string; label: string; value: number }
 /**
  * Эффекты метки для алгоритма оптимизации. Алгоритм работает не с названием
  * метки, а с этими эффектами — поэтому новую метку достаточно собрать из них.
@@ -48,29 +51,10 @@ export interface FlagEffects {
 export interface BookingFlagItem { id: string; label: string; effects?: FlagEffects }
 
 export interface RoomFundConfig {
-  buildings: BuildingItem[]
-  features: FeatureItem[]
-  capacities: CapacityItem[]
   bookingFlags: BookingFlagItem[]
 }
 
 export const ROOM_FUND_DEFAULTS: RoomFundConfig = {
-  buildings: [],
-  features: [
-    { id: 'balcony', name: 'Балкон', emoji: '🪟' },
-    { id: 'sea_view', name: 'Вид на море', emoji: '🌊' },
-    { id: 'jacuzzi', name: 'Джакузи', emoji: '🛁' },
-    { id: 'double_bed', name: 'Двуспальная кровать', emoji: '🛏' },
-    { id: 'ac', name: 'Кондиционер', emoji: '❄️' },
-    { id: 'fridge', name: 'Холодильник', emoji: '🧊' },
-    { id: 'safe', name: 'Сейф', emoji: '🔒' },
-  ],
-  capacities: [
-    { id: 'single', label: 'Одноместный', value: 1 },
-    { id: 'double', label: 'Двухместный', value: 2 },
-    { id: 'triple', label: 'Трёхместный', value: 3 },
-    { id: 'quad', label: 'Четырёхместный', value: 4 },
-  ],
   bookingFlags: [
     { id: 'early_checkout', label: 'Выезд до 17:00' },
     { id: 'late_checkout', label: 'Выезд после 17:00' },
@@ -161,6 +145,14 @@ interface SettingsStore {
   roomFund: RoomFundConfig
   setRoomFund: (data: Partial<RoomFundConfig>) => void
   resetRoomFund: () => void
+  /**
+   * Выбросить корпуса/особенности/вместимости, оставшиеся в localStorage от
+   * старых версий. Зовётся один раз — из `useRoomFundStore` ПОСЛЕ успешного
+   * переноса в БД. До этого старые поля не трогаем: на рабочем месте, где вошёл
+   * только STAFF, импорт вернёт 403, и локальная копия — единственное место,
+   * где справочник ещё есть.
+   */
+  forgetLegacyRoomFund: () => void
 
   filterSettings: FilterSettings
   setFilterSetting: <K extends keyof FilterSettings>(key: K, value: FilterSettings[K]) => void
@@ -187,6 +179,11 @@ export const useSettingsStore = create<SettingsStore>()(
       setRoomFund: (data) =>
         set((s) => ({ roomFund: { ...s.roomFund, ...data } })),
       resetRoomFund: () => set({ roomFund: ROOM_FUND_DEFAULTS }),
+
+      // Пересобираем объект с нуля: обычный spread сохранил бы старые ключи,
+      // которых больше нет в типе, и persist записал бы их обратно.
+      forgetLegacyRoomFund: () =>
+        set((s) => ({ roomFund: { bookingFlags: s.roomFund.bookingFlags ?? [] } })),
 
       filterSettings: FILTER_DEFAULTS,
       setFilterSetting: (key, value) =>
@@ -216,6 +213,10 @@ export const useSettingsStore = create<SettingsStore>()(
           ...current,
           ...p,
           visual:         { ...current.visual,         ...(p.visual ?? {}) },
+          // roomFund домешиваем полным spread'ом НАМЕРЕННО: у старых
+          // пользователей внутри ещё лежат buildings/features/capacities, и до
+          // успешного переноса в БД (см. useRoomFundStore) их терять нельзя —
+          // иначе на рабочем месте под STAFF справочник пропадёт совсем.
           roomFund:       { ...current.roomFund,       ...(p.roomFund ?? {}) },
           filterSettings: { ...current.filterSettings, ...(p.filterSettings ?? {}) },
           optimizer:      { ...current.optimizer,      ...(p.optimizer ?? {}) },

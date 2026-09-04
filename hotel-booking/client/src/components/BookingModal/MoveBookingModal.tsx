@@ -3,6 +3,7 @@ import { format, parseISO, addDays, differenceInCalendarDays } from 'date-fns'
 import { useGridStore } from '../../store/useGridStore'
 import { moveBooking } from '../../api/bookings'
 import { fetchRooms } from '../../api/rooms'
+import { AllotmentConfirm } from './AllotmentConfirm'
 import type { Room } from '../../types'
 
 export const MoveBookingModal: React.FC = () => {
@@ -17,22 +18,32 @@ export const MoveBookingModal: React.FC = () => {
   const [moveDate, setMoveDate]         = useState<string>(initialMoveDate ?? '')
   const [submitting, setSubmitting]     = useState(false)
   const [error, setError]               = useState<string | null>(null)
+  // Целевой номер выделен партнёру: сервер вернул 409 ALLOTMENT_CONFLICT.
+  // Это не отказ, а вопрос — переезд повторяется с `allowAllotmentOverride`.
+  const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
 
   useEffect(() => {
     if (isOpen) {
       setTargetRoomId(initialTargetRoomId ?? null)
       setMoveDate(initialMoveDate ?? '')
       setError(null)
+      setAllotmentWarning(null)
       fetchRooms({ isActive: true }).then(setRooms)
     }
   }, [isOpen, initialTargetRoomId, initialMoveDate])
 
+  // Escape закрывает СНАЧАЛА подтверждение по квоте и только потом само окно —
+  // иначе одно нажатие выбрасывало бы из наполовину заполненного переезда.
   useEffect(() => {
     if (!isOpen) return
-    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeModal() }
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      if (allotmentWarning) { setAllotmentWarning(null); return }
+      closeModal()
+    }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [isOpen, closeModal])
+  }, [isOpen, closeModal, allotmentWarning])
 
   const sourceRoom = useMemo(() =>
     rooms.find(r => r.id === booking?.roomId),
@@ -60,20 +71,36 @@ export const MoveBookingModal: React.FC = () => {
 
   const canSubmitFinal = targetRoomId !== null && moveDateValid && targetRoomId !== booking.roomId
 
-  const onSubmit = async () => {
+  const onSubmit = async (allowAllotmentOverride = false) => {
     if (!targetRoomId || !moveDateValid) return
     setSubmitting(true)
     setError(null)
     try {
-      await moveBooking(booking.id, targetRoomId, moveDate)
+      await moveBooking(booking.id, targetRoomId, moveDate, allowAllotmentOverride)
       closeModal()
       fetchGrid()
     } catch (err: unknown) {
-      const e = err as { response?: { data?: { error?: string } }; message?: string }
-      setError(e.response?.data?.error || e.message || 'Не удалось выполнить переезд')
+      const e = err as {
+        response?: { status?: number; data?: { error?: string; code?: string } }
+        message?: string
+      }
+      const res = e.response
+      // Квота партнёра — не запрет: отель вправе продать выделенный номер, но
+      // осознанно. Спрашиваем тем же окном, что и форма брони, а не показываем
+      // красную ошибку, из которой нет выхода.
+      if (res?.status === 409 && res.data?.code === 'ALLOTMENT_CONFLICT') {
+        setAllotmentWarning(res.data.error ?? 'Номер выделен партнёру по квоте')
+        return
+      }
+      setError(res?.data?.error || e.message || 'Не удалось выполнить переезд')
     } finally {
       setSubmitting(false)
     }
+  }
+
+  const confirmAllotmentOverride = () => {
+    setAllotmentWarning(null)
+    void onSubmit(true)
   }
 
   // Список доступных номеров — все кроме текущего
@@ -272,7 +299,9 @@ export const MoveBookingModal: React.FC = () => {
             Отмена
           </button>
           <button
-            onClick={onSubmit}
+            // Стрелка обязательна: `onClick={onSubmit}` передал бы в первый
+            // аргумент событие клика, а он теперь — «продать номер из квоты».
+            onClick={() => onSubmit()}
             disabled={!canSubmitFinal || submitting}
             style={{
               padding: '8px 18px',
@@ -288,6 +317,23 @@ export const MoveBookingModal: React.FC = () => {
             {submitting ? 'Сохранение…' : 'Переселить'}
           </button>
         </footer>
+
+        {/* Подтверждение продажи номера из квоты партнёра. Тот же компонент, что
+            в форме брони: окно должно узнаваться, откуда бы ни пришло.
+            Лежит ВНУТРИ окна и позиционируется `absolute` (см. AllotmentConfirm):
+            на контейнере стоит `transform`, а он делает родителя containing block
+            для `position: fixed` детей — «fixed» здесь всё равно накрыл бы только
+            это окно, но вёл бы себя неочевидно (грабли из NOTES.md). */}
+        {allotmentWarning && (
+          <AllotmentConfirm
+            message={allotmentWarning}
+            busy={submitting}
+            confirmLabel="Всё равно переселить"
+            busyLabel="Переселяем…"
+            onCancel={() => setAllotmentWarning(null)}
+            onConfirm={confirmAllotmentOverride}
+          />
+        )}
       </div>
     </>
   )

@@ -1,10 +1,8 @@
 const { prisma } = require('../utils/prisma')
-const { findOverlap } = require('../utils/overlap')
+const { checkRoomsAvailability } = require('../utils/availability')
 const { emitBookingEvent } = require('../socket/socketManager')
 const { createError } = require('../middleware/errorHandler')
 const { ensureCurrentShift, getCurrentBusinessDate } = require('../utils/businessDate')
-const { getFlagEffectsMap, findBufferConflict } = require('../utils/flagEffects')
-const { findAllotmentConflict, allotmentConflictMessage } = require('../utils/allotment')
 const {
   rebuildAutoCharges, recalcBookingTotals, chargeInputsChanged, toUTCDate,
   replaceBookingServices, defaultServiceLinks, serviceLinksChanged, normalizeServiceLinks,
@@ -30,6 +28,66 @@ async function resolveShiftId(explicitShiftId, adminId) {
   if (explicitShiftId) return parseInt(explicitShiftId)
   const shift = await ensureCurrentShift(adminId)
   return shift.id
+}
+
+/**
+ * «Свободен ли номер» — ОДНА проверка на весь контроллер (`utils/availability.js`).
+ *
+ * До этого create/update/move звали findOverlap + findBufferConflict +
+ * findAllotmentConflict каждый по-своему, а экраны подбора — утилиту: одно и то же
+ * правило жило в двух местах и при первой же правке разошлось бы. Теперь правило
+ * одно, а контроллеры отличаются только тем, что делают с отказом.
+ *
+ * @param {object} p поля как у checkRoomsAvailability + allowAllotmentOverride и client
+ * @returns {Promise<null|{reason: string, conflict: object|null, message: string}>}
+ *          null — номер свободен; иначе причина отказа
+ */
+async function findRoomBlock({
+  roomId, checkIn, checkOut, excludeBookingId = null, flags = [], partnerId = null,
+  allowAllotmentOverride = false, client,
+}) {
+  const checked = await checkRoomsAvailability({
+    roomIds: [roomId], checkIn, checkOut, excludeBookingId, flags, partnerId, client,
+  })
+  const hit = checked.get(parseInt(roomId))
+  if (!hit || hit.available) return null
+  // Квота — не запрет намертво: отель вправе продать выделенный номер, но осознанно.
+  // Подтверждение снимает ТОЛЬКО причину квоты: пересечение и буфер им не обходятся.
+  if (hit.reason === 'allotment' && allowAllotmentOverride) return null
+  return hit
+}
+
+/**
+ * 409 в той форме, которую клиент ждёт с волны 1 (форма ответа НЕ менялась при
+ * переводе на общую утилиту): у пересечения — объект `conflict`, у квоты — `code`,
+ * по которому модалка показывает подтверждение вместо красной ошибки.
+ */
+function respondRoomBlocked(res, block) {
+  if (block.reason === 'overlap') {
+    return res.status(409).json({ error: block.message, conflict: block.conflict })
+  }
+  if (block.reason === 'allotment') {
+    return res.status(409).json({ error: block.message, code: 'ALLOTMENT_CONFLICT' })
+  }
+  // Буфер: утилита даёт саму причину, «что делать» дописывает контроллер — на экране
+  // подбора этот совет неуместен, а в форме брони он был в тексте изначально.
+  return res.status(409).json({ error: `${block.message}. Выберите другие даты или номер.` })
+}
+
+/**
+ * Отказ в переезде. Окно переезда показывает ТОЛЬКО текст (`data.error`), поэтому
+ * формулировка про пересечение остаётся своей — «целевой номер занят (имя)», как
+ * до перевода на общую утилиту. `code` у квоты сохраняем: сейчас его никто не читает,
+ * но он пригодится, когда в переезде появится подтверждение поверх квоты.
+ */
+function respondMoveBlocked(res, block) {
+  if (block.reason === 'overlap') {
+    return res.status(409).json({ error: `Целевой номер занят (${block.conflict.guestName})` })
+  }
+  if (block.reason === 'allotment') {
+    return res.status(409).json({ error: block.message, code: 'ALLOTMENT_CONFLICT' })
+  }
+  return res.status(409).json({ error: block.message })
 }
 
 const BOOKING_SELECT = {
@@ -185,45 +243,16 @@ async function create(req, res, next) {
       if (badService) return next(createError(badService, 400))
     }
 
-    // Проверка пересечений
-    const conflict = await findOverlap({ roomId, checkIn, checkOut })
-    if (conflict) {
-      return res.status(409).json({
-        error: 'Номер занят на выбранные даты',
-        conflict: {
-          bookingId: conflict.id,
-          guestName: conflict.guestName,
-          checkIn: conflict.checkIn,
-          checkOut: conflict.checkOut,
-        },
-      })
-    }
-
-    // Проверка буфера (turnaround) от эффектов меток — напр. «поздний выезд» → нельзя день-в-день
-    const effMap = await getFlagEffectsMap()
-    const bufHit = await findBufferConflict({ roomId, checkIn, checkOut, flags: flags || [] }, effMap)
-    if (bufHit) {
-      return res.status(409).json({
-        error: `Нужен зазор минимум ${bufHit.required} дн. рядом с бронью «${bufHit.booking.guestName}» (метка с буфером). Выберите другие даты или номер.`,
-      })
-    }
-
-    // Квота партнёра. Не запрет намертво: отель вправе продать выделенный номер,
-    // но это должно быть осознанным решением, а не молчаливым — иначе партнёр
-    // приезжает к занятому номеру. Подтверждение приходит как allowAllotmentOverride.
-    if (!req.body.allowAllotmentOverride) {
-      // NB: partnerId в create/update из тела НЕ разбирается (бронь партнёру
-      // здесь не назначается) — берём напрямую, чтобы не ловить ReferenceError.
-      const allotHit = await findAllotmentConflict({
-        roomId, checkIn, checkOut, partnerId: req.body.partnerId,
-      })
-      if (allotHit) {
-        return res.status(409).json({
-          error: allotmentConflictMessage(allotHit),
-          code: 'ALLOTMENT_CONFLICT',
-        })
-      }
-    }
+    // Свободен ли номер: пересечение → буфер метки → квота партнёра, одной проверкой.
+    // NB: partnerId в create/update из тела НЕ разбирается (бронь партнёру здесь
+    // не назначается) — берём напрямую из req.body, чтобы не ловить ReferenceError.
+    const block = await findRoomBlock({
+      roomId, checkIn, checkOut,
+      flags: flags || [],
+      partnerId: req.body.partnerId,
+      allowAllotmentOverride: req.body.allowAllotmentOverride,
+    })
+    if (block) return respondRoomBlocked(res, block)
 
     // Смену определяем ДО транзакции: ensureCurrentShift может создать строку сам,
     // и внутри транзакции это было бы лишней записью в общий счётчик.
@@ -346,54 +375,18 @@ async function update(req, res, next) {
       return next(createError('Дата выезда должна быть позже даты заезда', 400))
     }
 
-    // Проверка пересечений (исключаем саму бронь)
-    const conflict = await findOverlap({
+    // Та же проверка, что при создании: сама бронь себе не мешает (excludeBookingId),
+    // а буфер считается по ИТОГОВЫМ меткам — тем, с которыми бронь останется после правки.
+    const blockU = await findRoomBlock({
       roomId: newRoomId,
       checkIn: newCheckIn,
       checkOut: newCheckOut,
       excludeBookingId: id,
-    })
-    if (conflict) {
-      return res.status(409).json({
-        error: 'Номер занят на выбранные даты',
-        conflict: {
-          bookingId: conflict.id,
-          guestName: conflict.guestName,
-          checkIn: conflict.checkIn,
-          checkOut: conflict.checkOut,
-        },
-      })
-    }
-
-    // Буфер (turnaround) от меток — учитываем итоговые метки брони
-    const effMapU = await getFlagEffectsMap()
-    const bufHitU = await findBufferConflict({
-      roomId: newRoomId,
-      checkIn: newCheckIn,
-      checkOut: newCheckOut,
       flags: flags ?? existing.flags ?? [],
-      excludeBookingId: id,
-    }, effMapU)
-    if (bufHitU) {
-      return res.status(409).json({
-        error: `Нужен зазор минимум ${bufHitU.required} дн. рядом с бронью «${bufHitU.booking.guestName}» (метка с буфером). Выберите другие даты или номер.`,
-      })
-    }
-
-    if (!req.body.allowAllotmentOverride) {
-      const allotHitU = await findAllotmentConflict({
-        roomId: newRoomId,
-        checkIn: newCheckIn,
-        checkOut: newCheckOut,
-        partnerId: req.body.partnerId !== undefined ? req.body.partnerId : existing.partnerId,
-      })
-      if (allotHitU) {
-        return res.status(409).json({
-          error: allotmentConflictMessage(allotHitU),
-          code: 'ALLOTMENT_CONFLICT',
-        })
-      }
-    }
+      partnerId: req.body.partnerId !== undefined ? req.body.partnerId : existing.partnerId,
+      allowAllotmentOverride: req.body.allowAllotmentOverride,
+    })
+    if (blockU) return respondRoomBlocked(res, blockU)
 
     // Пересобирать автоматические строки нужно только если изменились входы тарифа
     // (номер, даты, гости, скидка) или администратор явно нажал «Пересчитать».
@@ -649,52 +642,39 @@ async function move(req, res, next) {
       return next(createError('Тот же номер и та же дата — переезд не требуется', 400))
     }
 
-    // Same-day move — только меняем roomId, без сплита
+    // Same-day move — только меняем roomId, без сплита. Проверка и запись теперь
+    // в одной транзакции; раньше эта ветка обходилась вообще без неё.
+    // Честно про гонку: от двойного бронирования по-настоящему страхует
+    // exclusion-constraint booking_no_overlap (он проверяет и UPDATE тоже), а у
+    // буфера и квоты окно остаётся — при READ COMMITTED транзакция его не
+    // закрывает, только сокращает до одного соединения без пауз посередине.
     if (moveDateD.getTime() === existing.checkIn.getTime()) {
-      const conflict = await findOverlap({
-        roomId: parseInt(newRoomId),
-        checkIn: existing.checkIn.toISOString().slice(0, 10),
-        checkOut: existing.checkOut.toISOString().slice(0, 10),
-        excludeBookingId: id,
-      })
-      if (conflict) {
-        return next(createError(`Целевой номер занят (${conflict.guestName})`, 409))
-      }
-
-      const updated = await prisma.booking.update({
-        where: { id },
-        data: { roomId: parseInt(newRoomId) },
-        select: BOOKING_SELECT,
-      })
-
-      emitBookingEvent('booking:updated', { booking: updated })
-      return res.json({ data: { original: updated, created: null } })
-    }
-
-    // Сплит — проверяем доступность целевого номера для [moveDate, checkOut)
-    const conflict = await findOverlap({
-      roomId: parseInt(newRoomId),
-      checkIn: moveDate,
-      checkOut: existing.checkOut.toISOString().slice(0, 10),
-      excludeBookingId: null,
-    })
-    if (conflict) {
-      return next(createError(`Целевой номер занят (${conflict.guestName})`, 409))
-    }
-
-    if (!req.body.allowAllotmentOverride) {
-      const allotHitM = await findAllotmentConflict({
-        roomId: newRoomId,
-        checkIn: moveDateD,
-        checkOut: existing.checkOut,
-        partnerId: existing.partnerId,
-      })
-      if (allotHitM) {
-        return res.status(409).json({
-          error: allotmentConflictMessage(allotHitM),
-          code: 'ALLOTMENT_CONFLICT',
+      const outcome = await prisma.$transaction(async (tx) => {
+        const block = await findRoomBlock({
+          roomId: parseInt(newRoomId),
+          checkIn: existing.checkIn,
+          checkOut: existing.checkOut,
+          excludeBookingId: id,
+          // Метки и партнёр переезжают вместе с гостем — по ним и считаем
+          flags: existing.flags || [],
+          partnerId: existing.partnerId,
+          allowAllotmentOverride: req.body.allowAllotmentOverride,
+          client: tx,
         })
-      }
+        if (block) return { block }
+
+        return {
+          updated: await tx.booking.update({
+            where: { id },
+            data: { roomId: parseInt(newRoomId) },
+            select: BOOKING_SELECT,
+          }),
+        }
+      })
+      if (outcome.block) return respondMoveBlocked(res, outcome.block)
+
+      emitBookingEvent('booking:updated', { booking: outcome.updated })
+      return res.json({ data: { original: outcome.updated, created: null } })
     }
 
     // Деньги делим пропорционально ночам. Раньше вторая часть получала нули, а
@@ -713,6 +693,22 @@ async function move(req, res, next) {
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      // 0. Свободен ли целевой номер на [moveDate, checkOut). Проверка внутри той же
+      // транзакции, что и запись: раньше она шла отдельным запросом до неё.
+      // excludeBookingId НЕ ставим намеренно: если целевой номер совпадает с текущим,
+      // исходная бронь на этот период ещё активна и должна считаться помехой —
+      // «переезд в тот же номер» не операция, а ошибка ввода.
+      const block = await findRoomBlock({
+        roomId: parseInt(newRoomId),
+        checkIn: moveDateD,
+        checkOut: existing.checkOut,
+        flags: existing.flags || [],
+        partnerId: existing.partnerId,
+        allowAllotmentOverride: req.body.allowAllotmentOverride,
+        client: tx,
+      })
+      if (block) return { block }
+
       // 1. Закрыть оригинальную бронь датой переезда
       const updatedOriginal = await tx.booking.update({
         where: { id },
@@ -804,6 +800,11 @@ async function move(req, res, next) {
       return { original: updatedOriginal, created }
     })
 
+    // Отказ возвращаем из транзакции, а не бросаем: бросок откатил бы и то, чего
+    // не было (записей ещё нет), зато потерял бы `code: ALLOTMENT_CONFLICT` —
+    // errorHandler кладёт в тело только текст.
+    if (result.block) return respondMoveBlocked(res, result.block)
+
     // Клиент ждёт форму { booking } (как у остальных операций) — без обёртки падал с TypeError
     emitBookingEvent('booking:updated', { booking: result.original })
     emitBookingEvent('booking:created', { booking: result.created })
@@ -818,23 +819,59 @@ function appendNote(existing, addition) {
   return `${existing}\n${addition}`
 }
 
-// POST /api/bookings/check-availability — клиентская проверка пересечений без создания
+// POST /api/bookings/check-availability — «свободно ли» до сохранения.
+//
+// Считает РОВНО то же, что create: пересечение → буфер метки → квота партнёра.
+// Раньше здесь смотрели только пересечения — форма писала «номер свободен», а
+// сохранение отвечало 409 про буфер или квоту.
 async function checkAvailability(req, res, next) {
   try {
-    const { roomId, checkIn, checkOut, excludeBookingId } = req.body
+    const { roomId, checkIn, checkOut, excludeBookingId, flags, partnerId } = req.body
 
     if (!roomId || !checkIn || !checkOut) {
       return next(createError('roomId, checkIn, checkOut обязательны', 400))
     }
+    // Пустой период create отклоняет 400-й; здесь отвечаем 200, чтобы форма,
+    // которая дёргает проверку на каждый ввод даты, не ловила ошибку на полпути.
+    if (new Date(checkOut) <= new Date(checkIn)) {
+      return res.json({
+        available: false, conflict: null, reason: 'range',
+        message: 'Дата выезда должна быть позже даты заезда',
+      })
+    }
 
-    const conflict = await findOverlap({
-      roomId: parseInt(roomId),
+    const checked = await checkRoomsAvailability({
+      roomIds: [roomId],
       checkIn,
       checkOut,
       excludeBookingId: excludeBookingId ? parseInt(excludeBookingId) : null,
+      // Метки будущей брони важны для буфера: у метки бывает исключение
+      // («выезд до 17:00» не мешает соседу с «заезд после 17:00»). Форма их пока
+      // не присылает — тогда считаем по меткам соседа, как и раньше.
+      flags: Array.isArray(flags) ? flags.map(String) : [],
+      partnerId: partnerId ?? null,
     })
+    // Утилита возвращает Map по номерам; на нечисловой roomId (роут его не пропустит,
+    // но контроллер зовут и мимо роута) записи не будет — считаем номер свободным.
+    const hit = checked.get(parseInt(roomId))
+      ?? { available: true, reason: null, conflict: null, message: null }
 
-    res.json({ available: !conflict, conflict: conflict || null })
+    // `conflict` заполняем ТОЛЬКО прямым пересечением — как и раньше. Почему не всем:
+    //  - у квоты нет полей guestName/checkIn/checkOut, которые читает форма
+    //    (упала бы на conflict.checkIn.slice()), а главное — непустой conflict
+    //    блокирует кнопку «Сохранить», и подтвердить продажу поверх квоты стало бы
+    //    нечем: подтверждение приходит на 409 ALLOTMENT_CONFLICT при сохранении;
+    //  - буфер без меток будущей брони даёт ЛОЖНЫЕ срабатывания: «выезд до 17:00»
+    //    у соседа снимается меткой «заезд после 17:00» у новой брони, а форма метки
+    //    сюда пока не присылает. Заблокировать по нему сохранение значило бы
+    //    запретить бронь, которую create принимает.
+    // Причина и текст отданы отдельно (`reason`/`message`): по ним клиент покажет
+    // честную подсказку, когда начнёт присылать flags, — старая форма ответа цела.
+    const conflict = hit.reason === 'overlap'
+      ? { id: hit.conflict.bookingId, ...hit.conflict }
+      : null
+
+    res.json({ available: hit.available, conflict, reason: hit.reason, message: hit.message })
   } catch (err) {
     next(err)
   }

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
+import { useRoomFundStore } from '../../store/useRoomFundStore'
 import { fetchCategories } from '../../api/rooms'
 import type { Category } from '../../types'
 import { DatePicker } from '../ui/DatePicker'
@@ -22,8 +23,19 @@ interface Draft {
 
 export const Filters: React.FC<Props> = ({ open }) => {
   const { filters, guestSearch, data, setFilter, setGuestSearch, applyFilters, jumpToDate, hiddenCategoryIds, toggleCategoryVisible } = useGridStore()
-  const { filterSettings, roomFund } = useSettingsStore()
+  const { filterSettings } = useSettingsStore()
+  // Справочник — с сервера. Панель фильтров живёт вместе с шахматкой, то есть
+  // монтируется сразу после входа: отсюда же стартует загрузка справочника и
+  // разовый перенос старого localStorage в базу (см. useRoomFundStore).
+  const { capacities, features, ensureLoaded } = useRoomFundStore()
   const [categories, setCategories] = useState<Category[]>([])
+
+  useEffect(() => { ensureLoaded() }, [ensureLoaded])
+
+  // В выпадающих списках только активные записи: скрытую вместимость незачем
+  // предлагать для фильтрации.
+  const capacityOptions = capacities.filter(c => c.isActive)
+  const featureOptions = features.filter(f => f.isActive)
 
   // Draft (локальные несохранённые значения)
   const [draft, setDraft] = useState<Draft>({
@@ -197,20 +209,22 @@ export const Filters: React.FC<Props> = ({ open }) => {
           </Field>
         )}
 
-        {filterSettings.showCapacity && roomFund.capacities.length > 0 && (
+        {filterSettings.showCapacity && capacityOptions.length > 0 && (
           <Field label="Вместимость">
+            {/* value — КОД: сервер фильтрует по Room.capacity, где лежит именно он. */}
             <select value={draft.capacity} onChange={e => setDraft({ ...draft, capacity: e.target.value })} style={inputStyle}>
               <option value="">Любая</option>
-              {roomFund.capacities.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}
+              {capacityOptions.map(c => <option key={c.id} value={c.code}>{c.label}</option>)}
             </select>
           </Field>
         )}
 
-        {filterSettings.showFeatures && roomFund.features.length > 0 && (
+        {filterSettings.showFeatures && featureOptions.length > 0 && (
           <Field label="Особенности">
+            {/* value — НАЗВАНИЕ: в Room.features лежат названия, не коды. */}
             <select value={draft.features} onChange={e => setDraft({ ...draft, features: e.target.value })} style={inputStyle}>
               <option value="">Любые</option>
-              {roomFund.features.map(f => <option key={f.id} value={f.name}>{f.emoji} {f.name}</option>)}
+              {featureOptions.map(f => <option key={f.id} value={f.name}>{f.emoji ?? '✦'} {f.name}</option>)}
             </select>
           </Field>
         )}

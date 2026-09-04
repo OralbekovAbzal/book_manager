@@ -15,7 +15,7 @@ const METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 // в самой записи Payment.
 const TRACKED_PREFIXES = [
   '/bookings', '/users', '/rooms', '/categories', '/partners', '/allotments',
-  '/rates', '/hotel', '/system/backup', '/reports', '/payments',
+  '/rates', '/hotel', '/system/backup', '/reports', '/payments', '/room-fund',
 ]
 // POST-запросы, которые ничего не меняют
 const IGNORED = new Set(['/bookings/check-availability'])

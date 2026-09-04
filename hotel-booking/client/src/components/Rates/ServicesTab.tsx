@@ -33,6 +33,15 @@ const UNIT_HINTS: Record<ServiceUnit, string> = {
   per_booking: 'Поздний выезд, уборка — начисляется один раз.',
 }
 
+/**
+ * Ноль — это НЕ «бесплатно», а незаполненный тариф: генератор начислений
+ * (`server/src/utils/charges.js`) строку с нулевой ценой не создаёт вовсе.
+ * Обед и ужин приходят из засева именно нулевыми — цены у каждого отеля свои.
+ */
+const hasPrice = (s: Service) => s.price > 0
+/** Ни взрослой цены, ни детской — в брони такая услуга не добавит ничего. */
+const isUnpriced = (s: Service) => !hasPrice(s) && !(s.childPrice != null && s.childPrice > 0)
+
 interface FormState {
   name: string
   price: string
@@ -148,6 +157,9 @@ export const ServicesTab: React.FC<Props> = ({ kind, onToast }) => {
     catch { onToast('Не удалось создать набор') }
   }
 
+  // Выключенные не считаем: их в брони и так не выбрать.
+  const unpricedNames = services.filter(s => s.isActive && isUnpriced(s)).map(s => s.name)
+
   if (loading) {
     return <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-faint)' }}>Загрузка…</div>
   }
@@ -204,8 +216,14 @@ export const ServicesTab: React.FC<Props> = ({ kind, onToast }) => {
                 </div>
 
                 <div style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
-                  <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>
-                    {s.price.toLocaleString('ru-RU')} ₸
+                  {/* Ноль — это не «бесплатно», а незаполненный тариф: такая услуга
+                      в брони ничего не добавит к сумме. Пишем это словами, иначе
+                      «0 ₸» выглядит как осознанная цена. */}
+                  <div style={{
+                    fontSize: '0.9rem', fontWeight: 600,
+                    color: hasPrice(s) ? 'var(--text)' : 'var(--s-out)',
+                  }}>
+                    {hasPrice(s) ? `${s.price.toLocaleString('ru-RU')} ₸` : 'цена не задана'}
                   </div>
                   <div style={{ fontSize: '0.76rem', color: 'var(--text-faint)' }}>
                     {s.childPrice != null ? `дети ${s.childPrice.toLocaleString('ru-RU')} ₸` : 'дети как взрослые'}
@@ -218,6 +236,20 @@ export const ServicesTab: React.FC<Props> = ({ kind, onToast }) => {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+
+        {/* Услуга без цены выглядит рабочей, но к сумме брони не добавляет ничего:
+            администратор включает «Полный пансион», итог не меняется — и непонятно
+            почему. Говорим об этом здесь, где цену и задают. */}
+        {unpricedNames.length > 0 && (
+          <div style={{
+            marginTop: 10, padding: '9px 12px', borderRadius: 9,
+            border: '1px solid var(--border-subtle)', background: 'var(--surface-2)',
+            fontSize: '0.82rem', color: 'var(--text-muted)', lineHeight: 1.45,
+          }}>
+            Цена не задана: {unpricedNames.join(', ')}. В брони такие позиции к сумме
+            ничего не добавляют — откройте «Изменить» и проставьте цену.
           </div>
         )}
       </div>

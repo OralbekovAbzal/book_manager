@@ -73,6 +73,11 @@ const availabilityRules = [
   body('checkIn').isDate().withMessage('checkIn обязателен (YYYY-MM-DD)'),
   body('checkOut').isDate().withMessage('checkOut обязателен (YYYY-MM-DD)'),
   body('excludeBookingId').optional({ nullable: true }).isInt().withMessage('excludeBookingId должен быть целым числом'),
+  // Проверка считает то же, что сохранение, а буфер метки и квота зависят от меток
+  // и партнёра будущей брони. Поля необязательные: без них ответ просто грубее.
+  body('flags').optional().isArray().withMessage('flags должен быть массивом строк'),
+  body('flags.*').isString().isLength({ max: 60 }).withMessage('Метка — строка до 60 символов'),
+  body('partnerId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('partnerId должен быть целым числом'),
 ]
 
 const listRules = [

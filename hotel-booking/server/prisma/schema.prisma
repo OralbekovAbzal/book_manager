@@ -35,6 +35,93 @@ model Category {
   rates       RatePrice[]
 }
 
+// ─── Справочники номерного фонда: корпуса, особенности, вместимости ──────────
+//
+// Раньше все три жили в localStorage клиента (`RoomFundConfig` в
+// `client/src/store/useSettingsStore.ts`). На двух рабочих местах они молча
+// разъезжались: администратор завёл «Корпус Б» на одном ноуте — на втором его
+// нет, и номер показывается без корпуса. Тот же переезд, что уже сделан для
+// меток броней (`BookingFlag`) и тарифов.
+//
+// ВАЖНО — СВЯЗЬ С `Room` НАМЕРЕННО НЕ ВНЕШНИЙ КЛЮЧ.
+// `Room` этой правкой не меняется и хранит по-прежнему СТРОКИ:
+//   `Room.building` — НАЗВАНИЕ корпуса        → сходится с `Building.name`
+//   `Room.features` — массив НАЗВАНИЙ         → сходится с `RoomFeature.name`
+//   `Room.capacity` — КОД вместимости         → сходится с `RoomCapacity.code`
+// (обрати внимание на асимметрию: вместимость связана по коду, корпус и
+// особенность — по названию. Так их писал клиент, и менять это здесь значило бы
+// переписать данные всех номеров.)
+//
+// Почему без FK: переезд на внешние ключи — это миграция данных по всем номерам
+// плюс правка сетки, фильтров и подбора номеров. Отдельная задача. Поступаем как
+// с `BookingFlag`, где `Booking.flags` тоже остался `String[]`.
+//
+// ЧЕМ ЗА ЭТО ПЛАТИМ: переименование корпуса или особенности само по себе разъехало
+// БЫ связь с номерами — они остались бы со старым названием и выпали из фильтра.
+// Поэтому переименование правит не только справочник: `roomFundController`
+// в ТОЙ ЖЕ транзакции переписывает и номера (`Room.building` — `updateMany`,
+// `Room.features` — `array_replace`) и возвращает `renamedRooms`. Правя эти модели
+// или заводя ещё один способ переименования, помни: справочник и `Room` обязаны
+// меняться вместе, иначе номера потеряют корпус или особенность молча.
+//
+// Удаление: не физическое, а `isActive = false` («скрыть/показать» из NOTES).
+// Особенность, которая стоит у живых номеров, удалять нельзя — её прячут.
+
+/// Корпус отеля. `name` — ключ связи с `Room.building`, поэтому уникален.
+/// `roomController` пишет `Room.building` в ВЕРХНЕМ регистре
+/// (`building.trim().toUpperCase()`), поэтому и здесь имя приводится к верхнему
+/// регистру: иначе фильтр «по корпусу» (точное сравнение строк) не найдёт номера.
+model Building {
+  id          Int      @id @default(autoincrement())
+  /// Стабильный идентификатор. Связь с номерами идёт НЕ по нему, а по `name`;
+  /// код нужен, чтобы переименование не ломало ссылки в настройках и импорте.
+  code        String   @unique
+  name        String   @unique
+  description String?
+  order       Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([order])
+}
+
+/// Особенность номера (балкон, кондиционер, тип кровати).
+/// `name` — ключ связи с `Room.features[]`, поэтому уникален.
+/// На него же ссылается эффект метки `requireFeature` (см. `BookingFlag.effects`).
+model RoomFeature {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  name      String   @unique
+  /// Значок для сетки и фильтров. null — клиент подставит свой запасной.
+  emoji     String?
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
+/// Тип вместимости номера («Двухместный» = 2 гостя).
+/// Здесь ключ связи — `code`: именно код лежит в `Room.capacity`
+/// ('single', 'double', …), поэтому переименование label безопасно —
+/// в отличие от корпусов и особенностей.
+model RoomCapacity {
+  id        Int      @id @default(autoincrement())
+  code      String   @unique
+  label     String
+  /// Сколько гостей помещается. 0 — значение неизвестно (код пришёл из данных,
+  /// а его расшифровка осталась в localStorage машины, где его завели).
+  value     Int      @default(0)
+  order     Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
 // Метки броней + их эффекты для алгоритма. Источник истины (раньше — localStorage).
 // `code` — стабильный идентификатор, который хранится в Booking.flags[].
 // `effects` — JSON { bufferAfter, bufferBefore, pin }.

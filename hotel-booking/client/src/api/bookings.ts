@@ -92,11 +92,24 @@ export interface MoveResult {
   created: Booking | null  // null если same-day move (без сплита)
 }
 
+/**
+ * Переезд гостя в другой номер.
+ *
+ * `allowAllotmentOverride` — осознанная продажа номера из квоты партнёра, тот же
+ * флаг, что и при сохранении брони. Без него сервер отвечает
+ * `409 { code: 'ALLOTMENT_CONFLICT' }`, и квота блокирует переезд намертво:
+ * обойти её из окна переезда было нечем.
+ */
 export async function moveBooking(
   id: number,
   newRoomId: number,
   moveDate: string,
+  allowAllotmentOverride = false,
 ): Promise<MoveResult> {
-  const { data } = await api.post(`/bookings/${id}/move`, { newRoomId, moveDate })
+  const { data } = await api.post(`/bookings/${id}/move`, {
+    newRoomId,
+    moveDate,
+    ...(allowAllotmentOverride ? { allowAllotmentOverride: true } : {}),
+  })
   return data.data
 }

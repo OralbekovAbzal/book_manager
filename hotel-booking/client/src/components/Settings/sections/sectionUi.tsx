@@ -77,3 +77,89 @@ export const dashedBtn: React.CSSProperties = {
   borderRadius: 8, fontSize: '0.86rem', color: 'var(--text-muted)', cursor: 'pointer', fontWeight: 600,
   fontFamily: 'inherit', marginTop: 4,
 }
+
+// ─── Общее для справочников номерного фонда ───────────────────────────────────
+// Корпуса, особенности и вместимости живут в БД и ведут себя одинаково:
+// «удалить» — это скрыть, у записи виден счётчик «стоит у N номеров», а
+// переименование корпуса/особенности переписывает и сами номера.
+
+// Счётчики номеров пишем как «Номеров с этим корпусом: 51», а не «стоит у 51
+// номера»: тексты здесь разных падежей («обновлён 51 номер», «обновит 23
+// номера», «у 17 номеров»), и одна функция склонения всё равно где-нибудь
+// соврёт. Число после двоеточия читается нормально и не врёт никогда.
+
+/** Результат последнего действия: «переименовано, обновлён 51 номер» и т.п. */
+export const StatusNote: React.FC<{ kind: 'ok' | 'err'; children: React.ReactNode }> = ({ kind, children }) => (
+  <div style={{
+    padding: '9px 13px', borderRadius: 8, fontSize: '0.86rem', lineHeight: 1.45,
+    background: kind === 'ok' ? 'var(--accent-bg)' : 'var(--surface-2)',
+    color: kind === 'ok' ? 'var(--accent-text)' : 'var(--s-overdue)',
+    border: `1px solid ${kind === 'ok' ? 'var(--accent)' : 'var(--s-overdue)'}`,
+    marginBottom: 12,
+  }}>{children}</div>
+)
+
+/** Справочник общий для всех рабочих мест — сотруднику он доступен только на чтение. */
+export const ReadOnlyNote: React.FC<{ children?: React.ReactNode }> = ({ children }) => (
+  <div style={{
+    padding: '9px 13px', borderRadius: 8, fontSize: '0.86rem', lineHeight: 1.45,
+    background: 'var(--surface-2)', color: 'var(--text-faint)',
+    border: '1px solid var(--border-subtle)', marginBottom: 12,
+  }}>
+    {children ?? 'Справочник общий для всех рабочих мест — менять его могут только администраторы.'}
+  </div>
+)
+
+const EYE_OPEN = <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></>
+const EYE_OFF = <path d="M9.9 4.2A10 10 0 0 1 12 4c6.5 0 10 7 10 7a13 13 0 0 1-2.3 3M6.6 6.6A13 13 0 0 0 2 11s3.5 7 10 7a10 10 0 0 0 3.4-.6M2 2l20 20" />
+
+/**
+ * Скрыть / показать запись справочника. Именно скрытие, а не удаление:
+ * связь с номерами держится строкой (название корпуса, код вместимости),
+ * и удалённая запись не исчезла бы из номеров — просто перестала бы
+ * расшифровываться.
+ */
+export const VisibilityButton: React.FC<{
+  hidden: boolean
+  onClick: () => void
+  disabled?: boolean
+  compact?: boolean
+}> = ({ hidden, onClick, disabled, compact }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    disabled={disabled}
+    title={hidden ? 'Показывать в списках' : 'Скрыть из списков (номера не изменятся)'}
+    style={{
+      display: 'flex', alignItems: 'center', gap: 6, height: compact ? 24 : 30,
+      padding: compact ? '0 7px' : '0 11px', borderRadius: 7,
+      cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit',
+      fontSize: compact ? '0.75rem' : '0.8rem', fontWeight: 500,
+      border: `1px solid ${hidden ? 'var(--border)' : 'var(--accent)'}`,
+      background: hidden ? 'transparent' : 'var(--accent-bg)',
+      color: hidden ? 'var(--text-faint)' : 'var(--accent-text)',
+      opacity: disabled ? 0.5 : 1, whiteSpace: 'nowrap',
+    }}
+  >
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      {hidden ? EYE_OFF : EYE_OPEN}
+    </svg>
+    {/* Формулировки бесполые: одна кнопка на корпус, особенность и вместимость. */}
+    {hidden ? 'Скрыто' : 'В списках'}
+  </button>
+)
+
+/**
+ * Удалить насовсем. Показывается только у записи, которой не пользуется ни один
+ * номер: она нужна, чтобы убрать опечатку, а не копить мусор в скрытых.
+ */
+export const PurgeButton: React.FC<{ onClick: () => void; disabled?: boolean }> = ({ onClick, disabled }) => (
+  <button
+    type="button"
+    onClick={onClick}
+    disabled={disabled}
+    title="Удалить насовсем — этой записью не пользуется ни один номер"
+    style={{ ...iconBtn, color: 'var(--s-overdue)', opacity: disabled ? 0.5 : 1 }}
+  >✕</button>
+)

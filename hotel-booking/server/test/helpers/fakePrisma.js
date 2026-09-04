@@ -130,6 +130,47 @@ function makeModel(name, rows, calls) {
       rows.push(rec)
       return project(rec, args)
     },
+    async createMany(args) {
+      calls.push({ model: name, op: 'createMany', args })
+      const list = Array.isArray(args.data) ? args.data : [args.data]
+      let count = 0
+      for (const data of list) {
+        // skipDuplicates у Prisma пропускает строки, нарушающие УНИКАЛЬНЫЕ поля.
+        // В справочниках номерного фонда уникальны id, code и name — их и проверяем.
+        const dup = rows.some((r) =>
+          (data.id !== undefined && r.id === data.id) ||
+          (data.code !== undefined && r.code === data.code) ||
+          (data.name !== undefined && r.name === data.name))
+        if (dup) {
+          if (args.skipDuplicates) continue
+          const e = new Error('Unique constraint failed'); e.code = 'P2002'; throw e
+        }
+        rows.push({ id: ++seq, ...data })
+        count++
+      }
+      return { count }
+    },
+    async updateMany(args) {
+      calls.push({ model: name, op: 'updateMany', args })
+      const hits = rows.filter((r) => matchWhere(r, args.where))
+      for (const r of hits) Object.assign(r, args.data)
+      return { count: hits.length }
+    },
+    async delete(args) {
+      calls.push({ model: name, op: 'delete', args })
+      const i = rows.findIndex((r) => matchWhere(r, args.where))
+      if (i === -1) { const e = new Error('Record to delete does not exist'); e.code = 'P2025'; throw e }
+      const [rec] = rows.splice(i, 1)
+      return project(rec, args)
+    },
+    async update(args) {
+      calls.push({ model: name, op: 'update', args })
+      const rec = rows.find((r) => matchWhere(r, args.where))
+      // Prisma на update несуществующей записи бросает P2025 — тест должен видеть то же
+      if (!rec) { const e = new Error('Record to update not found'); e.code = 'P2025'; throw e }
+      Object.assign(rec, args.data)
+      return project(rec, args)
+    },
     get rows() { return rows },
   }
 }
@@ -143,6 +184,12 @@ export function createFakePrisma(data = {}) {
   const prisma = {}
   for (const [model, rows] of Object.entries(data)) {
     prisma[model] = makeModel(model, rows.map((r) => ({ ...r })), calls)
+  }
+  // Транзакции здесь без отката: проверяем ПОРЯДОК (проверка доступности стоит
+  // до записи и получает тот же клиент), а не поведение Postgres при сбое.
+  prisma.$transaction = async (arg) => {
+    calls.push({ model: '$transaction', op: typeof arg === 'function' ? 'callback' : 'batch' })
+    return typeof arg === 'function' ? arg(prisma) : Promise.all(arg)
   }
   return { prisma, calls }
 }

@@ -3,6 +3,7 @@ import { differenceInCalendarDays, parseISO } from 'date-fns'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
 import { fetchBooking } from '../../api/bookings'
+import { BookingMoneyBar } from '../Payments/BookingMoneyBar'
 import type { Booking } from '../../types'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -21,7 +22,6 @@ const STATUS_COLORS: Record<string, string> = {
   NO_SHOW:     '#b45309',
 }
 
-const fmtMoney = (n?: number) => (n != null ? n.toLocaleString('ru-RU') + ' ₸' : '—')
 const fmtDate = (iso?: string) => {
   if (!iso) return '—'
   return new Date(iso.slice(0, 10) + 'T12:00:00Z').toLocaleDateString('ru-RU', {
@@ -96,7 +96,8 @@ export const BookingViewModal: React.FC = () => {
     return flags.map(f => map.get(f) ?? f)
   })()
 
-  const debt = (info.totalAmount ?? 0) - (info.paidAmount ?? 0)
+  // Блокировка номера («Ремонт») — не бронь: денег по ней не бывает.
+  const isMaintenance = booking.source === 'ремонт'
 
   return (
     <Overlay onClose={closeModal}>
@@ -157,12 +158,21 @@ export const BookingViewModal: React.FC = () => {
           </Section>
         )}
 
-        {(info.totalAmount != null || info.paidAmount != null) && (
+        {/* Деньги берём из кассы, а не из полей брони: «начислено» — это сумма строк
+            начислений, «принято» — журнал платежей. `Booking.paidAmount` их лишь
+            кэширует. Отсюда же принимается оплата: гость платит, стоя у стойки,
+            и уходить ради этого в раздел «Касса» не должен. */}
+        {!isMaintenance && (
           <Section title="Оплата">
-            <Row label="Сумма" value={fmtMoney(info.totalAmount)} />
-            <Row label="Оплачено" value={fmtMoney(info.paidAmount)} />
             {(info.discountPercent ?? 0) > 0 && <Row label="Скидка" value={`${info.discountPercent}%`} />}
-            {debt > 0 && <Row label="Задолженность" value={fmtMoney(debt)} valueColor="#dc2626" />}
+            <BookingMoneyBar
+              bookingId={booking.id}
+              guestName={booking.guestName}
+              subtitle={[
+                full?.room?.number ? `Номер ${full.room.number}` : '',
+                `${fmtDate(booking.checkIn)} — ${fmtDate(booking.checkOut)}`,
+              ].filter(Boolean).join(' · ')}
+            />
           </Section>
         )}
 

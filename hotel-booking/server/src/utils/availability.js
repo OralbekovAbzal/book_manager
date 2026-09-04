@@ -6,22 +6,24 @@ const DAY = 86400000
 const ACTIVE = ['CONFIRMED', 'CHECKED_IN']
 
 /**
- * ЕДИНОЕ определение «номер свободен» для экранов подбора.
+ * ЕДИНОЕ определение «номер свободен» — для ВСЕХ, кто про это спрашивает.
  *
- * Раньше «свободно» считалось тремя разными способами: `roomController.availability`
- * и `occupancyController.roomAvailability` смотрели только на прямые пересечения,
- * а `bookingController.create` — ещё и на буферы меток, и на квоты партнёров.
- * Из-за этого подбор красил номер зелёным, а сохранение возвращало 409.
+ * Раньше «свободно» считалось четырьмя разными способами: `roomController.availability`,
+ * `occupancyController.roomAvailability` и `POST /bookings/check-availability` смотрели
+ * только на прямые пересечения, а `bookingController.create` — ещё и на буферы меток,
+ * и на квоты партнёров. Из-за этого подбор красил номер зелёным, а сохранение
+ * возвращало 409.
  *
- * Здесь повторены ровно те же три проверки и в том же порядке, что в create:
+ * Три проверки, строго в этом порядке:
  *   1) прямое пересечение (даты полуоткрытые: выезд в день заезда — не пересечение);
  *   2) буфер меток (turnaround) у соседей и у самой брони;
  *   3) квота партнёра (не жёсткий запрет — при создании снимается подтверждением
  *      allowAllotmentOverride, но показывать такой номер «свободным» нельзя).
  *
- * ВАЖНО: `bookingController` пока зовёт свои проверки напрямую (он у другого
- * агента) — это копия его логики, а не общий вызов. Следующий шаг — перевести
- * create/update/move на эту утилиту, иначе две реализации снова разъедутся.
+ * Теперь это ЕДИНСТВЕННАЯ реализация правила: `bookingController` (create, update,
+ * move, check-availability) зовёт её же, а не свою копию — расходиться нечему.
+ * Контроллер отличается только тем, ЧТО делает с ответом: подбор красит номер,
+ * сохранение отдаёт 409, квоту снимает allowAllotmentOverride.
  *
  * Дешевизна: на весь список номеров ровно ДВА запроса — брони (одним окном по
  * датам) и квоты. Раньше проверка буфера читала все активные брони номера,
@@ -42,10 +44,13 @@ function toUTC(value) {
  * @param {number|null} [p.excludeBookingId] редактируемая бронь — сама себе не мешает
  * @param {string[]} [p.flags]        метки БУДУЩЕЙ брони (нужны для буферов и исключений)
  * @param {number|null} [p.partnerId] бронь партнёра в его же квоту конфликтом не считается
+ * @param {object} [p.client]         клиент транзакции (`tx`), если проверка идёт
+ *        вместе с записью — тогда чтение броней и запись живут в одной единице работы
  * @returns {Promise<Map<number, {available: boolean, reason: string|null, conflict: object|null, message: string|null}>>}
  */
 async function checkRoomsAvailability({
   roomIds, checkIn, checkOut, excludeBookingId = null, flags = [], partnerId = null,
+  client = prisma,
 }) {
   const from = toUTC(checkIn)
   const to = toUTC(checkOut)
@@ -69,7 +74,7 @@ async function checkRoomsAvailability({
   }
   if (excludeBookingId) where.id = { not: parseInt(excludeBookingId) }
 
-  const neighbors = await prisma.booking.findMany({
+  const neighbors = await client.booking.findMany({
     where,
     select: { id: true, roomId: true, guestName: true, checkIn: true, checkOut: true, flags: true },
   })
@@ -106,7 +111,10 @@ async function checkRoomsAvailability({
     }
   }
 
-  // 3. Квоты партнёров — только для тех номеров, что ещё считаются свободными
+  // 3. Квоты партнёров — только для тех номеров, что ещё считаются свободными.
+  // Квоты и словарь меток читаются обычным клиентом даже внутри транзакции: их правят
+  // из других разделов и не одновременно с бронированием, а тащить `client` в
+  // allotment.js/flagEffects.js ради этого — трогать чужие модули без выгоды.
   const stillFree = ids.filter((id) => result.get(id).available)
   if (stillFree.length) {
     const quota = await findAllotmentConflictsBulk({ roomIds: stillFree, checkIn: from, checkOut: to, partnerId })

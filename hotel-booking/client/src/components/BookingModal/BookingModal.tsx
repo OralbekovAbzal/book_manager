@@ -22,6 +22,9 @@ import { fetchHotel } from '../../api/hotel'
 import { calculate, buildCalcKey, nightsOf } from '../../utils/calculator'
 import type { CalcInput, CalcResult, RateContext, BreakdownLine } from '../../utils/calculator'
 import { ChargesPanel } from './ChargesPanel'
+import { AllotmentConfirm } from './AllotmentConfirm'
+import { BookingMoneyBar } from '../Payments/BookingMoneyBar'
+import type { BookingMoneyBarHandle } from '../Payments/BookingMoneyBar'
 import {
   defaultLinks, linksFromBooking, linksKey, linksToPayload, newLink, isPerPerson,
   servicePreviewLines, syncLinksWithGuests,
@@ -256,6 +259,26 @@ const CalcSection: React.FC<{ title: string; defaultOpen?: boolean; badge?: numb
 
 const fmt = (n: number) => n.toLocaleString('ru-RU') + ' ₸'
 
+/**
+ * Кнопка, выглядящая ссылкой. Объявлена ЗДЕСЬ, до компонента: константа ниже
+ * компонента падает при горячей перезагрузке с «is not defined» (мёртвая зона).
+ */
+const linkBtnStyle: React.CSSProperties = {
+  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+  color: 'var(--accent-text)', fontFamily: 'inherit', fontSize: 'inherit',
+  textDecoration: 'underline',
+}
+
+/**
+ * 'YYYY-MM-DD' → 'дд.мм.гггг'. Режем строку, а не Date: у `@db.Date` полночь по UTC,
+ * и любой разбор в местную зону сдвинул бы дату на день назад.
+ */
+const fmtDay = (iso?: string) => {
+  if (!iso || iso.length < 10) return iso ?? ''
+  const [y, m, d] = iso.slice(0, 10).split('-')
+  return `${d}.${m}.${y}`
+}
+
 // Сохранённые суммы брони (edit без пересчёта). totalAmount/prepaidAmount могут отсутствовать,
 // если полную версию с сервера загрузить не удалось.
 interface SavedTotals {
@@ -273,18 +296,48 @@ interface ResultCardProps {
   saved?: SavedTotals | null   // edit: показать сохранённые суммы вместо расчёта
   onRecalc?: () => void        // кнопка «Пересчитать по тарифу»
   willRecalc?: boolean         // edit: итог уйдёт на сервер при сохранении
+  /** Выбранные услуги без цены — в счёт они не попали, и это надо объяснить */
+  unpricedServices?: string[]
+}
+
+/**
+ * Услуга с нулевой ценой строки начисления не порождает (ноль — это незаполненный
+ * тариф, а не «бесплатно»). Без пояснения это выглядит поломкой: включили
+ * «Полный пансион», а итог не изменился.
+ */
+const UnpricedNote: React.FC<{
+  names?: string[]
+  /** Ветка «нет цен в календаре» уже сказала, где их заполняют — не повторяемся. */
+  hideWhere?: boolean
+}> = ({ names, hideWhere }) => {
+  if (!names || names.length === 0) return null
+  return (
+    <div style={{
+      marginTop: 8, padding: '7px 10px', borderRadius: 8, textAlign: 'left',
+      background: 'var(--surface-2)', color: 'var(--text-muted)',
+      fontSize: '0.8rem', lineHeight: 1.4,
+    }}>
+      Цена не задана: {names.join(', ')} — к сумме не добавлено.
+      {!hideWhere && (
+        <div style={{ fontSize: '0.76rem', color: 'var(--text-faint)', marginTop: 2 }}>
+          Цены услуг заполняются в разделе «Тарифы и наличие».
+        </div>
+      )}
+    </div>
+  )
 }
 
 const resultRowStyle: React.CSSProperties = {
-  display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280', marginBottom: 4,
+  display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)', marginBottom: 4,
 }
 
 const ResultCard: React.FC<ResultCardProps> = ({
   result, discountPercent, prepaymentPercent, categoryName, loading, saved, onRecalc, willRecalc,
+  unpricedServices,
 }) => {
   if (loading) {
     return (
-      <div style={{ textAlign: 'center', color: '#9ca3af', fontSize: '1rem', padding: '12px 0' }}>
+      <div style={{ textAlign: 'center', color: 'var(--text-faint)', fontSize: '1rem', padding: '12px 0' }}>
         Загрузка…
       </div>
     )
@@ -296,14 +349,14 @@ const ResultCard: React.FC<ResultCardProps> = ({
     const remaining = saved.totalAmount != null ? saved.totalAmount - saved.paidAmount : undefined
     return (
       <div>
-        <div style={{ fontSize: '0.8rem', color: '#9ca3af', marginBottom: 6 }}>Сохранённая сумма брони</div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: '#111827', marginBottom: 6 }}>
+        <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', marginBottom: 6 }}>Сохранённая сумма брони</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>
           <span>Итого</span>
           <span style={{ color: '#6366f1' }}>{fmtOpt(saved.totalAmount)}</span>
         </div>
         <div style={resultRowStyle}>
           <span>Предоплата</span>
-          <span style={{ color: '#059669', fontWeight: 600 }}>{fmtOpt(saved.prepaidAmount)}</span>
+          <span style={{ color: 'var(--s-in)', fontWeight: 600 }}>{fmtOpt(saved.prepaidAmount)}</span>
         </div>
         <div style={resultRowStyle}>
           <span>Оплачено</span>
@@ -311,9 +364,10 @@ const ResultCard: React.FC<ResultCardProps> = ({
         </div>
         <div style={{ ...resultRowStyle, marginBottom: 10 }}>
           <span>Остаток</span>
-          <span style={{ color: '#dc2626', fontWeight: 600 }}>{fmtOpt(remaining)}</span>
+          <span style={{ color: 'var(--s-overdue)', fontWeight: 600 }}>{fmtOpt(remaining)}</span>
         </div>
-        <button type="button" onClick={onRecalc} style={{ ...cancelBtnStyle, width: '100%', fontSize: '0.9rem' }}>
+        <UnpricedNote names={unpricedServices} />
+        <button type="button" onClick={onRecalc} style={{ ...cancelBtnStyle, width: '100%', fontSize: '0.9rem', marginTop: 8 }}>
           Пересчитать по тарифу
         </button>
       </div>
@@ -329,16 +383,17 @@ const ResultCard: React.FC<ResultCardProps> = ({
       .filter(l => l.kind !== 'stay')
       .reduce((sum, l) => sum + l.amount, 0)
     return (
-      <div style={{ textAlign: 'center', color: '#b45309', fontSize: '0.95rem', padding: '12px 0' }}>
+      <div style={{ textAlign: 'center', color: 'var(--s-out)', fontSize: '0.95rem', padding: '12px 0' }}>
         Для категории «{categoryName}» на эти даты нет цен в календаре — проживание не рассчитано.
-        <div style={{ fontSize: '0.82rem', color: '#9ca3af', marginTop: 4 }}>
+        <div style={{ fontSize: '0.82rem', color: 'var(--text-faint)', marginTop: 4 }}>
           Цены заполняются в разделе «Тарифы и наличие».
         </div>
         {svcTotal > 0 && (
-          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #e5e7eb', color: '#374151', fontSize: '0.9rem' }}>
+          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border-subtle)', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
             Питание и услуги начислятся: <strong>{fmt(svcTotal)}</strong>
           </div>
         )}
+        <UnpricedNote names={unpricedServices} hideWhere />
       </div>
     )
   }
@@ -346,7 +401,7 @@ const ResultCard: React.FC<ResultCardProps> = ({
   const hasGuests = result.nights > 0 && result.total !== 0
   if (!hasGuests) {
     return (
-      <div style={{ textAlign: 'center', color: '#9ca3af', fontSize: '1rem', padding: '12px 0' }}>
+      <div style={{ textAlign: 'center', color: 'var(--text-faint)', fontSize: '1rem', padding: '12px 0' }}>
         Нет данных для расчёта
       </div>
     )
@@ -364,7 +419,7 @@ const ResultCard: React.FC<ResultCardProps> = ({
         </div>
       )}
       {result.breakdown.map((line, i) => (
-        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: line.kind === 'stay' ? '#374151' : '#6b7280', marginBottom: 4 }}>
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: line.kind === 'stay' ? 'var(--text)' : 'var(--text-faint)', marginBottom: 4 }}>
           <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={line.label}>
             {line.label}
             {line.kind === 'stay'
@@ -376,33 +431,34 @@ const ResultCard: React.FC<ResultCardProps> = ({
           <span style={{ whiteSpace: 'nowrap' }}>{fmt(line.amount)}</span>
         </div>
       ))}
-      <div style={{ borderTop: '1px solid #e5e7eb', marginTop: 8, paddingTop: 8 }}>
+      <div style={{ borderTop: '1px solid var(--border-subtle)', marginTop: 8, paddingTop: 8 }}>
         {discountPercent > 0 && (
           <>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280', marginBottom: 4 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)', marginBottom: 4 }}>
               <span>Итого (до скидки)</span>
               <span>{fmt(result.total)}</span>
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#d97706', marginBottom: 4 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--s-out)', marginBottom: 4 }}>
               <span>Скидка ({discountPercent}%)</span>
               <span>−{fmt(result.total - result.totalAfterDiscount)}</span>
             </div>
           </>
         )}
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: '#111827', marginBottom: 6 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>
           <span>Итого{discountPercent > 0 ? ' со скидкой' : ''}</span>
           <span style={{ color: '#6366f1' }}>{fmt(result.totalAfterDiscount)}</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280', marginBottom: 4 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)', marginBottom: 4 }}>
           <span>Предоплата ({prepaymentPercent}%)</span>
-          <span style={{ color: '#059669', fontWeight: 600 }}>{fmt(result.prepaidAmount)}</span>
+          <span style={{ color: 'var(--s-in)', fontWeight: 600 }}>{fmt(result.prepaidAmount)}</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: '#6b7280' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)' }}>
           <span>Остаток</span>
-          <span style={{ color: '#dc2626', fontWeight: 600 }}>{fmt(result.remaining)}</span>
+          <span style={{ color: 'var(--s-overdue)', fontWeight: 600 }}>{fmt(result.remaining)}</span>
         </div>
+        <UnpricedNote names={unpricedServices} />
         {willRecalc && (
-          <div style={{ marginTop: 8, fontSize: '0.8rem', color: '#9ca3af', textAlign: 'center' }}>
+          <div style={{ marginTop: 8, fontSize: '0.8rem', color: 'var(--text-faint)', textAlign: 'center' }}>
             Итог будет пересчитан при сохранении
           </div>
         )}
@@ -426,6 +482,14 @@ export const BookingModal: React.FC = () => {
   // Квота партнёра: сервер вернул 409 ALLOTMENT_CONFLICT, ждём осознанного подтверждения
   const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
   const pendingValues = useRef<FormValues | null>(null)
+  // Есть ли у брони платежи. Если есть — «Оплачено» больше не поле ввода:
+  // `Booking.paidAmount` это КЭШ суммы платежей, сервер пересчитывает его после
+  // каждой операции по журналу (`paymentController.recalcBookingPaid`). Ручная
+  // правка продержится до следующего платежа и молча разойдётся с кассой.
+  // Пока платежей нет — поле остаётся редактируемым: 107 старых броней хранят
+  // принятые деньги просто числом, и запрет правки сделал бы их неисправимыми.
+  const [hasPayments, setHasPayments] = useState(false)
+  const moneyBarRef = useRef<BookingMoneyBarHandle>(null)
   // Подставили ли в НОВУЮ бронь услуги «включено в тариф». Отметка нужна, потому что
   // справочник услуг грузится асинхронно: без неё повторная загрузка вернула бы
   // снятые галочки обратно.
@@ -589,6 +653,10 @@ export const BookingModal: React.FC = () => {
     // Диалог «Ранний выезд» не должен переживать закрытие формы и всплывать на другой брони
     setEarlyCheckoutConfirm(false)
     setAllotmentWarning(null)
+    // Признак платежей — про КОНКРЕТНУЮ бронь. Не сбросить его значит перенести
+    // «только для чтения» с оплаченной брони на следующую открытую, у которой
+    // платежей нет; настоящее значение приходит из BookingMoneyBar после загрузки.
+    setHasPayments(false)
     pendingValues.current = null
     // Закрыли модалку (или открыли другую бронь) до ответа сервера — ответ игнорируем
     return () => { cancelled = true }
@@ -669,6 +737,9 @@ export const BookingModal: React.FC = () => {
   )
   const categoryName = selectedRoom?.category?.name ?? ''
   const categoryId = selectedRoom?.category?.id ?? 0
+  // Номер комнаты для диалога оплаты: список номеров грузится асинхронно, поэтому
+  // подстраховываемся серверной версией брони — деньги нельзя принять «непонятно куда».
+  const roomNumberLabel = selectedRoom?.number ?? serverBooking?.room?.number ?? ''
 
   // Цены на ночи брони. Спрашиваем ровно ночи [checkIn, checkOut): последняя ночь —
   // это checkOut минус день, за сам день выезда не платят.
@@ -693,11 +764,11 @@ export const BookingModal: React.FC = () => {
     return () => { cancelled = true }
   }, [categoryId, watchedCheckIn, watchedCheckOut])
 
-  // services: [] — услуги калькулятор больше не считает сам. Он не знает, скольким
-  // гостям начислено питание: это сказано строками BookingService, и предпросмотр
-  // по ним собирается ниже (servicePreviewLines).
+  // Калькулятор считает только проживание. Услуги он не знает: скольким гостям
+  // начислено питание, сказано строками BookingService, и предпросмотр по ним
+  // собирается ниже (servicePreviewLines).
   const rateCtx = useMemo<RateContext>(
-    () => ({ pricingBase, ratesByDate, services: [] }),
+    () => ({ pricingBase, ratesByDate }),
     [pricingBase, ratesByDate],
   )
 
@@ -745,6 +816,22 @@ export const BookingModal: React.FC = () => {
       remaining: totalAfterDiscount - prepaid,
     }
   }, [calcInput, rateCtx, serviceLinks, servicesById, discountPercent, prepaymentPercent])
+
+  // Выбранные услуги, у которых цены нет вовсе. Строку начисления они не породят
+  // (ноль — это незаполненный тариф, а не «бесплатно»), поэтому в счёте их просто
+  // не видно. Обед и ужин приходят из засева нулевыми — это штатная ситуация,
+  // и молчать о ней нельзя: «Полный пансион» включён, а сумма не изменилась.
+  const unpricedServices = useMemo(() => {
+    const names: string[] = []
+    for (const l of serviceLinks) {
+      const s = servicesById.get(l.serviceId)
+      if (!s || !s.isActive) continue
+      if (s.price > 0) continue
+      if (s.childPrice != null && s.childPrice > 0) continue
+      names.push(s.name)
+    }
+    return names
+  }, [serviceLinks, servicesById])
 
   // Базовый ключ входов — из СЕРВЕРНОЙ версии брони (категория: room.category.name из BOOKING_SELECT)
   const baseCalcKey = useMemo(() => {
@@ -876,7 +963,12 @@ export const BookingModal: React.FC = () => {
         ...(includeTotals
           ? { totalAmount: calcResult.totalAfterDiscount, prepaidAmount: calcResult.prepaidAmount }
           : {}),
-        paidAmount,
+        // «Оплачено» отправляем, только пока платежей нет. Как только журнал
+        // непуст, число считает сервер, и слать своё — значит затирать кэш
+        // тем, что было на экране в момент открытия формы (соседнее рабочее
+        // место могло принять деньги минуту назад). Сервер пишет поле только
+        // при `paidAmount !== undefined`, поэтому пропуск ключа его не трогает.
+        ...(hasPayments ? {} : { paidAmount }),
         flags: [...selectedFlags, ...(customFlag.trim() ? [customFlag.trim()] : [])],
         // Строки начислений сервер пересобирает сам при изменении дат/гостей/скидки;
         // здесь просим это явно, когда админ нажал «Пересчитать по тарифу».
@@ -1403,61 +1495,17 @@ export const BookingModal: React.FC = () => {
         )}
 
         {/* ── Partner allotment confirmation dialog ── */}
-        {/* Квота партнёра — не глухой запрет: отель вправе продать выделенный номер,
-            но это должно быть решением администратора, а не молчаливым обходом. */}
+        {/* Вид окна вынесен в AllotmentConfirm: тот же вопрос задаёт окно переезда,
+            и пользователь должен узнавать его независимо от того, откуда пришёл. */}
         {allotmentWarning && (
-          <div style={{
-            position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 200,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>
-            <div style={{
-              background: 'var(--bg)', borderRadius: 14, padding: '28px 26px', maxWidth: 440, width: '90%',
-              boxShadow: '0 20px 60px rgba(0,0,0,0.25)', display: 'flex', flexDirection: 'column', gap: 18,
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                <div style={{
-                  width: 44, height: 44, borderRadius: 12, background: '#fef3c7', flexShrink: 0,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.6rem',
-                }}>🤝</div>
-                <div>
-                  <div style={{ fontSize: '1.15rem', fontWeight: 700, color: 'var(--text)', marginBottom: 2 }}>
-                    Номер выделен партнёру
-                  </div>
-                  <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>Требуется подтверждение</div>
-                </div>
-              </div>
-
-              <div style={{
-                background: 'var(--surface-2)', borderRadius: 10, padding: '12px 14px',
-                fontSize: '0.95rem', color: 'var(--text)', lineHeight: 1.5,
-              }}>
-                {allotmentWarning}
-              </div>
-
-              <div style={{ fontSize: '0.9rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                Если продать этот номер, партнёр приедет к занятому номеру. Подтвердите,
-                только если это согласовано.
-              </div>
-
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-                <button type="button" onClick={() => setAllotmentWarning(null)} style={cancelBtnStyle}>
-                  Отмена
-                </button>
-                <button
-                  type="button"
-                  onClick={confirmAllotmentOverride}
-                  disabled={submitting}
-                  style={{
-                    padding: '9px 20px', background: '#d97706', color: '#fff', border: 'none',
-                    borderRadius: 8, fontSize: '1rem', fontWeight: 600,
-                    cursor: submitting ? 'not-allowed' : 'pointer', opacity: submitting ? 0.7 : 1,
-                  }}
-                >
-                  {submitting ? 'Сохраняем…' : 'Всё равно забронировать'}
-                </button>
-              </div>
-            </div>
-          </div>
+          <AllotmentConfirm
+            message={allotmentWarning}
+            busy={submitting}
+            confirmLabel="Всё равно забронировать"
+            busyLabel="Сохраняем…"
+            onCancel={() => setAllotmentWarning(null)}
+            onConfirm={confirmAllotmentOverride}
+          />
         )}
 
         {/* ── RIGHT: Calculator ── */}
@@ -1488,6 +1536,25 @@ export const BookingModal: React.FC = () => {
                   bookingId={booking.id}
                   readOnly={isClosed}
                   onChanged={(b) => { if (b) setServerBooking(b) }}
+                />
+              )}
+
+              {/* Деньги — сразу под начислениями: «начислено» из строк выше, «принято»
+                  и «долг» рядом с ним. Гость платит здесь же, у стойки, а раньше
+                  единственным входом в кассу был отдельный раздел.
+                  Только для сохранённой брони: платёж требует её id. */}
+              {isEdit && booking && (
+                <BookingMoneyBar
+                  ref={moneyBarRef}
+                  bookingId={booking.id}
+                  title="Оплата"
+                  guestName={(serverBooking ?? booking).guestName}
+                  subtitle={`${roomNumberLabel ? `Номер ${roomNumberLabel} · ` : ''}${fmtDay(watchedCheckIn)} — ${fmtDay(watchedCheckOut)}`}
+                  // `Booking.paidAmount` — кэш суммы платежей, сервер пересчитал его сам.
+                  // Форма открыта и об этом не знает: без синхронизации сохранение
+                  // брони отправило бы старое «Оплачено» поверх свежего кэша.
+                  onChanged={(s) => setPaidAmount(s.paid)}
+                  onJournalPresence={setHasPayments}
                 />
               )}
 
@@ -1604,27 +1671,66 @@ export const BookingModal: React.FC = () => {
                       style={{ ...inputStyle, width: 88, textAlign: 'right' }}
                     />
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Оплачено (₸)</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={paidAmount}
-                      onChange={e => setPaidAmount(Math.max(0, Number(e.target.value)))}
-                      className="mono"
-                      style={{ ...inputStyle, width: 128, textAlign: 'right' }}
-                    />
-                  </div>
+                  {/* «Оплачено» — два разных поля в зависимости от того, есть ли
+                      журнал платежей. С журналом это КЭШ его суммы: сервер
+                      пересчитывает число после каждого приёма, возврата и отмены,
+                      и правка руками разъехалась бы с кассой до следующего платежа.
+                      Без журнала (107 старых броней) число хранится само по себе —
+                      там правка это единственный способ поправить ошибку. */}
+                  {hasPayments ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Оплачено (₸)</label>
+                        <div
+                          className="mono"
+                          style={{
+                            ...inputStyle,
+                            width: 128,
+                            textAlign: 'right',
+                            background: 'var(--surface-2)',
+                            color: 'var(--text-muted)',
+                            cursor: 'default',
+                          }}
+                        >
+                          {paidAmount.toLocaleString('ru-RU')}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: '0.82rem', color: 'var(--text-faint)', lineHeight: 1.4 }}>
+                        Считается по журналу платежей.{' '}
+                        <button
+                          type="button"
+                          onClick={() => moneyBarRef.current?.openPayment()}
+                          style={linkBtnStyle}
+                        >
+                          Принять оплату
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Оплачено (₸)</label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={paidAmount}
+                        onChange={e => setPaidAmount(Math.max(0, Number(e.target.value)))}
+                        className="mono"
+                        style={{ ...inputStyle, width: 128, textAlign: 'right' }}
+                      />
+                    </div>
+                  )}
                 </div>
               </CalcSection>
 
             </div>
 
             {/* Result card (bottom, fixed) */}
+            {/* Итог брони. Раньше здесь были зашитые #fff и #111827 — в тёмной теме
+                блок оставался белым островом посреди тёмной формы. */}
             <div style={{
               padding: '16px 20px',
-              borderTop: '1px solid #e2e8f0',
-              background: '#fff',
+              borderTop: '1px solid var(--border-subtle)',
+              background: 'var(--surface)',
               flexShrink: 0,
             }}>
               <ResultCard
@@ -1640,6 +1746,7 @@ export const BookingModal: React.FC = () => {
                 } : null}
                 onRecalc={() => setRecalc(true)}
                 willRecalc={isEdit && sendTotals}
+                unpricedServices={unpricedServices}
               />
             </div>
           </div>

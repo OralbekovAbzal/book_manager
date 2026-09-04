@@ -1,12 +1,17 @@
 import { parseISO, addDays, format, differenceInCalendarDays } from 'date-fns'
-import type { PricingBase, RatePrice, Service } from '../types'
+import type { PricingBase, RatePrice } from '../types'
 
 /**
- * Расчёт стоимости брони.
+ * Расчёт стоимости ПРОЖИВАНИЯ.
  *
  * Источник цены — календарь `RatePrice` (одна цена на КАЖДУЮ дату), а не «сезоны»
  * из localStorage. Никакого запасного периода больше нет: если на ночь цены нет,
  * это дырка в тарифе, и её видно, а не ноль в итоге.
+ *
+ * Питание и услуги калькулятор НЕ считает: ему неоткуда знать, скольким гостям
+ * начислен обед — это сказано строками `BookingService` брони. Их предпросмотр
+ * собирает `BookingModal/serviceLines.ts`, а складывает всё вместе сама форма
+ * (скидка считается от общего счёта — так же, как её пишет сервер).
  *
  * Это ПРЕДПРОСМОТР. Источник истины по деньгам — строки `BookingCharge` на сервере
  * (`server/src/utils/charges.js`), которые генерируются по тем же правилам.
@@ -31,13 +36,11 @@ export interface CalcInput {
   prepaymentPercent: number
 }
 
-/** Цены и услуги, по которым считаем. Приходят с сервера, а не из localStorage. */
+/** Цены, по которым считаем. Приходят с сервера, а не из localStorage. */
 export interface RateContext {
   pricingBase: PricingBase
   /** 'YYYY-MM-DD' → цена этой даты для выбранной категории */
   ratesByDate: Record<string, RatePrice>
-  /** Услуги, начисляемые автоматически (includedByDefault) */
-  services: Service[]
 }
 
 export interface BreakdownLine {
@@ -61,7 +64,7 @@ export interface NightLine {
 
 export interface CalcResult {
   nights: number
-  /** Проживание + услуги, до скидки */
+  /** Проживание до скидки. Услуги форма добавляет к нему сама. */
   total: number
   totalAfterDiscount: number
   prepaidAmount: number
@@ -73,12 +76,6 @@ export interface CalcResult {
   /** Ночи, для которых цена не задана целиком или частично */
   missingNights: number
   missingDates: string[]
-}
-
-export const EMPTY_RATE_CONTEXT: RateContext = {
-  pricingBase: 'person',
-  ratesByDate: {},
-  services: [],
 }
 
 /**
@@ -136,61 +133,6 @@ function priceNight(
   return { amount, missing }
 }
 
-/** Начисления по услугам — те же правила, что и в server/src/utils/charges.js. */
-export function serviceLines(
-  input: CalcInput,
-  services: Service[],
-  nights: number,
-): BreakdownLine[] {
-  if (nights <= 0) return []
-
-  // Питание считаем по тем, кто «с питанием»; прочие услуги — по всем гостям.
-  const mealAdults = input.adultsWithMeals + input.extraBedsWithMeals
-  const mealChildren = input.childrenWithMeals
-  const allAdults = input.adultsWithMeals + input.adultsNoMeals
-    + input.extraBedsWithMeals + input.extraBedsNoMeals
-  const allChildren = input.childrenWithMeals + input.childrenNoMeals
-
-  const lines: BreakdownLine[] = []
-
-  for (const s of services) {
-    if (!s.isActive) continue
-    const kind: 'meal' | 'extra' = s.kind === 'meal' ? 'meal' : 'extra'
-    const adults = kind === 'meal' ? mealAdults : allAdults
-    const children = kind === 'meal' ? mealChildren : allChildren
-    // childPrice = null означает «считать по взрослой цене» — детей вливаем во взрослую строку
-    const splitChildren = s.childPrice != null && children > 0
-    const adultHeads = splitChildren ? adults : adults + children
-
-    const push = (label: string, qty: number, unit: number) => {
-      if (qty <= 0 || unit <= 0) return
-      lines.push({ label, nights, amount: Math.round(qty * unit), kind, quantity: qty, unitPrice: unit })
-    }
-
-    // Названия — как у генератора начислений: короткие и стабильные
-    const childLabel = `${s.name} (дети)`
-    switch (s.unit) {
-      case 'per_person_night':
-        push(s.name, adultHeads * nights, s.price)
-        if (splitChildren) push(childLabel, children * nights, s.childPrice!)
-        break
-      case 'per_night':
-        push(s.name, nights, s.price)
-        break
-      case 'per_person':
-        push(s.name, adultHeads, s.price)
-        if (splitChildren) push(childLabel, children, s.childPrice!)
-        break
-      case 'per_booking':
-      default:
-        push(s.name, 1, s.price)
-        break
-    }
-  }
-
-  return lines
-}
-
 export function calculate(input: CalcInput, ctx: RateContext): CalcResult {
   const dates = nightsOf(input.checkIn, input.checkOut)
   const nights = dates.length
@@ -231,12 +173,11 @@ export function calculate(input: CalcInput, ctx: RateContext): CalcResult {
       kind: 'stay',
     })
   }
-  const svc = serviceLines(input, ctx.services, nights)
-  breakdown.push(...svc)
-
-  const total = stayTotal + svc.reduce((s, l) => s + l.amount, 0)
+  const total = stayTotal
   // Скидка округляется отдельной строкой — так же, как её пишет генератор начислений
   // (server/src/utils/charges.js). Иначе предпросмотр расходился бы с итогом на тенге.
+  // Здесь она считается от одного проживания; когда у брони есть услуги, форма
+  // пересчитывает скидку от полного счёта (BookingModal, `calcResult`).
   const discount = input.discountPercent > 0 ? Math.round(total * input.discountPercent / 100) : 0
   const totalAfterDiscount = total - discount
   const prepaidAmount = Math.round(totalAfterDiscount * (input.prepaymentPercent / 100))

@@ -1,14 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  fetchDebts, fetchBookingPayments, fetchCurrentShiftSummary,
-  createPayment, refundPayment, voidPayment,
+  fetchDebts, fetchCurrentShiftSummary, voidPayment,
   METHOD_LABELS,
-  type DebtRow, type Payment, type BookingMoney, type PaymentMethod, type ShiftSummary,
+  type DebtRow, type Payment, type ShiftSummary,
 } from '../../api/payments'
 import { useAuthStore } from '../../store/useAuthStore'
-import {
-  inputStyle, labelStyle, primaryBtn, secondaryBtn, formTitle, EmptyBox,
-} from '../Settings/sections/sectionUi'
+import { inputStyle, secondaryBtn, formTitle, EmptyBox } from '../Settings/sections/sectionUi'
+import { apiErrorText, card, fmtDate, fmtTime, InlinePrompt, money, Stat, td, th } from './paymentsUi'
+import { BookingPaymentPanel } from './BookingPaymentPanel'
 
 /**
  * Раздел «Касса».
@@ -20,49 +19,14 @@ import {
  *
  * Смену и рабочую дату проставляет СЕРВЕР (дата смены, а не дата устройства) —
  * экран их только показывает.
+ *
+ * Сам приём денег живёт в `BookingPaymentPanel` — тот же компонент открывается
+ * из формы брони. Здесь остаётся только список «кто сколько должен» и отчёт смены.
  */
 
 interface Props {
   onBack: () => void
 }
-
-const METHODS: PaymentMethod[] = ['cash', 'card', 'transfer']
-
-const money = (n: number) =>
-  new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(n ?? 0)
-
-/** Даты `@db.Date` — UTC-полночь, рендерим в UTC, иначе съезжает на день. */
-const fmtDate = (iso: string | null | undefined) => {
-  if (!iso) return '—'
-  return new Date(iso).toLocaleDateString('ru-RU', { timeZone: 'UTC', day: '2-digit', month: '2-digit', year: 'numeric' })
-}
-/** Время приёма денег — реальные часы, местная зона. */
-const fmtTime = (iso: string) =>
-  new Date(iso).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
-
-const card: React.CSSProperties = {
-  background: 'var(--surface)', border: '1px solid var(--border-subtle)',
-  borderRadius: 12, padding: 14,
-}
-
-const th: React.CSSProperties = {
-  textAlign: 'left', fontSize: '0.74rem', fontWeight: 600, textTransform: 'uppercase',
-  letterSpacing: '0.03em', color: 'var(--text-faint)', padding: '6px 10px', whiteSpace: 'nowrap',
-}
-const td: React.CSSProperties = {
-  padding: '9px 10px', fontSize: '0.85rem', color: 'var(--text)', borderTop: '1px solid var(--border-subtle)',
-}
-
-const Stat: React.FC<{ label: string; value: string; tone?: 'plus' | 'minus' | 'plain'; hint?: string }> = ({ label, value, tone = 'plain', hint }) => (
-  <div style={{ ...card, flex: '1 1 160px', minWidth: 150 }}>
-    <div style={{ fontSize: '0.76rem', color: 'var(--text-faint)', marginBottom: 4 }}>{label}</div>
-    <div style={{
-      fontSize: '1.32rem', fontWeight: 600, letterSpacing: '-0.02em',
-      color: tone === 'plus' ? 'var(--s-in)' : tone === 'minus' ? 'var(--s-overdue)' : 'var(--text)',
-    }}>{value}</div>
-    {hint && <div style={{ fontSize: '0.74rem', color: 'var(--text-faint)', marginTop: 3 }}>{hint}</div>}
-  </div>
-)
 
 export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
   const admin = useAuthStore((s) => s.admin)
@@ -84,17 +48,7 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
   const [businessDate, setBusinessDate] = useState<string | null>(null)
   const [loadingDebts, setLoadingDebts] = useState(true)
   const [onlyDebt, setOnlyDebt] = useState(false)
-
   const [selectedId, setSelectedId] = useState<number | null>(null)
-  const [journal, setJournal] = useState<Payment[]>([])
-  const [summary, setSummary] = useState<BookingMoney | null>(null)
-  const [loadingJournal, setLoadingJournal] = useState(false)
-
-  const [amount, setAmount] = useState('')
-  const [method, setMethod] = useState<PaymentMethod>('cash')
-  const [comment, setComment] = useState('')
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
 
   const loadDebts = (q: string) => {
     setLoadingDebts(true)
@@ -110,23 +64,6 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
     return () => window.clearTimeout(t)
   }, [query])
 
-  const loadJournal = (bookingId: number) => {
-    setLoadingJournal(true)
-    fetchBookingPayments(bookingId)
-      .then((d) => { setJournal(d.payments); setSummary(d.summary) })
-      .catch(() => {})
-      .finally(() => setLoadingJournal(false))
-  }
-
-  const select = (row: DebtRow) => {
-    setSelectedId(row.id)
-    setError('')
-    setComment('')
-    // Подставляем остаток долга: чаще всего принимают именно его.
-    setAmount(row.due > 0 ? String(row.due) : '')
-    loadJournal(row.id)
-  }
-
   const selected = useMemo(() => debts.find((d) => d.id === selectedId) || null, [debts, selectedId])
 
   const visibleDebts = useMemo(
@@ -139,69 +76,35 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
     [debts],
   )
 
-  const submitPayment = async (kind: 'payment' | 'refund') => {
-    if (!selectedId) return
-    const value = Number(String(amount).replace(',', '.'))
-    if (!Number.isFinite(value) || value <= 0) { setError('Сумма должна быть больше нуля'); return }
-    setSaving(true); setError('')
-    try {
-      const res = await createPayment({ bookingId: selectedId, amount: value, kind, method, comment: comment.trim() || undefined })
-      setSummary(res.summary)
-      setJournal((prev) => [res.payment, ...prev])
-      setAmount(''); setComment('')
-      flash(kind === 'refund' ? `Возврат ${money(value)} проведён` : `Принято ${money(value)}`)
-      loadDebts(query.trim())
-    } catch (e: any) {
-      setError(e?.response?.data?.error || 'Не удалось сохранить платёж')
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const doRefund = async (p: Payment) => {
-    const raw = window.prompt(`Возврат по платежу от ${fmtTime(p.paidAt)}. Сумма (принято ${money(p.amount)}):`, String(p.amount))
-    if (raw == null) return
-    const value = Number(raw.replace(',', '.'))
-    if (!Number.isFinite(value) || value <= 0) { flash('Сумма возврата должна быть больше нуля'); return }
-    try {
-      const res = await refundPayment(p.id, { amount: value })
-      setSummary(res.summary)
-      if (selectedId) loadJournal(selectedId)
-      loadDebts(query.trim())
-      flash(`Возврат ${money(value)} проведён`)
-    } catch (e: any) {
-      flash(e?.response?.data?.error || 'Не удалось провести возврат')
-    }
-  }
-
-  const doVoid = async (p: Payment, after?: () => void) => {
-    const reason = window.prompt('Отмена ОШИБОЧНОЙ записи (деньги при этом не возвращаются).\nПричина:')
-    if (reason == null) return
-    if (!reason.trim()) { flash('Причина отмены обязательна'); return }
-    try {
-      await voidPayment(p.id, reason.trim())
-      flash('Запись отменена')
-      if (selectedId) loadJournal(selectedId)
-      loadDebts(query.trim())
-      after?.()
-    } catch (e: any) {
-      flash(e?.response?.data?.error || 'Не удалось отменить запись')
-    }
-  }
-
   // ─── Смена ─────────────────────────────────────────────────────────────────
   const [shift, setShift] = useState<ShiftSummary | null>(null)
   const [shiftError, setShiftError] = useState('')
   const [loadingShift, setLoadingShift] = useState(false)
+  // Какую запись смены отменяем: причина спрашивается формой, а не window.prompt
+  // (в Electron prompt() не работает вовсе).
+  const [voidingShift, setVoidingShift] = useState<Payment | null>(null)
 
   const loadShift = () => {
     setLoadingShift(true); setShiftError('')
     fetchCurrentShiftSummary()
       .then(setShift)
-      .catch((e) => setShiftError(e?.response?.data?.error || 'Не удалось загрузить кассу смены'))
+      .catch((e) => setShiftError(apiErrorText(e, 'Не удалось загрузить кассу смены')))
       .finally(() => setLoadingShift(false))
   }
   useEffect(() => { if (tab === 'shift') loadShift() }, [tab])
+
+  const doVoidInShift = async (p: Payment, reason: string) => {
+    if (!reason.trim()) { flash('Причина отмены обязательна'); return }
+    setVoidingShift(null)
+    try {
+      await voidPayment(p.id, reason.trim())
+      flash('Запись отменена')
+      loadShift()
+      loadDebts(query.trim())
+    } catch (e) {
+      flash(apiErrorText(e, 'Не удалось отменить запись'))
+    }
+  }
 
   // ─── Разметка ──────────────────────────────────────────────────────────────
   const tabBtn = (id: 'take' | 'shift'): React.CSSProperties => ({
@@ -276,7 +179,7 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
                     {visibleDebts.map((b) => (
                       <tr
                         key={b.id}
-                        onClick={() => select(b)}
+                        onClick={() => setSelectedId(b.id)}
                         style={{
                           cursor: 'pointer',
                           background: b.id === selectedId ? 'var(--accent-bg)' : 'transparent',
@@ -315,98 +218,21 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
             {!selected ? (
               <EmptyBox>Выберите бронь слева, чтобы принять оплату</EmptyBox>
             ) : (
-              <>
-                <div style={card}>
-                  <div style={{ ...formTitle, marginBottom: 2 }}>{selected.guestName}</div>
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>
-                    Номер {selected.room?.number ?? '—'} · {fmtDate(selected.checkIn)} — {fmtDate(selected.checkOut)}
-                  </div>
-                  <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
-                    <Stat label="Начислено" value={money(summary?.charged ?? selected.charged)}
-                      hint={summary && !summary.chargesFromRows ? 'строк начислений ещё нет' : undefined} />
-                    <Stat label="Принято" value={money(summary?.paid ?? selected.paid)} tone="plus" />
-                    <Stat label="Долг" value={money(summary?.due ?? selected.due)}
-                      tone={(summary?.due ?? selected.due) > 0 ? 'minus' : 'plain'} />
-                  </div>
-                </div>
-
-                <div style={card}>
-                  <div style={{ ...formTitle, marginBottom: 10 }}>Принять оплату</div>
-                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                    <div style={{ flex: '1 1 140px' }}>
-                      <label style={labelStyle}>Сумма</label>
-                      <input
-                        value={amount}
-                        onChange={(e) => setAmount(e.target.value)}
-                        inputMode="decimal"
-                        placeholder="0"
-                        style={inputStyle}
-                      />
+              <BookingPaymentPanel
+                key={selected.id}
+                bookingId={selected.id}
+                fallback={{ charged: selected.charged, paid: selected.paid, due: selected.due }}
+                header={
+                  <>
+                    <div style={{ ...formTitle, marginBottom: 2 }}>{selected.guestName}</div>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>
+                      Номер {selected.room?.number ?? '—'} · {fmtDate(selected.checkIn)} — {fmtDate(selected.checkOut)}
                     </div>
-                    <div style={{ flex: '1 1 140px' }}>
-                      <label style={labelStyle}>Способ</label>
-                      <select value={method} onChange={(e) => setMethod(e.target.value as PaymentMethod)} style={inputStyle}>
-                        {METHODS.map((m) => <option key={m} value={m}>{METHOD_LABELS[m]}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  <div style={{ marginTop: 10 }}>
-                    <label style={labelStyle}>Комментарий</label>
-                    <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="необязательно" style={inputStyle} />
-                  </div>
-                  {error && <div style={{ marginTop: 8, fontSize: '0.82rem', color: 'var(--s-overdue)' }}>{error}</div>}
-                  <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-                    <button disabled={saving} onClick={() => submitPayment('payment')} style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}>
-                      Принять
-                    </button>
-                    <button disabled={saving} onClick={() => submitPayment('refund')} style={secondaryBtn} title="Деньги отданы гостю">
-                      Возврат
-                    </button>
-                  </div>
-                </div>
-
-                <div style={card}>
-                  <div style={{ ...formTitle, marginBottom: 8 }}>
-                    История платежей {loadingJournal && <span style={{ fontWeight: 400, color: 'var(--text-faint)' }}>· загрузка…</span>}
-                  </div>
-                  {journal.length === 0 ? (
-                    <div style={{ fontSize: '0.84rem', color: 'var(--text-faint)' }}>Платежей ещё не было</div>
-                  ) : (
-                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-                      <tbody>
-                        {journal.map((p) => (
-                          <tr key={p.id} style={{ opacity: p.voidedAt ? 0.55 : 1 }}>
-                            <td style={{ ...td, whiteSpace: 'nowrap' }}>
-                              <div style={{ fontWeight: 600, color: p.kind === 'refund' ? 'var(--s-overdue)' : 'var(--text)' }}>
-                                {p.kind === 'refund' ? '−' : '+'}{money(p.amount)}
-                                {p.voidedAt && <span style={{ marginLeft: 6, fontWeight: 400, fontSize: '0.74rem' }}>отменён</span>}
-                              </div>
-                              <div style={{ fontSize: '0.74rem', color: 'var(--text-faint)' }}>
-                                {METHOD_LABELS[p.method]} · {fmtTime(p.paidAt)} · {p.adminName}
-                              </div>
-                              {p.comment && <div style={{ fontSize: '0.74rem', color: 'var(--text-faint)' }}>{p.comment}</div>}
-                              {p.voidReason && <div style={{ fontSize: '0.74rem', color: 'var(--s-overdue)' }}>причина: {p.voidReason}</div>}
-                            </td>
-                            <td style={{ ...td, textAlign: 'right', whiteSpace: 'nowrap' }}>
-                              {!p.voidedAt && p.kind === 'payment' && (
-                                <button onClick={() => doRefund(p)} style={{ ...secondaryBtn, height: 28, padding: '0 10px', fontSize: '0.78rem' }}>
-                                  Возврат
-                                </button>
-                              )}
-                              {!p.voidedAt && canVoid && (
-                                <button onClick={() => doVoid(p)} title="Ошибочная запись"
-                                  style={{ ...secondaryBtn, height: 28, padding: '0 10px', fontSize: '0.78rem', marginLeft: 6 }}>
-                                  Отменить
-                                </button>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </>
+                  </>
+                }
+                onFlash={flash}
+                onChanged={() => loadDebts(query.trim())}
+              />
             )}
           </div>
         </div>
@@ -499,30 +325,47 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
                     </thead>
                     <tbody>
                       {shift.payments.map((p) => (
-                        <tr key={p.id} style={{ opacity: p.voidedAt ? 0.55 : 1 }}>
-                          <td style={{ ...td, whiteSpace: 'nowrap', color: 'var(--text-muted)' }}>{fmtTime(p.paidAt)}</td>
-                          <td style={td}>
-                            {p.booking?.guestName ?? `бронь #${p.bookingId}`}
-                            {p.booking?.room?.number ? <span style={{ color: 'var(--text-faint)' }}> · №{p.booking.room.number}</span> : null}
-                            {p.voidReason && <div style={{ fontSize: '0.74rem', color: 'var(--s-overdue)' }}>отменён: {p.voidReason}</div>}
-                          </td>
-                          <td style={td}>{METHOD_LABELS[p.method]}</td>
-                          <td style={{ ...td, color: 'var(--text-muted)' }}>{p.adminName}</td>
-                          <td style={{
-                            ...td, textAlign: 'right', fontWeight: 600,
-                            color: p.kind === 'refund' ? 'var(--s-overdue)' : 'var(--text)',
-                          }}>
-                            {p.kind === 'refund' ? '−' : '+'}{money(p.amount)}
-                          </td>
-                          <td style={{ ...td, textAlign: 'right' }}>
-                            {!p.voidedAt && canVoid && (
-                              <button onClick={() => doVoid(p, loadShift)}
-                                style={{ ...secondaryBtn, height: 28, padding: '0 10px', fontSize: '0.78rem' }}>
-                                Отменить
-                              </button>
-                            )}
-                          </td>
-                        </tr>
+                        <React.Fragment key={p.id}>
+                          <tr style={{ opacity: p.voidedAt ? 0.55 : 1 }}>
+                            <td style={{ ...td, whiteSpace: 'nowrap', color: 'var(--text-muted)' }}>{fmtTime(p.paidAt)}</td>
+                            <td style={td}>
+                              {p.booking?.guestName ?? `бронь #${p.bookingId}`}
+                              {p.booking?.room?.number ? <span style={{ color: 'var(--text-faint)' }}> · №{p.booking.room.number}</span> : null}
+                              {p.voidReason && <div style={{ fontSize: '0.74rem', color: 'var(--s-overdue)' }}>отменён: {p.voidReason}</div>}
+                            </td>
+                            <td style={td}>{METHOD_LABELS[p.method]}</td>
+                            <td style={{ ...td, color: 'var(--text-muted)' }}>{p.adminName}</td>
+                            <td style={{
+                              ...td, textAlign: 'right', fontWeight: 600,
+                              color: p.kind === 'refund' ? 'var(--s-overdue)' : 'var(--text)',
+                            }}>
+                              {p.kind === 'refund' ? '−' : '+'}{money(p.amount)}
+                            </td>
+                            <td style={{ ...td, textAlign: 'right' }}>
+                              {!p.voidedAt && canVoid && (
+                                <button
+                                  onClick={() => setVoidingShift(voidingShift?.id === p.id ? null : p)}
+                                  style={{ ...secondaryBtn, height: 28, padding: '0 10px', fontSize: '0.78rem' }}
+                                >
+                                  Отменить
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                          {voidingShift?.id === p.id && (
+                            <tr>
+                              <td style={{ ...td, borderTop: 'none' }} colSpan={6}>
+                                <InlinePrompt
+                                  label="Отмена ошибочной записи — деньги при этом не возвращаются. Причина:"
+                                  placeholder="например: пробита не та бронь"
+                                  confirmLabel="Отменить запись"
+                                  onConfirm={(v) => doVoidInShift(p, v)}
+                                  onCancel={() => setVoidingShift(null)}
+                                />
+                              </td>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       ))}
                     </tbody>
                   </table>

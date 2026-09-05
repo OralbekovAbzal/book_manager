@@ -1,0 +1,25 @@
+<Configuration>
+  <!--
+    Проверка установщика в Windows Sandbox: чистая Windows при каждом запуске.
+    Двойной клик по этому файлу — и папка dist появится внутри на рабочем столе
+    (только чтение: песочница ничего не сможет испортить в сборке).
+
+    Требует включённой функции Windows Sandbox (Windows 11 Pro):
+      Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All
+    от администратора, затем перезагрузка.
+
+    Что проверить внутри — см. SANDBOX-CHECKLIST.md рядом.
+    Ограничение: песочница не переживает перезагрузку и стирается при закрытии,
+    поэтому «перезагрузка» и «обновление» проверяются только на полной виртуалке.
+  -->
+  <vGPU>Disable</vGPU>
+  <Networking>Default</Networking>
+  <MemoryInMB>4096</MemoryInMB>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\abzal\OneDrive\Desktop\Book_manager\hotel-booking\electron\dist</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\dist</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+</Configuration>

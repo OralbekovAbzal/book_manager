@@ -69,17 +69,27 @@ async function main() {
 
   log('запускаю сервер с встроенной базой...')
   const serverDir = path.resolve(__dirname, '..', 'server')
-  srv = spawn('node', ['server.js'], {
+  // process.execPath, а не 'node': так же, как Prisma выше и как main.js в сборке.
+  // 2026-09-05 тест молча падал на этом месте — spawn('node') не запускался,
+  // а обработчика 'error' не было, поэтому вывода не было вовсе.
+  srv = spawn(process.execPath, ['server.js'], {
     cwd: serverDir,
     env: { ...process.env, DATABASE_URL: DB_URL, PORT: String(PORT), HOST: '127.0.0.1',
            JWT_SECRET: 'dev-test-secret-not-for-prod', NODE_ENV: 'production' },
   })
+  srv.on('error', (e) => log('SPAWN ERROR:', e.message))
+  srv.on('exit', (c, s) => { if (c !== null && c !== 0) log(`сервер завершился с кодом ${c}${s ? ' / ' + s : ''}`) })
   srv.stdout.on('data', d => process.stdout.write('  [srv] ' + d))
   srv.stderr.on('data', d => process.stderr.write('  [srv-err] ' + d))
 
-  await new Promise(r => setTimeout(r, 4000))
-
-  const health = await fetch(`http://127.0.0.1:${PORT}/api/health`).then(r => r.json())
+  // Готовность ждём опросом, а не фиксированной паузой: на медленной машине
+  // первый старт Prisma дольше 4 с, и тест падал бы на ровном месте.
+  let health = null
+  for (const t0 = Date.now(); Date.now() - t0 < 40000; ) {
+    try { const r = await fetch(`http://127.0.0.1:${PORT}/api/health`); if (r.ok) { health = await r.json(); break } } catch {}
+    await new Promise(r => setTimeout(r, 500))
+  }
+  if (!health) throw new Error('сервер не ответил на /api/health за 40 с — см. [srv]/[srv-err] выше')
   log('health:', JSON.stringify(health))
 
   const res = await fetch(`http://127.0.0.1:${PORT}/api/auth/login`, {

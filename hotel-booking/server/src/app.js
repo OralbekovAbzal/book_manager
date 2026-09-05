@@ -57,6 +57,11 @@ const apiLimiter = rateLimit({
   max: process.env.NODE_ENV === 'production' ? 500 : 10000,
 })
 
+// Гейт обслуживания: ДО журнала и роутов. Если обслуживание кончилось раньше даты
+// выпуска этой сборки — всё, кроме health/license/login, отвечает 402 (middleware/license.js).
+const { maintenanceGate } = require('./middleware/license')
+app.use(maintenanceGate)
+
 // Журнал действий: ДО роутов, чтобы перехватить ответ любого из них (см. middleware/audit.js)
 app.use('/api', auditMiddleware)
 

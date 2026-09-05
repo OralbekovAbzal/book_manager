@@ -21,6 +21,10 @@ import { RatesScreen } from './components/Rates/RatesScreen'
 import { ReportsScreen } from './components/Reports/ReportsScreen'
 import { PaymentsScreen } from './components/Payments/PaymentsScreen'
 import { NavDrawer, type NavSection } from './components/NavDrawer/NavDrawer'
+import type { ActiveSection } from './components/Settings/SettingsPanel'
+import { useLicenseStore } from './store/useLicenseStore'
+import { LicenseBanner } from './components/License/LicenseBanner'
+import { MaintenanceGateScreen } from './components/License/MaintenanceGateScreen'
 import { fetchBookingFlags } from './api/bookingFlags'
 import { fetchSetupStatus } from './api/setup'
 import { fetchHotel } from './api/hotel'
@@ -54,10 +58,28 @@ export const App: React.FC = () => {
   // раздел, а модалками остаются только действия (бронь, аудит, снапшоты).
   const [section, setSection] = useState<NavSection>('grid')
 
+  // С какого подраздела открыть «Настройки». Нужен ровно одному сценарию —
+  // полосе «Лицензия не введена»; из меню разделов сбрасывается в null, иначе
+  // настройки навсегда открывались бы на «Лицензии».
+  const [settingsSection, setSettingsSection] = useState<ActiveSection | null>(null)
+
   const handleNavigate = (next: NavSection) => {
     setSection(next)
+    setSettingsSection(null)
     setNavOpen(false)
   }
+
+  const openLicenseSettings = () => {
+    setSettingsSection('license')
+    setSection('settings')
+    setNavOpen(false)
+  }
+
+  // Лицензия — общее состояние: полоса в шапке, раздел настроек и экран
+  // блокировки читают один стор.
+  const licenseBlock = useLicenseStore(s => s.block)
+  const licenseUnblockedAt = useLicenseStore(s => s.unblockedAt)
+  const loadLicense = useLicenseStore(s => s.load)
 
   // Старт приложения: одновременно узнаём состояние сервера (нужна ли первичная
   // настройка, название отеля) и восстанавливаем сессию по сохранённому токену.
@@ -115,19 +137,30 @@ export const App: React.FC = () => {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
+  // Состояние лицензии — рядом с остальными стартовыми загрузками. GET /api/license
+  // требует входа, поэтому ждём admin.
+  useEffect(() => {
+    if (!admin) return
+    void loadLicense()
+  }, [admin, loadLicense])
+
   // Метки броней — источник истины в БД. Подгружаем в стор, чтобы все потребители
   // (грид, модалка, оптимизатор) читали актуальные определения с эффектами.
+  //
+  // `licenseUnblockedAt` в зависимостях — не украшение: под гейтом 402 все эти
+  // запросы отказали, и после ввода продлённого ключа их надо повторить, иначе
+  // шапка и справочники останутся пустыми до перезагрузки страницы.
   useEffect(() => {
     if (!admin) return
     fetchBookingFlags().then(bookingFlags => setRoomFund({ bookingFlags })).catch(() => {})
-  }, [admin, setRoomFund])
+  }, [admin, setRoomFund, licenseUnblockedAt])
 
   // Данные для шапки после входа: актуальное название отеля и число активных номеров.
   useEffect(() => {
     if (!admin) return
     fetchHotel().then(h => setHotelName(h.name || null)).catch(() => {})
     fetchRooms({ isActive: true }).then(rooms => setRoomsCount(rooms.length)).catch(() => {})
-  }, [admin, setHotelName])
+  }, [admin, setHotelName, licenseUnblockedAt])
 
   // Apply theme + UI-scale vars to document root
   useEffect(() => {
@@ -136,6 +169,18 @@ export const App: React.FC = () => {
     root.style.setProperty('--ui-font-size', `${visual.fontSize}px`)
     root.style.setProperty('--ui-radius', `${visual.uiRadius}px`)
   }, [visual.theme, visual.fontSize, visual.uiRadius])
+
+  // Гейт обслуживания (402) идёт ПЕРВЫМ и живёт не в `section`, а здесь, рядом
+  // с заставкой и входом: под гейтом сервер отвечает 402 на всё, кроме входа и
+  // лицензии, — приложения под ним нет, и рисовать шапку с меню разделов,
+  // которые все до одного упрутся в 402, было бы обманом.
+  //
+  // Ключ принимает только SUPER_ADMIN, поэтому до входа показываем обычный вход
+  // с текстом сервера в баннере (/api/auth/login гейт пропускает), а после
+  // входа — экран блокировки с полем ключа. Так вход и ввод ключа доступны оба.
+  if (licenseBlock) {
+    return admin ? <MaintenanceGateScreen /> : <Login serverError={licenseBlock.message} />
+  }
 
   // Порядок экранов при старте: заставка, пока сервер не ответил; мастер
   // первичной настройки, если база пустая; иначе — обычный вход.
@@ -221,6 +266,10 @@ export const App: React.FC = () => {
         </div>
       </header>
 
+      {/* Полоса лицензии — под шапкой и над любым разделом: она про программу
+          целиком, а не про шахматку, поэтому в обвязку сетки не входит. */}
+      <LicenseBanner onOpen={openLicenseSettings} />
+
       {/* Шахматка со своей обвязкой: панель дат, фильтры и строка состояния
           принадлежат именно ей, поэтому уходят вместе с ней. */}
       {section === 'grid' && (
@@ -237,7 +286,7 @@ export const App: React.FC = () => {
       )}
 
       {section === 'reference' && <ReferenceWindow open onClose={() => setSection('grid')} />}
-      {section === 'settings'  && <SettingsPanel  open onClose={() => setSection('grid')} />}
+      {section === 'settings'  && <SettingsPanel  open onClose={() => setSection('grid')} initialSection={settingsSection} />}
 
       {section === 'rates'    && <RatesScreen onBack={() => setSection('grid')} />}
       {section === 'payments' && <PaymentsScreen onBack={() => setSection('grid')} />}

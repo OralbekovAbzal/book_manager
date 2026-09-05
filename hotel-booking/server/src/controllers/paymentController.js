@@ -1,5 +1,6 @@
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
+const { round2, signedPayment: signed, loadBookingMoney, bookingMoney } = require('../utils/bookingMoney')
 const { ensureCurrentShift, getCurrentShift, getCurrentBusinessDate } = require('../utils/businessDate')
 const { emitBookingEvent } = require('../socket/socketManager')
 const logger = require('../utils/logger')
@@ -35,16 +36,9 @@ const PAYMENT_INCLUDE = {
   booking: { select: { id: true, guestName: true, room: { select: { id: true, number: true } } } },
 }
 
-/** Деньги — с двумя знаками: копить ошибку double по всей кассе нельзя. */
-function round2(n) {
-  return Math.round((Number(n) || 0) * 100) / 100
-}
-
-/** Сумма к зачёту: возврат уменьшает принятое, отменённые не считаются вовсе. */
-function signed(p) {
-  if (p.voidedAt) return 0
-  return p.kind === 'refund' ? -p.amount : p.amount
-}
+// round2 / signed / bookingMoney живут в `utils/bookingMoney.js`: те же три
+// формулы («начислено», «принято», «долг») нужны отчётам, а второе определение
+// денег разойдётся с этим на тенге и найдётся не сразу.
 
 /**
  * Пересчитать `Booking.paidAmount` как сумму НЕотменённых платежей минус возвраты.
@@ -59,50 +53,6 @@ async function recalcBookingPaid(bookingId, tx = prisma) {
   const paid = round2(rows.reduce((sum, p) => sum + signed(p), 0))
   await tx.booking.update({ where: { id: bookingId }, data: { paidAmount: paid } })
   return paid
-}
-
-/**
- * Финансовая картина брони.
- * Начислено берём из строк BookingCharge (источник истины по ценообразованию).
- * Пока генератор начислений их не заполняет, строк нет — тогда «начислено»
- * это `totalAmount` брони, иначе долг был бы равен всей оплате со знаком минус.
- */
-async function bookingMoney(bookingId, tx = prisma) {
-  const booking = await tx.booking.findUnique({
-    where: { id: bookingId },
-    select: { id: true, guestName: true, totalAmount: true, prepaidAmount: true, paidAmount: true },
-  })
-  if (!booking) return null
-
-  const charges = await tx.bookingCharge.aggregate({
-    where: { bookingId },
-    _sum: { amount: true },
-    _count: { _all: true },
-  })
-  const payments = await tx.payment.findMany({
-    where: { bookingId },
-    select: { kind: true, amount: true, voidedAt: true },
-  })
-
-  const chargesTotal = round2(charges._sum.amount || 0)
-  const hasCharges = charges._count._all > 0
-  const charged = hasCharges ? chargesTotal : round2(booking.totalAmount)
-  const paid = round2(payments.reduce((s, p) => s + signed(p), 0))
-
-  return {
-    bookingId,
-    /// Сколько должен: сумма строк начислений; без строк — сохранённый итог брони
-    charged,
-    chargesTotal,
-    /// false — начислений ещё нет, «начислено» взято из Booking.totalAmount
-    chargesFromRows: hasCharges,
-    totalAmount: round2(booking.totalAmount),
-    prepaidAmount: round2(booking.prepaidAmount),
-    /// Сколько принято (возвраты вычтены, отменённые не в счёт)
-    paid,
-    /// Долг. Отрицательный — переплата, её видно так же явно, как недоплату
-    due: round2(charged - paid),
-  }
 }
 
 // ─── Чтение ──────────────────────────────────────────────────────────────────
@@ -261,30 +211,12 @@ async function debts(req, res, next) {
       orderBy: [{ checkIn: 'asc' }, { id: 'asc' }],
       take: 300,
     })
-    const ids = bookings.map((b) => b.id)
-    if (ids.length === 0) return res.json({ data: { businessDate, bookings: [] } })
+    if (bookings.length === 0) return res.json({ data: { businessDate, bookings: [] } })
 
-    const chargeRows = await prisma.bookingCharge.groupBy({
-      by: ['bookingId'],
-      where: { bookingId: { in: ids } },
-      _sum: { amount: true },
-    })
-    const chargeMap = new Map(chargeRows.map((r) => [r.bookingId, round2(r._sum.amount || 0)]))
-
-    const paymentRows = await prisma.payment.findMany({
-      where: { bookingId: { in: ids } },
-      select: { bookingId: true, kind: true, amount: true, voidedAt: true },
-    })
-    const paidMap = new Map()
-    for (const p of paymentRows) {
-      paidMap.set(p.bookingId, (paidMap.get(p.bookingId) || 0) + signed(p))
-    }
-
+    const money = await loadBookingMoney(bookings)
     const rows = bookings.map((b) => {
-      const hasCharges = chargeMap.has(b.id)
-      const charged = hasCharges ? chargeMap.get(b.id) : round2(b.totalAmount)
-      const paid = round2(paidMap.get(b.id) || 0)
-      return { ...b, charged, chargesFromRows: hasCharges, paid, due: round2(charged - paid) }
+      const m = money.get(b.id)
+      return { ...b, charged: m.charged, chargesFromRows: m.chargesFromRows, paid: m.paid, due: m.due }
     })
 
     res.json({ data: { businessDate, bookings: rows } })

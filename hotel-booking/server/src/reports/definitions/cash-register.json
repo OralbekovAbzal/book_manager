@@ -1,0 +1,79 @@
+{
+  "id": "cash-register",
+  "version": 1,
+  "title": "Касса за период",
+  "description": "Принято, возвращено и нетто по способам оплаты. День считается по смене (рабочей дате), а не по часам. Отменённые записи в суммы не входят и видны отдельной колонкой.",
+  "icon": "chart",
+  "dataset": "payments",
+  "params": [
+    {
+      "key": "period",
+      "type": "dateRange",
+      "label": "Период",
+      "required": true,
+      "default": { "preset": "currentMonth" },
+      "presets": ["today", "last7", "last30", "currentMonth", "prevMonth", "currentYear", "prevYear"]
+    },
+    {
+      "key": "groupBy",
+      "type": "select",
+      "label": "Группировка",
+      "default": "businessDate",
+      "options": [
+        { "value": "businessDate", "label": "По дням (смена)" },
+        { "value": "businessMonth", "label": "По месяцам" },
+        { "value": "weekday", "label": "По дням недели" },
+        { "value": "methodLabel", "label": "По способу оплаты" },
+        { "value": "adminName", "label": "По сотруднику" },
+        { "value": "kindLabel", "label": "По виду операции" },
+        { "value": "building", "label": "По корпусам" },
+        { "value": "guestName", "label": "По гостям" }
+      ]
+    },
+    {
+      "key": "voided",
+      "type": "select",
+      "label": "Отменённые записи",
+      "default": "include",
+      "hint": "В суммы они не входят никогда — вопрос только в том, показывать ли их отдельной колонкой.",
+      "options": [
+        { "value": "include", "label": "Показать в колонке «Отменено»" },
+        { "value": "exclude", "label": "Не показывать" },
+        { "value": "only", "label": "Только отменённые" }
+      ]
+    },
+    {
+      "key": "method",
+      "type": "select",
+      "label": "Способ оплаты",
+      "placeholder": "Любой",
+      "options": [
+        { "value": "cash", "label": "Наличные" },
+        { "value": "card", "label": "Карта" },
+        { "value": "transfer", "label": "Перевод" }
+      ]
+    },
+    { "key": "adminName", "type": "select", "label": "Кто принял", "optionsFrom": "admins", "placeholder": "Все" }
+  ],
+  "filters": [
+    { "field": "isVoided", "op": "isFalse", "when": { "param": "voided", "eq": "exclude" } },
+    { "field": "isVoided", "op": "isTrue", "when": { "param": "voided", "eq": "only" } },
+    { "field": "method", "op": "eq", "param": "method" },
+    { "field": "adminName", "op": "eq", "param": "adminName" }
+  ],
+  "groupBy": { "param": "groupBy" },
+  "columns": [
+    { "key": "group", "field": "$group", "titleFrom": "$group", "width": 170, "total": false },
+    { "key": "cash", "title": "Наличные", "metric": "cash", "width": 110 },
+    { "key": "card", "title": "Карта", "metric": "card", "width": 110 },
+    { "key": "transfer", "title": "Перевод", "metric": "transfer", "width": 110 },
+    { "key": "received", "title": "Принято", "metric": "received", "width": 120 },
+    { "key": "refunded", "title": "Возвращено", "metric": "refunded", "width": 120 },
+    { "key": "net", "title": "Нетто", "metric": "net", "width": 130 },
+    { "key": "operations", "title": "Операций", "metric": "operations", "width": 90 },
+    { "key": "voidedAmount", "title": "Отменено", "metric": "voidedAmount", "width": 110 }
+  ],
+  "sort": [{ "key": "group", "dir": "asc" }],
+  "chart": { "type": "bar", "x": "group", "y": "net" },
+  "totalsLabel": "Итого за период"
+}

@@ -1,5 +1,6 @@
 const { prisma } = require('../../utils/prisma')
 const { isoDate, isoMonth, daysBetween, weekdayName, toUTCDate } = require('../dateUtils')
+const { loadBookingMoney } = require('../../utils/bookingMoney')
 
 /**
  * Датасет «Брони»: одна строка = одна бронь.
@@ -51,10 +52,21 @@ const fields = {
   partnerName:   { label: 'Партнёр',     type: 'text', groupable: true, optionsFrom: 'partners' },
   partnerCommission: { label: 'Комиссия партнёра, %', type: 'number' },
   flags:         { label: 'Метки',       type: 'list' },
-  totalAmount:   { label: 'Сумма',       type: 'money' },
+  // Деньги брони. `charged`/`paidNet`/`debtAmount` считаются тем же кодом, что
+  // и экран «кто сколько должен» (`utils/bookingMoney.js`) — иначе отчёт о
+  // долгах и стойка называли бы разные суммы.
+  charged:       { label: 'Начислено',   type: 'money',
+                   description: 'Сумма строк начислений; если строк нет — сохранённый итог брони' },
+  chargesFromRows: { label: 'Начислено строками', type: 'bool', groupable: true,
+                   description: 'Нет — у брони нет строк начислений, сумма взята из итога брони' },
+  paidNet:       { label: 'Принято',     type: 'money',
+                   description: 'Сумма платежей журнала: возврат минусом, отменённые не в счёт' },
+  debtAmount:    { label: 'Долг',        type: 'money',
+                   description: 'Начислено − принято. Минус означает переплату' },
+  totalAmount:   { label: 'Сумма брони (итог)', type: 'money' },
   prepaidAmount: { label: 'Предоплата',  type: 'money' },
-  paidAmount:    { label: 'Оплачено',    type: 'money' },
-  debtAmount:    { label: 'Остаток',     type: 'money' },
+  paidAmount:    { label: 'Оплачено (поле брони)', type: 'money',
+                   description: 'Кэш суммы платежей. У старых броней заполнен вручную и может отличаться от журнала' },
   discountPercent:{ label: 'Скидка, %',  type: 'number' },
   createdByName: { label: 'Кто создал',  type: 'text', groupable: true, optionsFrom: 'admins' },
   createdAt:     { label: 'Создана',     type: 'datetime' },
@@ -69,9 +81,14 @@ const metrics = {
   avgNights:    { label: 'Средняя длина, ночей',   expr: 'avg(nights)',                type: 'number', decimals: 1 },
   guests:       { label: 'Гостей',                 expr: 'sum(guests)',                type: 'int' },
   uniqueGuests: { label: 'Уникальных гостей',      expr: 'countDistinct(guestName)',   type: 'int' },
-  revenue:      { label: 'Сумма броней',           expr: 'sum(totalAmount)',           type: 'money' },
-  paid:         { label: 'Оплачено',               expr: 'sum(paidAmount)',            type: 'money' },
-  debt:         { label: 'Остаток к оплате',       expr: 'sum(debtAmount)',            type: 'money' },
+  revenue:      { label: 'Сумма броней',           expr: 'sum(totalAmount)',           type: 'money', decimals: 0 },
+  charged:      { label: 'Начислено',              expr: 'sum(charged)',               type: 'money', decimals: 0 },
+  paid:         { label: 'Принято',                expr: 'sum(paidNet)',               type: 'money', decimals: 0 },
+  debt:         { label: 'Долг',                   expr: 'sum(debtAmount)',            type: 'money', decimals: 0,
+                  description: 'Начислено минус принято по всем броням группы' },
+  debtOnly:     { label: 'Долг (без переплат)',    expr: 'sumIf(debtAmount, debtAmount > 0)', type: 'money', decimals: 0,
+                  description: 'Переплаты не гасят чужой долг' },
+  debtors:      { label: 'Должников',              expr: 'countIf(debtAmount > 0)',    type: 'int' },
   avgCheck:     { label: 'Средний чек',            expr: 'sum(totalAmount) / count()', type: 'money', decimals: 0 },
   cancelled:    { label: 'Отменено',               expr: "countIf(status = 'CANCELLED')", type: 'int' },
   cancelRate:   { label: 'Доля отмен, %',          expr: "countIf(status = 'CANCELLED') / count() * 100", type: 'percent', decimals: 1,
@@ -117,7 +134,12 @@ async function load({ params }) {
     orderBy: [{ checkIn: 'asc' }, { id: 'asc' }],
   })
 
+  // Начислено / принято / долг — одним групповым запросом на всю выборку,
+  // а не по запросу на бронь: отчёт за год это сотни строк.
+  const money = await loadBookingMoney(rows)
+
   return rows.map((b) => {
+    const m = money.get(b.id)
     const adults = b.adultsWithMeals + b.adultsNoMeals + b.disabledAdults
     const children = b.childrenWithMeals + b.childrenNoMeals + b.disabledChildren
     const extraBeds = b.extraBedsWithMeals + b.extraBedsNoMeals
@@ -149,10 +171,13 @@ async function load({ params }) {
       partnerName: (b.partner && b.partner.name) || '',
       partnerCommission: b.partner && b.partner.commissionPercent !== null ? b.partner.commissionPercent : null,
       flags: b.flags || [],
+      charged: m.charged,
+      chargesFromRows: m.chargesFromRows,
+      paidNet: m.paid,
+      debtAmount: m.due,
       totalAmount: b.totalAmount,
       prepaidAmount: b.prepaidAmount,
       paidAmount: b.paidAmount,
-      debtAmount: Math.max(0, b.totalAmount - b.paidAmount),
       discountPercent: b.discountPercent,
       createdByName: (b.createdBy && b.createdBy.name) || '',
       createdAt: b.createdAt,

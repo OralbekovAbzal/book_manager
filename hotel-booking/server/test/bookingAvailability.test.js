@@ -49,6 +49,14 @@ const CREATE_DEFAULTS = {
   // их не пишет — но BOOKING_SELECT спрашивает, и фейк падает на отсутствующем поле.
   actualCheckInAt: null,
   actualCheckOutAt: null,
+  // Документ гостя — по той же причине: BOOKING_SELECT спрашивает все шесть полей,
+  // и фикстура без них падает не на поведении контроллера, а на самой себе.
+  guestCitizenship: null,
+  guestDocType: null,
+  guestDocNumber: null,
+  guestDocExpiry: null,
+  guestBirthDate: null,
+  guestSex: null,
   room: room(101),
   createdBy: { id: 1, name: 'Админ' },
   createdAt: d('2026-06-01'),

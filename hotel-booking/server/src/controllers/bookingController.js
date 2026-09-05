@@ -90,10 +90,80 @@ function respondMoveBlocked(res, block) {
   return res.status(409).json({ error: block.message })
 }
 
+// ─── Документ гостя ──────────────────────────────────────────────────────────
+//
+// Шесть полей документа ходят всегда вместе — при создании, при правке, при
+// переезде и при подстановке из прошлого визита. Список поэтому ОДИН и живёт
+// здесь: дописать седьмое поле в схему и забыть про него в переезде было бы
+// очень легко, а обнаружилось бы это через месяц пустой строкой в паспорте.
+const GUEST_DOC_FIELDS = [
+  'guestCitizenship', 'guestDocType', 'guestDocNumber',
+  'guestDocExpiry', 'guestBirthDate', 'guestSex',
+]
+// Эти два — @db.Date: из формы приходят строкой «ГГГГ-ММ-ДД», Prisma ждёт Date.
+const GUEST_DOC_DATE_FIELDS = ['guestDocExpiry', 'guestBirthDate']
+
+/**
+ * Значение одного поля документа из тела запроса.
+ * Пустая строка из формы — это «поле не заполнено», а не значение: очищенный
+ * `<input>` присылает '', и записать её в базу значило бы завести гостя с
+ * гражданством «» — оно не равно null и портит и выборки, и подстановку.
+ */
+function guestDocValue(field, raw) {
+  if (raw === null || raw === undefined) return null
+  const s = String(raw).trim()
+  if (!s) return null
+  // new Date('ГГГГ-ММ-ДД') — это UTC-полночь, ровно то, что хранит @db.Date
+  // (см. правило про даты в NOTES.md). Формат проверен в routes/bookings.js.
+  return GUEST_DOC_DATE_FIELDS.includes(field) ? new Date(s) : s
+}
+
+/** Полный набор для create: чего не прислали — того у гостя нет, пишем null. */
+function guestDocCreateData(body) {
+  const data = {}
+  for (const f of GUEST_DOC_FIELDS) data[f] = guestDocValue(f, body[f])
+  return data
+}
+
+/**
+ * Частичный PUT: поля, которых В ТЕЛЕ НЕТ, не трогаем вовсе.
+ * Это не мелочь — бронь сохраняется не только из карточки заселения: сдвиг дат
+ * из шахматки или правка заметки отправляют своё подмножество полей, и
+ * «отсутствует = очистить» стёрло бы паспорт молча. Явный null (стереть) от
+ * отсутствия поля отличается, как и у guestPhone/notes рядом.
+ */
+function guestDocUpdateData(body) {
+  const data = {}
+  for (const f of GUEST_DOC_FIELDS) {
+    if (body[f] !== undefined) data[f] = guestDocValue(f, body[f])
+  }
+  return data
+}
+
+/**
+ * Переезд: документ едет вместе с гостем. Это тот же человек в другом номере —
+ * оставить вторую часть без паспорта значило бы «кто жил в 12-м после переезда»
+ * ответить уже нельзя, а ради этого вопроса поля и заводились.
+ */
+function guestDocCopy(existing) {
+  const data = {}
+  for (const f of GUEST_DOC_FIELDS) data[f] = existing[f] ?? null
+  return data
+}
+
 const BOOKING_SELECT = {
   id: true,
   guestName: true,
   guestPhone: true,
+  // Документ гостя. В общем select, а не в «подробном»: карточка просмотра брони
+  // и форма заселения читают тот же payload, что уходит в socket-события, и без
+  // этих полей второе рабочее место показывало бы бронь без паспорта до перезагрузки.
+  guestCitizenship: true,
+  guestDocType: true,
+  guestDocNumber: true,
+  guestDocExpiry: true,
+  guestBirthDate: true,
+  guestSex: true,
   checkIn: true,
   checkOut: true,
   // Фактические моменты заезда/выезда — настоящие timestamp'ы (не @db.Date):
@@ -272,6 +342,10 @@ async function create(req, res, next) {
           roomId,
           guestName: guestName.trim(),
           guestPhone: guestPhone?.trim() || null,
+          // Документ чаще всего пустой: бронь по телефону заводят до приезда,
+          // паспорт появляется на стойке при заселении. Но если стойка заводит
+          // бронь уже с гостем перед стойкой — записать его можно сразу.
+          ...guestDocCreateData(req.body),
           checkIn: new Date(checkIn),
           checkOut: new Date(checkOut),
           status: initialStatus,
@@ -453,6 +527,7 @@ async function update(req, res, next) {
           roomId: newRoomId,
           guestName: guestName?.trim() ?? existing.guestName,
           guestPhone: guestPhone !== undefined ? guestPhone?.trim() || null : existing.guestPhone,
+          ...guestDocUpdateData(req.body),
           checkIn: newCheckIn,
           checkOut: newCheckOut,
           source: source !== undefined ? source : existing.source,
@@ -815,6 +890,7 @@ async function move(req, res, next) {
           roomId: parseInt(newRoomId),
           guestName: existing.guestName,
           guestPhone: existing.guestPhone,
+          ...guestDocCopy(existing),
           checkIn: moveDateD,
           checkOut: existing.checkOut,
           status: 'CHECKED_IN',

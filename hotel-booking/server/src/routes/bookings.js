@@ -45,6 +45,35 @@ const bookingNumericRules = [
     .withMessage('Количество услуги — от 0 до 999'),
 ]
 
+// ─── Документ гостя ──────────────────────────────────────────────────────────
+// Набор полей — под уведомление о прибытии иностранца (МВД) и статистику по
+// гражданству. Значения перечислений проверяем здесь, а не в контроллере:
+// 'passport'/'id_card'/'other' и 'm'/'f' — это КОНТРАКТ с клиентом, и опечатка
+// в нём должна отвечать 400 сразу, а не всплыть через полгода при выгрузке.
+//
+// `checkFalsy: true` во всех правилах — намеренно: очищенное поле формы приходит
+// пустой строкой, и это «не заполнено», а не ошибка ввода. В базу её кладёт
+// контроллер как null (guestDocValue), проверять тут нечего.
+const DOC_TYPES = ['passport', 'id_card', 'other']
+const SEXES = ['m', 'f']
+
+const guestDocRules = [
+  body('guestCitizenship').optional({ nullable: true, checkFalsy: true }).trim()
+    .isLength({ max: 60 }).withMessage('Гражданство — до 60 символов'),
+  body('guestDocType').optional({ nullable: true, checkFalsy: true }).isIn(DOC_TYPES)
+    .withMessage('Тип документа: паспорт, удостоверение личности или иной'),
+  body('guestDocNumber').optional({ nullable: true, checkFalsy: true }).trim()
+    .isLength({ max: 40 }).withMessage('Номер документа — до 40 символов'),
+  // strictMode: без него validator принимает и «2026/05/14», и «2026-5-14»,
+  // а new Date() в контроллере разберёт их по-своему. Даты документа — ровно
+  // ГГГГ-ММ-ДД, как checkIn/checkOut, и без времени (@db.Date).
+  body(['guestDocExpiry', 'guestBirthDate']).optional({ nullable: true, checkFalsy: true })
+    .isDate({ format: 'YYYY-MM-DD', strictMode: true })
+    .withMessage('Дата документа — в формате ГГГГ-ММ-ДД'),
+  body('guestSex').optional({ nullable: true, checkFalsy: true }).isIn(SEXES)
+    .withMessage('Пол — «m» или «f»'),
+]
+
 const bookingBodyRules = [
   body('roomId').isInt({ min: 1 }).withMessage('roomId обязателен').toInt(),
   body('guestName').trim().notEmpty().withMessage('Имя гостя обязательно').isLength({ max: 100 }),
@@ -53,6 +82,7 @@ const bookingBodyRules = [
   body('checkOut').isDate().withMessage('checkOut обязателен (YYYY-MM-DD)'),
   body('source').optional({ nullable: true }).isIn(SOURCES).withMessage('Недопустимый источник брони'),
   body('notes').optional({ nullable: true }).isLength({ max: 1000 }),
+  ...guestDocRules,
   ...bookingNumericRules,
 ]
 
@@ -74,6 +104,9 @@ const bookingUpdateRules = [
   ...actualTimesRules,
   body('source').optional({ nullable: true }).isIn(SOURCES).withMessage('Недопустимый источник брони'),
   body('notes').optional({ nullable: true }).isLength({ max: 1000 }),
+  // Документ дозаполняют ИМЕННО через PUT: бронь завели по телефону, паспорт
+  // принесли на стойку. Это основной сценарий, а не побочный.
+  ...guestDocRules,
   ...bookingNumericRules,
 ]
 

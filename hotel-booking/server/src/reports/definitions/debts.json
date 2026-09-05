@@ -1,0 +1,82 @@
+{
+  "id": "debts",
+  "version": 1,
+  "title": "Долги",
+  "description": "Кто сколько должен: начислено, принято по журналу платежей, остаток. По умолчанию — незакрытые долги по неотменённым броням.",
+  "icon": "list",
+  "dataset": "bookings",
+  "params": [
+    {
+      "key": "period",
+      "type": "dateRange",
+      "label": "Период проживания",
+      "required": true,
+      "default": { "preset": "currentYear" },
+      "hint": "Какие брони попадут в список. Долг не исчезает после выезда — берите период пошире.",
+      "presets": ["today", "last30", "currentMonth", "prevMonth", "currentYear", "prevYear"]
+    },
+    {
+      "key": "periodMode",
+      "type": "select",
+      "label": "Период считать",
+      "default": "overlap",
+      "options": [
+        { "value": "overlap", "label": "По проживанию" },
+        { "value": "checkIn", "label": "По заезду" },
+        { "value": "checkOut", "label": "По выезду" },
+        { "value": "created", "label": "По дате создания" }
+      ]
+    },
+    {
+      "key": "show",
+      "type": "select",
+      "label": "Показывать",
+      "default": "debt",
+      "options": [
+        { "value": "debt", "label": "Только долги" },
+        { "value": "over", "label": "Только переплаты" },
+        { "value": "all", "label": "Все брони" }
+      ]
+    },
+    {
+      "key": "statuses",
+      "type": "multiselect",
+      "label": "Статусы",
+      "default": ["CONFIRMED", "CHECKED_IN", "CHECKED_OUT"],
+      "options": [
+        { "value": "CONFIRMED", "label": "Подтверждена" },
+        { "value": "CHECKED_IN", "label": "Заехал" },
+        { "value": "CHECKED_OUT", "label": "Выехал" },
+        { "value": "CANCELLED", "label": "Отменена" },
+        { "value": "NO_SHOW", "label": "Не заехал" }
+      ]
+    },
+    { "key": "building", "type": "select", "label": "Корпус", "optionsFrom": "buildings", "placeholder": "Все" },
+    { "key": "categoryName", "type": "select", "label": "Категория", "optionsFrom": "categories", "placeholder": "Все" },
+    { "key": "guest", "type": "text", "label": "Гость", "placeholder": "Часть имени" }
+  ],
+  "filters": [
+    { "field": "status", "op": "in", "param": "statuses" },
+    { "field": "isMaintenance", "op": "isFalse" },
+    { "expr": "debtAmount > 0", "when": { "param": "show", "eq": "debt" } },
+    { "expr": "debtAmount < 0", "when": { "param": "show", "eq": "over" } },
+    { "field": "building", "op": "eq", "param": "building" },
+    { "field": "categoryName", "op": "eq", "param": "categoryName" },
+    { "field": "guestName", "op": "contains", "param": "guest" }
+  ],
+  "groupBy": [],
+  "columns": [
+    { "key": "id", "field": "id", "title": "№", "width": 60, "total": false },
+    { "key": "roomNumber", "field": "roomNumber", "width": 80 },
+    { "key": "guestName", "field": "guestName", "width": 190 },
+    { "key": "guestPhone", "field": "guestPhone", "width": 130 },
+    { "key": "checkIn", "field": "checkIn", "width": 100 },
+    { "key": "checkOut", "field": "checkOut", "width": 100 },
+    { "key": "statusLabel", "field": "statusLabel", "width": 120 },
+    { "key": "charged", "field": "charged", "title": "Начислено", "width": 120 },
+    { "key": "paidNet", "field": "paidNet", "title": "Принято", "width": 120 },
+    { "key": "debt", "field": "debtAmount", "title": "Долг", "width": 120 }
+  ],
+  "sort": [{ "key": "debt", "dir": "desc" }, { "key": "checkIn", "dir": "asc" }],
+  "totalsLabel": "Итого"
+}

@@ -3,6 +3,49 @@ const { createError } = require('../middleware/errorHandler')
 
 const PRICING_BASES = ['room', 'person']
 
+/**
+ * Реквизиты для печатных документов (счёт турфирме, подтверждение брони гостю).
+ * Порядок ровно тот, в котором они идут в шапке документа.
+ *
+ * Все — необязательные строки: печать не блокируется отсутствием реквизита,
+ * а выводит то, что заполнено. Иначе свежая установка не смогла бы напечатать
+ * подтверждение брони, пока владелец не найдёт свой IBAN.
+ */
+const REQUISITE_FIELDS = [
+  'legalName', 'bin', 'address', 'phone', 'email',
+  'bankName', 'iban', 'signerName', 'signerTitle',
+]
+
+/**
+ * Пустое поле формы и явный null — одно и то же: «реквизит не заполнен».
+ * Хранить «» нельзя — тогда печать не сможет отличить «нет реквизита»
+ * (строку не выводим) от «есть, но пустой» (выведем пустую строку в шапке).
+ */
+function cleanText(v) {
+  if (v === null || v === undefined) return null
+  const s = String(v).trim()
+  return s === '' ? null : s
+}
+
+/**
+ * БИН/ИИН из свидетельства часто копируют группами («123 456 789 012») —
+ * пробелы убираем молча, а не отвечаем 400 на верный номер.
+ */
+function cleanBin(v) {
+  const s = cleanText(v)
+  return s === null ? null : s.replace(/[\s-]/g, '')
+}
+
+/**
+ * IBAN печатают на бланках группами по четыре и в разном регистре.
+ * Приводим к каноническому виду — сплошная строка заглавными: по этому же
+ * значению банк сверяет счёт, а в документе мы разобьём его на группы сами.
+ */
+function cleanIban(v) {
+  const s = cleanText(v)
+  return s === null ? null : s.replace(/\s/g, '').toUpperCase()
+}
+
 /** Настройки объекта — всегда одна строка (id = 1). Создаём при первом обращении. */
 async function getSettings() {
   const existing = await prisma.hotelSettings.findUnique({ where: { id: 1 } })
@@ -34,6 +77,22 @@ async function update(req, res, next) {
       }
     }
 
+    /**
+     * PUT здесь ЧАСТИЧНЫЙ: в data попадает только то, что реально пришло.
+     * Реквизиты заполняют один раз в настройках, а сохранять настройки объекта
+     * будут потом из других мест (мастер, экран «Объект»), где полей реквизитов
+     * в форме нет вовсе — полное перезаписывание молча стёрло бы IBAN.
+     * Пришедшее пустым (null или «») — наоборот, стирает: опечатку в реквизите
+     * надо чем-то исправлять.
+     */
+    const requisites = {}
+    for (const field of REQUISITE_FIELDS) {
+      if (req.body[field] === undefined) continue
+      if (field === 'bin') requisites.bin = cleanBin(req.body.bin)
+      else if (field === 'iban') requisites.iban = cleanIban(req.body.iban)
+      else requisites[field] = cleanText(req.body[field])
+    }
+
     await getSettings()  // гарантируем, что строка есть
     const data = await prisma.hotelSettings.update({
       where: { id: 1 },
@@ -45,6 +104,7 @@ async function update(req, res, next) {
         ...(lateArrivalHour !== undefined && {
           lateArrivalHour: lateArrivalHour === null ? null : parseInt(lateArrivalHour),
         }),
+        ...requisites,
       },
     })
     res.json({ data })
@@ -53,4 +113,14 @@ async function update(req, res, next) {
   }
 }
 
-module.exports = { get, update, getSettings }
+module.exports = {
+  get,
+  update,
+  getSettings,
+  // Для правил валидации в routes/hotel.js и для тестов: нормализация обязана
+  // быть ОДНА на роут и контроллер, иначе роут проверит одно, а сохранится другое.
+  REQUISITE_FIELDS,
+  cleanText,
+  cleanBin,
+  cleanIban,
+}

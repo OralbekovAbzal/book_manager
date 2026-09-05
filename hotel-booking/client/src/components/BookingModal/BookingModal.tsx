@@ -16,7 +16,12 @@ import {
   checkAvailability,
   fetchBooking,
 } from '../../api/bookings'
-import type { Room, GridBooking, Booking, RatePrice, Service, MealPlan, PricingBase } from '../../types'
+import type { GuestDocPayload } from '../../api/bookings'
+import { lookupGuest } from '../../api/guests'
+import type {
+  Room, GridBooking, Booking, RatePrice, Service, MealPlan, PricingBase,
+  GuestDocType, GuestSex, GuestDocument, GuestLookup,
+} from '../../types'
 import { fetchRoomAvailability } from '../../api/occupancy'
 import { fetchRates } from '../../api/rates'
 import { fetchServices, fetchMealPlans } from '../../api/services'
@@ -383,6 +388,267 @@ const ActualTimeField: React.FC<{
   </Field>
 )
 
+// ─── Документ гостя ───────────────────────────────────────────────────────────
+// Шесть полей, и все необязательные: бронь по телефону заводят за недели, а
+// паспорт появляется на стойке при заселении. Форма держит их одним объектом
+// СТРОК — набор всегда ходит целиком (из брони, из подстановки, в тело
+// запроса), а '' означает «не заполнено» и станет на сервере null.
+//
+// Всё, что ниже, объявлено ДО компонента: константа, объявленная после него,
+// падает при горячей перезагрузке с «is not defined» (временная мёртвая зона).
+// В этом проекте на это наступали дважды.
+
+interface DocFields {
+  guestCitizenship: string
+  guestDocType: string
+  guestDocNumber: string
+  guestDocExpiry: string
+  guestBirthDate: string
+  guestSex: string
+}
+
+const EMPTY_DOC: DocFields = {
+  guestCitizenship: '', guestDocType: '', guestDocNumber: '',
+  guestDocExpiry: '', guestBirthDate: '', guestSex: '',
+}
+
+const DOC_TYPE_OPTIONS: { value: GuestDocType; label: string }[] = [
+  { value: 'passport', label: 'Паспорт' },
+  { value: 'id_card',  label: 'Уд. личности' },
+  { value: 'other',    label: 'Иной' },
+]
+
+const SEX_OPTIONS: { value: GuestSex; label: string }[] = [
+  { value: 'm', label: 'Мужской' },
+  { value: 'f', label: 'Женский' },
+]
+
+/**
+ * Бронь → поля формы. Даты РЕЖЕМ строкой: `guestDocExpiry` и `guestBirthDate` —
+ * это `@db.Date`, и сервер отдаёт их полным ISO ('1988-11-30T00:00:00.000Z').
+ * Разбор в местную зону сдвинул бы день рождения на 29 ноября (грабля проекта).
+ */
+const docFromBooking = (b: Partial<Booking>): DocFields => ({
+  guestCitizenship: b.guestCitizenship ?? '',
+  guestDocType: b.guestDocType ?? '',
+  guestDocNumber: b.guestDocNumber ?? '',
+  guestDocExpiry: (b.guestDocExpiry ?? '').slice(0, 10),
+  guestBirthDate: (b.guestBirthDate ?? '').slice(0, 10),
+  guestSex: b.guestSex ?? '',
+})
+
+/** Документ из прошлого визита → поля формы. `from` — служебное, в форму не идёт. */
+const docFromLookup = (d: GuestDocument): DocFields => ({
+  guestCitizenship: d.guestCitizenship ?? '',
+  guestDocType: d.guestDocType ?? '',
+  guestDocNumber: d.guestDocNumber ?? '',
+  // Здесь даты уже обрезаны сервером (guestController.pickDocument) — в отличие
+  // от полей самой брони выше. Всё равно режем: две ветки не должны расходиться.
+  guestDocExpiry: (d.guestDocExpiry ?? '').slice(0, 10),
+  guestBirthDate: (d.guestBirthDate ?? '').slice(0, 10),
+  guestSex: d.guestSex ?? '',
+})
+
+const docIsEmpty = (d: DocFields) => Object.values(d).every(v => !v.trim())
+
+/**
+ * Что из документа отправлять на сервер.
+ *
+ * `base` — каким документ был у брони. Отправляем ТОЛЬКО изменённые поля, и
+ * очищенное уходит пустой строкой: сервер понимает `''` как «стереть», а
+ * отсутствие ключа — как «не трогать». Разница не теоретическая: бронь
+ * сохраняется и сдвигом дат из шахматки, и правкой заметки, и такое сохранение
+ * не имеет права молча стереть паспорт.
+ *
+ * `base === null` — полную бронь загрузить не удалось. Тогда не отправляем
+ * ничего: пустые поля формы в этом случае означают «не показали», а не «стёрли».
+ */
+function docPayload(cur: DocFields, base: DocFields | null): GuestDocPayload {
+  if (!base) return {}
+  const out: Record<string, string> = {}
+  for (const k of Object.keys(cur) as (keyof DocFields)[]) {
+    const v = cur[k].trim()
+    if (v !== base[k]) out[k] = v
+  }
+  // Значения берутся из полей формы, а не из воздуха: тип документа и пол —
+  // кнопки с фиксированным набором, даты — <input type="date">.
+  return out as GuestDocPayload
+}
+
+/** «№56/2Х, апрель 2027 г.» — откуда взят документ. `timeZone:'UTC'`: @db.Date. */
+const visitHint = (from: GuestDocument['from']) => {
+  const when = new Date(`${from.checkIn.slice(0, 10)}T00:00:00Z`)
+    .toLocaleDateString('ru-RU', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+  return from.roomNumber ? `№${from.roomNumber}, ${when}` : when
+}
+
+/**
+ * Выбор из двух-трёх вариантов пилюлями — как метки и пресеты питания в этой же
+ * форме. Повторное нажатие по активной пилюле ОЧИЩАЕТ поле: тип документа и пол
+ * необязательны, и «ткнул не туда» должно отменяться, а не оставаться навсегда.
+ */
+const ChoiceField: React.FC<{
+  label: string
+  value: string
+  options: { value: string; label: string }[]
+  disabled?: boolean
+  onChange: (v: string) => void
+}> = ({ label, value, options, disabled, onChange }) => (
+  <Field label={label}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      {options.map(o => {
+        const active = value === o.value
+        return (
+          <button
+            key={o.value}
+            type="button"
+            disabled={disabled}
+            title={active ? 'Нажмите ещё раз, чтобы очистить' : undefined}
+            onClick={() => onChange(active ? '' : o.value)}
+            style={{
+              padding: '6px 12px', borderRadius: 20,
+              border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+              background: active ? 'var(--accent-bg)' : 'var(--surface)',
+              color: active ? 'var(--accent-text)' : 'var(--text-muted)',
+              fontSize: '0.88rem', fontWeight: active ? 700 : 500,
+              cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {o.label}
+          </button>
+        )
+      })}
+    </div>
+  </Field>
+)
+
+/**
+ * Шесть полей документа. Даты — обычный `<input type="date">`, а не DatePicker
+ * проекта: тот листает календарь ПО МЕСЯЦАМ, и дата рождения 1988 года стоила бы
+ * четырёх сотен нажатий. Ограничения длины (60 и 40) — те же, что проверяет
+ * сервер: пусть поле не даст набрать лишнего, вместо 400 после «Сохранить».
+ */
+const DocumentFields: React.FC<{
+  value: DocFields
+  disabled?: boolean
+  onPatch: (patch: Partial<DocFields>) => void
+}> = ({ value, disabled, onPatch }) => (
+  // Два ряда, а не один общий `auto-fit` на шесть полей: `auto-fit` схлопывает
+  // ПУСТЫЕ дорожки, поэтому ряд из двух элементов делит всю ширину пополам —
+  // и три пилюли типа документа встают в одну строку, а не переносятся.
+  // В одном общем ряду им доставалась четверть ширины, и «Уд. личности»
+  // уезжала на вторую строку, ломая ровные ряды.
+  <>
+    <div style={fieldGrid(190)}>
+      <Field label="Гражданство">
+        <input
+          type="text"
+          placeholder="Казахстан"
+          maxLength={60}
+          value={value.guestCitizenship}
+          disabled={disabled}
+          onChange={e => onPatch({ guestCitizenship: e.target.value })}
+          style={inputStyle}
+        />
+      </Field>
+      <ChoiceField
+        label="Тип документа"
+        value={value.guestDocType}
+        options={DOC_TYPE_OPTIONS}
+        disabled={disabled}
+        onChange={v => onPatch({ guestDocType: v })}
+      />
+    </div>
+
+    {/* 160px — чтобы на узком окне (~800px) эти четыре вставали хотя бы
+        в две колонки: шесть полей одной лентой читаются заметно хуже. */}
+    <div style={fieldGrid(160)}>
+      <Field label="Номер документа">
+        <input
+          type="text"
+          placeholder="N01234567"
+          maxLength={40}
+          value={value.guestDocNumber}
+          disabled={disabled}
+          onChange={e => onPatch({ guestDocNumber: e.target.value })}
+          style={inputStyle}
+        />
+      </Field>
+      <Field label="Срок действия">
+        <input
+          type="date"
+          value={value.guestDocExpiry}
+          disabled={disabled}
+          onChange={e => onPatch({ guestDocExpiry: e.target.value })}
+          style={inputStyle}
+        />
+      </Field>
+      <Field label="Дата рождения">
+        <input
+          type="date"
+          value={value.guestBirthDate}
+          disabled={disabled}
+          onChange={e => onPatch({ guestBirthDate: e.target.value })}
+          style={inputStyle}
+        />
+      </Field>
+      <ChoiceField
+        label="Пол"
+        value={value.guestSex}
+        options={SEX_OPTIONS}
+        disabled={disabled}
+        onChange={v => onPatch({ guestSex: v })}
+      />
+    </div>
+  </>
+)
+
+/**
+ * Строка под телефоном: «этот гость уже жил у нас — подставить документ?».
+ *
+ * Подставляем ТОЛЬКО по нажатию. Молча заполнить паспорт по совпадению номера
+ * нельзя: телефон могли записать с ошибкой или он перешёл другому человеку, и
+ * тогда в брони окажется чужой документ — а его потом отправлять в МВД.
+ * После подстановки строка не исчезает, а меняется на подтверждение: иначе по
+ * нажатию визуально не происходит ничего.
+ */
+const DocSuggestionRow: React.FC<{
+  from: GuestDocument['from']
+  applied: boolean
+  disabled?: boolean
+  onApply: () => void
+}> = ({ from, applied, disabled, onApply }) => (
+  <div style={{
+    display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+    padding: '8px 12px', borderRadius: 'var(--ui-radius)',
+    background: 'var(--surface-2)', border: '1px solid var(--border-subtle)',
+    fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.4,
+  }}>
+    <span style={{ flex: '1 1 240px', minWidth: 0 }}>
+      {applied
+        ? <>Документ подставлен из брони ({visitHint(from)}) — проверьте поля ниже.</>
+        : <>Этот гость уже жил у нас ({visitHint(from)}) — подставить документ?</>}
+    </span>
+    {!applied && (
+      <button
+        type="button"
+        onClick={onApply}
+        disabled={disabled}
+        style={{
+          padding: '5px 13px', borderRadius: 'var(--ui-radius)',
+          border: '1px solid var(--accent)', background: 'var(--accent-bg)',
+          color: 'var(--accent-text)', fontSize: '0.85rem', fontWeight: 600,
+          cursor: disabled ? 'default' : 'pointer', fontFamily: 'inherit',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        Подставить
+      </button>
+    )}
+  </div>
+)
+
 // Сохранённые суммы брони (edit без пересчёта). totalAmount/prepaidAmount могут отсутствовать,
 // если полную версию с сервера загрузить не удалось.
 interface SavedTotals {
@@ -629,6 +895,15 @@ export const BookingModal: React.FC = () => {
   const [actualCheckInAt, setActualCheckInAt] = useState('')
   const [actualCheckOutAt, setActualCheckOutAt] = useState('')
 
+  // Документ гостя — одним объектом, а не шестью useState: набор ходит целиком.
+  const [doc, setDoc] = useState<DocFields>(EMPTY_DOC)
+  // Документ прошлого визита, найденный по телефону. null — предлагать нечего.
+  const [docSuggestion, setDocSuggestion] = useState<GuestLookup | null>(null)
+  // Нажали «Подставить»: строку предложения меняем на подтверждение.
+  const [docApplied, setDocApplied] = useState(false)
+
+  const patchDoc = (patch: Partial<DocFields>) => setDoc(prev => ({ ...prev, ...patch }))
+
   // Edit: полная бронь с сервера (объект из сетки может быть частичным) и её загрузка
   const [serverBooking, setServerBooking] = useState<Booking | null>(null)
   const [loadingBooking, setLoadingBooking] = useState(false)
@@ -722,6 +997,10 @@ export const BookingModal: React.FC = () => {
       // и раньше `?? 0` обнулял их при сохранении. Пока грузится — «Сохранить» заблокирована.
       setServerBooking(null)
       setServiceLinks([])
+      // Документ, как и услуги, приходит только из GET /bookings/:id: объект
+      // сетки его не несёт. До ответа сервера поля пустые, а «Сохранить»
+      // заблокирована (loadingBooking) — отправить пустой документ нельзя.
+      setDoc(EMPTY_DOC)
       setRecalc(false)
       setLoadingBooking(true)
       fetchBooking(booking.id)
@@ -731,6 +1010,7 @@ export const BookingModal: React.FC = () => {
           applyCalcFields(full)
           // Питание и услуги приходят только из GET /bookings/:id — в объекте сетки их нет
           setServiceLinks(linksFromBooking(full.services))
+          setDoc(docFromBooking(full))
         })
         .catch(() => {
           if (!cancelled) setApiError('Не удалось загрузить бронь целиком, суммы могут быть неточными')
@@ -751,6 +1031,7 @@ export const BookingModal: React.FC = () => {
       })
       // Reset calculator
       applyCalcFields({})
+      setDoc(EMPTY_DOC)
       setSelectedFlags([])
       setCustomFlag('')
       setServerBooking(null)
@@ -772,6 +1053,10 @@ export const BookingModal: React.FC = () => {
     // «только для чтения» с оплаченной брони на следующую открытую, у которой
     // платежей нет; настоящее значение приходит из BookingMoneyBar после загрузки.
     setHasPayments(false)
+    // Предложение подставить документ — про КОНКРЕТНЫЙ телефон. Не сбросить его
+    // значит показать на следующей открытой брони чужую подсказку.
+    setDocSuggestion(null)
+    setDocApplied(false)
     pendingValues.current = null
     // Закрыли модалку (или открыли другую бронь) до ответа сервера — ответ игнорируем
     return () => { cancelled = true }
@@ -844,6 +1129,48 @@ export const BookingModal: React.FC = () => {
   const watchedRoomId  = watch('roomId')
   const watchedCheckIn = watch('checkIn')
   const watchedCheckOut = watch('checkOut')
+  const watchedPhone   = watch('guestPhone')
+
+  // ─── Подстановка документа из прошлого визита ──────────────────────────────
+  // Сравниваем номера по ЦИФРАМ: «+7 705…», «8705…» и «(705)…» — один абонент,
+  // и сервер группирует их так же (guestController.normalizePhone).
+  const phoneDigits = (watchedPhone ?? '').replace(/\D/g, '')
+  const docEmpty = docIsEmpty(doc)
+
+  // Телефон изменили — прошлая подсказка больше не про этого гостя.
+  // Отдельным эффектом, а не внутри поиска ниже: тот зависит ещё и от «документ
+  // пуст», и сброс из него гасил бы подтверждение сразу после подстановки.
+  useEffect(() => {
+    setDocSuggestion(null)
+    setDocApplied(false)
+  }, [phoneDigits])
+
+  // Спрашиваем сервер после паузы в наборе — и только если документ в форме ПУСТ:
+  // когда паспорт уже вписан, предлагать нечего. Меньше 10 цифр — это обрывок,
+  // а не номер: сервер такой всё равно не опознает, а стойка набирает по цифре.
+  useEffect(() => {
+    if (!modal.open || isMaintenance) return
+    if (phoneDigits.length < 10 || !docEmpty) return
+    let cancelled = false
+    const timer = setTimeout(() => {
+      lookupGuest(watchedPhone)
+        .then(r => { if (!cancelled && r.found && r.document) setDocSuggestion(r) })
+        // Сети нет или сервер ответил ошибкой — молчим. Подстановка это удобство,
+        // и красная плашка из-за неё соврала бы, что с бронью что-то не так.
+        .catch(() => {})
+    }, 500)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [modal.open, isMaintenance, phoneDigits, docEmpty])
+
+  const applyDocSuggestion = () => {
+    const d = docSuggestion?.document
+    if (!d) return
+    // Имя НЕ трогаем намеренно: в форме уже может быть набрано «Асель К.» со слов
+    // самого гостя, и заменить его версией из прошлогодней брони — значит
+    // переписать свежие данные старыми. Подставляем ровно документ.
+    setDoc(docFromLookup(d))
+    setDocApplied(true)
+  }
 
   // Find selected room for category name
   const selectedRoom = useMemo(
@@ -1050,6 +1377,14 @@ export const BookingModal: React.FC = () => {
         roomId: Number(values.roomId),
         guestName: values.guestName.trim() || (isMaintenance ? 'Ремонт' : ''),
         guestPhone: isMaintenance ? undefined : (values.guestPhone.trim() || undefined),
+        // Документ гостя: при создании — только заполненное, при правке — только
+        // ИЗМЕНЁННОЕ (очищенное поле уходит пустой строкой = «стереть»).
+        // Причина та же, что у «Оплачено» и фактического времени: бронь
+        // сохраняется и сдвигом дат из шахматки, и правкой заметки, и такое
+        // сохранение не имеет права стереть паспорт. У «Ремонта» гостя нет вовсе.
+        ...(isMaintenance
+          ? {}
+          : docPayload(doc, isEdit ? (serverBooking ? docFromBooking(serverBooking) : null) : EMPTY_DOC)),
         checkIn: values.checkIn,
         checkOut: values.checkOut,
         source: isMaintenance ? 'ремонт' : (values.source || undefined),
@@ -1366,7 +1701,32 @@ export const BookingModal: React.FC = () => {
                   </Field>
                 )}
               </div>
+
+              {/* Подсказка стоит ПОД телефоном и прямо НАД секцией «Документ»:
+                  подставленные поля видно сразу, без прокрутки формы. */}
+              {!isMaintenance && docSuggestion?.document && (docApplied || docEmpty) && (
+                <DocSuggestionRow
+                  from={docSuggestion.document.from}
+                  // Подставили, а потом всё стёрли руками — снова предлагаем, а не
+                  // рапортуем «документ подставлен» над пустыми полями.
+                  applied={docApplied && !docEmpty}
+                  disabled={isClosed}
+                  onApply={applyDocSuggestion}
+                />
+              )}
             </FormSection>
+
+            {/* ── Документ ── данные гостя, поэтому сразу за его именем и
+                телефоном, а не в конце формы. Необязателен: бронь по телефону
+                заводят за недели, паспорт появляется на стойке при заселении. */}
+            {!isMaintenance && (
+              <FormSection title="Документ">
+                <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', lineHeight: 1.45, marginTop: -4 }}>
+                  Заполняется при заселении. Сохранить бронь без документа можно.
+                </div>
+                <DocumentFields value={doc} disabled={isClosed} onPatch={patchDoc} />
+              </FormSection>
+            )}
 
             {/* ── Размещение ── у группы теперь свой заголовок, поэтому обёртка
                 Field с подписью «Номер комнаты» убрана: она дублировала подпись

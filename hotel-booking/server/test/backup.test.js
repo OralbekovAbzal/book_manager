@@ -197,10 +197,29 @@ function fixture() {
       id: 20, code: 'breakfast', name: 'Завтрак', price: 2000, childPrice: 1000,
       unit: 'per_person_night', kind: 'meal', includedByDefault: true, isActive: true, order: 0,
     }],
+    // Реквизиты объекта: единственное место, где они хранятся. Потерять их при
+    // восстановлении — значит получить установку, которая не может напечатать
+    // счёт, и восстанавливать их будет неоткуда.
+    hotelSettings: [{
+      id: 1, name: 'Туран', city: 'Караганда', currency: 'KZT', pricingBase: 'person',
+      lateArrivalHour: null, setupCompletedAt: T('2026-01-01T00:00:00Z'),
+      legalName: 'ИП Оралбеков А.', bin: '990514300123',
+      address: 'Карагандинская обл., п. Каркаралинск, ул. Лесная, 1',
+      phone: '+7 (7212) 55-55-55', email: 'turan@example.kz',
+      bankName: 'АО «Kaspi Bank»', iban: 'KZ868562000000327523',
+      signerName: 'Оралбеков А.', signerTitle: 'Директор',
+      updatedAt: T('2026-01-01T00:00:00Z'),
+    }],
     booking: [{
       id: 41, roomId: 10, guestName: 'Асель', guestPhone: '+77010000000',
       checkIn: D('2026-08-25'), checkOut: D('2026-08-28'), status: 'CONFIRMED',
       source: null, notes: null,
+      // Документ гостя: состав копии собирается из DMMF, и новая колонка обязана
+      // попадать в файл САМА. Это ровно та дыра, на которую наступали дважды
+      // (касса не попадала в копию), поэтому проверяем, а не верим механизму.
+      guestCitizenship: 'Казахстан', guestDocType: 'id_card',
+      guestDocNumber: '990514300123',
+      guestDocExpiry: D('2030-05-14'), guestBirthDate: D('1999-05-14'), guestSex: 'f',
       adultsWithMeals: 2, childrenWithMeals: 0, adultsNoMeals: 0, childrenNoMeals: 0,
       extraBedsWithMeals: 0, extraBedsNoMeals: 0, disabledAdults: 0, disabledChildren: 0,
       discountPercent: 0, prepaymentPercent: 50,
@@ -287,6 +306,70 @@ describe('состав копии', () => {
     expect(dump.tables.BackupLog).toBeUndefined()
     // Снимки — тоже: они весили 87 % файла и восстанавливать их незачем
     expect(dump.tables.Snapshot).toBeUndefined()
+  })
+
+  it('документ гостя попадает в копию и возвращается из неё', async () => {
+    const { prisma, tables } = createDb(fixture())
+    const backup = loadBackup(prisma)
+
+    const { filename } = await backup.createBackup()
+    const dump = readDump(filename)
+
+    expect(dump.tables.Booking[0]).toMatchObject({
+      guestCitizenship: 'Казахстан',
+      guestDocType: 'id_card',
+      guestDocNumber: '990514300123',
+      guestSex: 'f',
+    })
+    // Даты в файле — ISO-строки, как и остальные даты копии
+    expect(dump.tables.Booking[0].guestBirthDate).toContain('1999-05-14')
+
+    // И обратно: восстановление кладёт документ на место, а не теряет его
+    tables.booking.length = 0
+    await backup.restoreBackup(filename)
+    expect(tables.booking[0]).toMatchObject({
+      guestDocNumber: '990514300123',
+      guestDocType: 'id_card',
+    })
+  })
+
+  it('реквизиты объекта попадают в копию и возвращаются из неё', async () => {
+    // Проверка того же механизма на другой таблице: состав копии берётся из
+    // DMMF, значит девять новых колонок HotelSettings обязаны уехать в файл
+    // сами. Цена ошибки здесь выше, чем у брони: строка ОДНА, и если она
+    // вернётся пустой, реквизиты юрлица восстанавливать будет неоткуда —
+    // печать счёта останется без шапки до тех пор, пока их не введут заново.
+    const { prisma, tables } = createDb(fixture())
+    const backup = loadBackup(prisma)
+
+    const { filename } = await backup.createBackup()
+    const dump = readDump(filename)
+
+    expect(dump.tables.HotelSettings).toHaveLength(1)
+    expect(dump.tables.HotelSettings[0]).toMatchObject({
+      legalName: 'ИП Оралбеков А.',
+      bin: '990514300123',
+      address: 'Карагандинская обл., п. Каркаралинск, ул. Лесная, 1',
+      phone: '+7 (7212) 55-55-55',
+      email: 'turan@example.kz',
+      bankName: 'АО «Kaspi Bank»',
+      iban: 'KZ868562000000327523',
+      signerName: 'Оралбеков А.',
+      signerTitle: 'Директор',
+    })
+
+    // Восстановление кладёт их обратно на ту же единственную строку id = 1
+    tables.hotelSettings.length = 0
+    const res = await backup.restoreBackup(filename)
+    expect(res.restored.HotelSettings).toBe(1)
+    expect(tables.hotelSettings[0]).toMatchObject({
+      id: 1,
+      name: 'Туран',
+      legalName: 'ИП Оралбеков А.',
+      bin: '990514300123',
+      iban: 'KZ868562000000327523',
+      signerTitle: 'Директор',
+    })
   })
 })
 

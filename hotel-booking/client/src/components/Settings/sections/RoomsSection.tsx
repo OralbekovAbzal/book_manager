@@ -10,6 +10,32 @@ type Segment = 'all' | 'active' | 'hidden'
 
 const GRID_COLS = '80px 1fr 90px 1.5fr 120px 36px'
 
+/** Форма ответа сервера об отказе — общая для 400/403 у номеров. */
+interface RoomApiError {
+  response?: { data?: { error?: string; code?: string; limit?: number; used?: number } }
+}
+
+/**
+ * Текст отказа для человека за стойкой.
+ *
+ * Отдельно разбирается только лимит лицензии (403 `LICENSE_ROOM_LIMIT`): у него
+ * есть цифры, которых нет в тексте сервера, и без них «обратитесь к поставщику»
+ * выглядит произволом. Остальные ошибки сервер уже формулирует по-русски.
+ */
+function describeRoomError(e: unknown, fallback: string): string {
+  const data = (e as RoomApiError)?.response?.data
+  const message = data?.error ?? fallback
+  if (data?.code !== 'LICENSE_ROOM_LIMIT') return message
+  return `${message}. Номеров по лицензии: ${data.limit ?? '—'}, сейчас активно: ${data.used ?? '—'}.`
+}
+
+/** Полоса отказа над списком — для действий, у которых нет открытой формы. */
+const actionErrorStyle: React.CSSProperties = {
+  margin: '14px 0 0', padding: '10px 13px', borderRadius: 8,
+  fontSize: '0.86rem', lineHeight: 1.5,
+  border: '1px solid var(--s-overdue)', background: 'var(--surface-2)', color: 'var(--s-overdue)',
+}
+
 export const RoomsSection: React.FC = () => {
   // Справочник — общий, с сервера. Скрытые записи в сторе тоже есть: они нужны,
   // чтобы расшифровать вместимость номера, чью запись уже убрали из списков.
@@ -29,6 +55,9 @@ export const RoomsSection: React.FC = () => {
     number: '', categoryId: 0, building: '', floor: 1, features: [] as string[], capacity: '',
   })
   const [error, setError] = useState('')
+  // Отказ у действия без формы (вернуть скрытый номер в работу). Раньше здесь
+  // был alert; лимит лицензии — это текст, который надо прочитать, а не «ОК».
+  const [actionError, setActionError] = useState('')
 
   const load = () => {
     setLoading(true)
@@ -72,10 +101,11 @@ export const RoomsSection: React.FC = () => {
       if (editId === 'new') await createRoom(payload)
       else if (editId) await updateRoom(editId as number, payload)
       setEditId(null)
+      setActionError('')
       load()
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } }
-      setError(err?.response?.data?.error ?? 'Ошибка сохранения')
+      // Сюда же приходит 403 LICENSE_ROOM_LIMIT при добавлении сверх лицензии.
+      setError(describeRoomError(e, 'Ошибка сохранения'))
     }
   }
 
@@ -92,10 +122,12 @@ export const RoomsSection: React.FC = () => {
     try {
       if (room.isActive) await deactivateRoom(room.id)
       else await updateRoom(room.id, { isActive: true })
+      setActionError('')
       load()
     } catch (e: unknown) {
-      const err = e as { response?: { data?: { error?: string } } }
-      alert(err?.response?.data?.error ?? 'Ошибка')
+      // Возврат скрытого номера в работу — это +1 к активным, поэтому сюда
+      // приходит тот же лимит лицензии, что и при добавлении нового.
+      setActionError(describeRoomError(e, 'Не удалось изменить номер'))
     }
   }
 
@@ -155,6 +187,8 @@ export const RoomsSection: React.FC = () => {
           Добавить номер
         </button>
       </div>
+
+      {actionError && <div style={actionErrorStyle}>{actionError}</div>}
 
       {/* Toolbar: search + segment */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '18px 0 12px' }}>

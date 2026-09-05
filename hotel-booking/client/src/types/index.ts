@@ -2,6 +2,13 @@ export type BookingStatus = 'CONFIRMED' | 'CHECKED_IN' | 'CHECKED_OUT' | 'CANCEL
 export type AdminRole = 'SUPER_ADMIN' | 'ADMIN' | 'STAFF'
 export type BookingSource = 'телефон' | 'стойка' | 'онлайн' | 'Каспи'
 
+// ─── Документ гостя ───────────────────────────────────────────────────────────
+// Значения перечислений — КОНТРАКТ с сервером (routes/bookings.js отвечает 400
+// на любое другое): 'passport' | 'id_card' | 'other' и 'm' | 'f'. Держим их
+// союзами, а не строками, чтобы опечатка ловилась здесь, а не 400-й на стойке.
+export type GuestDocType = 'passport' | 'id_card' | 'other'
+export type GuestSex = 'm' | 'f'
+
 export interface Category {
   id: number
   name: string
@@ -25,6 +32,20 @@ export interface Booking {
   roomId: number
   guestName: string
   guestPhone?: string
+  /**
+   * Документ гостя — необязателен: бронь по телефону заводят за недели, паспорт
+   * появляется на стойке при заселении.
+   * ⚠️ `guestDocExpiry` и `guestBirthDate` — это `@db.Date`, и сервер отдаёт их
+   * ПОЛНЫМ ISO ('2031-04-02T00:00:00.000Z'), в отличие от `checkIn`/`checkOut`
+   * из тех же ответов. В форму и на экран — только через `.slice(0, 10)`:
+   * разбор в местную зону сдвинул бы дату на день назад.
+   */
+  guestCitizenship?: string | null
+  guestDocType?: GuestDocType | null
+  guestDocNumber?: string | null
+  guestDocExpiry?: string | null
+  guestBirthDate?: string | null
+  guestSex?: GuestSex | null
   checkIn: string   // YYYY-MM-DD
   checkOut: string  // YYYY-MM-DD
   status: BookingStatus
@@ -256,6 +277,42 @@ export interface GuestBooking {
   totalAmount: number
 }
 
+/**
+ * Документ гостя, каким его отдаёт `guestController.pickDocument`: из самого
+ * СВЕЖЕГО визита, где документ вообще заполнен (паспорт меняют, и старый номер
+ * ушёл бы в уведомление МВД неверным).
+ *
+ * Имена полей совпадают с полями брони намеренно: подстановка в форму — это
+ * буквально копирование объекта в тело PUT /bookings/:id, и переименование по
+ * дороге завело бы третье место, где список полей надо не забыть поправить.
+ * Даты здесь УЖЕ обрезаны сервером до YYYY-MM-DD (в отличие от `Booking`).
+ */
+export interface GuestDocument {
+  guestCitizenship: string | null
+  guestDocType: GuestDocType | null
+  guestDocNumber: string | null
+  guestDocExpiry: string | null
+  guestBirthDate: string | null
+  guestSex: GuestSex | null
+  /** Из какой брони взят — единственное поле, которое НЕ идёт в форму */
+  from: {
+    bookingId: number
+    checkIn: string
+    checkOut: string
+    roomNumber: string | null
+  }
+}
+
+/** Ответ `GET /api/guests/lookup?phone=…`. Ничего не меняет — только читает. */
+export interface GuestLookup {
+  found: boolean
+  /** Номер не опознан (обрывок) — null, и это не ошибка */
+  phoneKey: string | null
+  /** Имя из ТОЙ ЖЕ брони, что и документ. Набранное в форме им не затираем. */
+  guestName: string | null
+  document: GuestDocument | null
+}
+
 export interface Guest {
   /** Нормализованные цифры номера — ключ группировки */
   phoneKey: string
@@ -277,6 +334,12 @@ export interface Guest {
   lastVisit: string | null
   /** Ближайший заезд впереди — ради него книгу и открывают */
   nextVisit: string | null
+  /**
+   * Документ гостя. Есть только у карточек, склеенных по ТЕЛЕФОНУ: в группах
+   * `unnamed` (совпало одно имя) его нет намеренно — приписать паспорт одного
+   * человека другому хуже, чем не показать документ вовсе.
+   */
+  document: GuestDocument | null
   bookings: GuestBooking[]
 }
 

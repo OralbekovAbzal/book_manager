@@ -1,5 +1,5 @@
 import api from './client'
-import type { Booking } from '../types'
+import type { Booking, GuestDocType, GuestSex } from '../types'
 
 /**
  * Питание и услуги брони. Присылаются ЦЕЛИКОМ: сервер заменяет набор,
@@ -15,7 +15,30 @@ export interface BookingServicePayload {
   quantity?: number
 }
 
-export interface BookingPayload {
+/**
+ * Документ гостя в теле запроса.
+ *
+ * Три состояния поля, и они РАЗНЫЕ:
+ *   - ключа нет вовсе   → сервер поле не трогает (частичный PUT из шахматки или
+ *     из правки заметки не имеет права стереть паспорт);
+ *   - `''` или `null`   → стереть (очищенный `<input>` присылает пустую строку);
+ *   - значение          → записать.
+ * Поэтому поля необязательные, а очистка идёт именно пустой строкой, а не
+ * пропуском ключа.
+ *
+ * Даты отправляем строго 'YYYY-MM-DD' (сервер проверяет strictMode) — обратно
+ * они придут полным ISO, см. комментарий у `Booking`.
+ */
+export interface GuestDocPayload {
+  guestCitizenship?: string | null
+  guestDocType?: GuestDocType | '' | null
+  guestDocNumber?: string | null
+  guestDocExpiry?: string | null
+  guestBirthDate?: string | null
+  guestSex?: GuestSex | '' | null
+}
+
+export interface BookingPayload extends GuestDocPayload {
   roomId: number
   guestName: string
   guestPhone?: string

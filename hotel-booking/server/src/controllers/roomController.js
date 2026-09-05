@@ -1,6 +1,7 @@
 const { prisma } = require('../utils/prisma')
 const { checkRoomsAvailability, parseFlags } = require('../utils/availability')
 const { createError } = require('../middleware/errorHandler')
+const { getRoomLimit, roomLimitMessage } = require('../utils/license')
 // Сетка /api/occupancy/grid кэшируется на 30 с — после правки номеров сбрасываем кэш,
 // иначе новые/переименованные/скрытые номера появляются в сетке с задержкой.
 const { invalidateGridCache } = require('./occupancyController')
@@ -96,10 +97,31 @@ async function availability(req, res, next) {
   }
 }
 
+/**
+ * Ступень тарифа — это максимум АКТИВНЫХ номеров, и проверяется она только
+ * в момент, когда номер становится активным (создание или включение обратно).
+ *
+ * Почему не «привести базу в соответствие»: у клиента может оказаться номеров
+ * больше, чем в ключе (перешёл со старшей ступени, ошиблись при выпуске,
+ * ключ ещё не продлён). Отключать чужие номера — это стереть работу отеля
+ * за оператора. Поэтому существующие не трогаем никогда, отказываем только
+ * в добавлении сверх лимита.
+ */
+async function roomLimitViolation() {
+  const limit = await getRoomLimit()
+  if (limit === null) return null // ключа нет или он не читается — ограничения нет
+  const used = await prisma.room.count({ where: { isActive: true } })
+  if (used < limit) return null
+  return { error: roomLimitMessage(limit), code: 'LICENSE_ROOM_LIMIT', limit, used }
+}
+
 // POST /api/rooms
 async function create(req, res, next) {
   try {
     const { number, categoryId, building, floor, features, capacity } = req.body
+
+    const blocked = await roomLimitViolation()
+    if (blocked) return res.status(403).json(blocked)
 
     const room = await prisma.room.create({
       data: {
@@ -125,6 +147,16 @@ async function update(req, res, next) {
   try {
     const id = parseInt(req.params.id)
     const { number, categoryId, building, floor, features, capacity, isActive } = req.body
+
+    // Включение отключённого номера — это то же добавление в счёт лимита.
+    // Иначе обойти ступень тарифа можно было бы «выключил — включил».
+    if (isActive === true) {
+      const current = await prisma.room.findUnique({ where: { id }, select: { isActive: true } })
+      if (current && !current.isActive) {
+        const blocked = await roomLimitViolation()
+        if (blocked) return res.status(403).json(blocked)
+      }
+    }
 
     const room = await prisma.room.update({
       where: { id },

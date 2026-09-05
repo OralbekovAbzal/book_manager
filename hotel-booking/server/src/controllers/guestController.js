@@ -84,6 +84,64 @@ const nameKey = (s) => String(s ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
 /** Отменённые и неявки не считаем проживанием, но из списка броней не прячем. */
 const isRealStay = (status) => status !== 'CANCELLED' && status !== 'NO_SHOW'
 
+// ─── Документ гостя ──────────────────────────────────────────────────────────
+
+/**
+ * Поля документа, как они называются в `Booking`. Отдаём их клиенту ровно под
+ * этими именами: подстановка в форму брони — это буквально копирование объекта
+ * в тело PUT /bookings/:id, и переименование по дороге завело бы третье место,
+ * где список полей надо не забыть поправить.
+ */
+const DOC_FIELDS = [
+  'guestCitizenship', 'guestDocType', 'guestDocNumber',
+  'guestDocExpiry', 'guestBirthDate', 'guestSex',
+]
+const DOC_DATE_FIELDS = ['guestDocExpiry', 'guestBirthDate']
+
+const hasDocument = (b) => Boolean(String(b?.guestDocNumber ?? '').trim())
+
+/**
+ * Документ из САМОГО СВЕЖЕГО визита, где он вообще заполнен.
+ *
+ * Почему не «из последней брони вообще»: гость забронировал на август по
+ * телефону — у этой брони паспорта нет и не будет до заезда. Взяв её, карточка
+ * показала бы пустоту, хотя документ есть с прошлого приезда. Ищем поэтому по
+ * НАЛИЧИЮ номера документа, а среди таких берём поздний заезд (id — только
+ * разрешение ничьей: две брони одного дня).
+ *
+ * Свежесть важна не из аккуратности: паспорт меняют, и старый номер уехал бы
+ * в будущее уведомление МВД неверным.
+ *
+ * @returns {object|null} плоский набор полей документа + `from` (откуда взят)
+ */
+function pickDocument(bookings) {
+  const withDoc = bookings.filter(hasDocument)
+  if (withDoc.length === 0) return null
+
+  const latest = withDoc.reduce((a, b) => {
+    const ta = new Date(a.checkIn).getTime()
+    const tb = new Date(b.checkIn).getTime()
+    if (tb !== ta) return tb > ta ? b : a
+    return b.id > a.id ? b : a
+  })
+
+  const doc = {}
+  for (const f of DOC_FIELDS) {
+    // Даты режем до ГГГГ-ММ-ДД, как checkIn/checkOut в этом же ответе: @db.Date
+    // уехал бы как «2030-05-14T00:00:00.000Z», и резать пришлось бы клиенту.
+    doc[f] = DOC_DATE_FIELDS.includes(f)
+      ? (latest[f] ? isoDate(latest[f]) : null)
+      : (latest[f] ?? null)
+  }
+  doc.from = {
+    bookingId: latest.id,
+    checkIn: isoDate(latest.checkIn),
+    checkOut: isoDate(latest.checkOut),
+    roomNumber: latest.room?.number ?? null,
+  }
+  return doc
+}
+
 function bookingRow(b) {
   return {
     id: b.id,
@@ -115,6 +173,8 @@ async function list(_req, res, next) {
           id: true, guestName: true, guestPhone: true,
           checkIn: true, checkOut: true, status: true, source: true,
           totalAmount: true, roomId: true,
+          guestCitizenship: true, guestDocType: true, guestDocNumber: true,
+          guestDocExpiry: true, guestBirthDate: true, guestSex: true,
           room: { select: { number: true } },
         },
         orderBy: { checkIn: 'desc' },
@@ -192,6 +252,10 @@ async function list(_req, res, next) {
         firstVisit,
         lastVisit,
         nextVisit,
+        // Документ показываем ТОЛЬКО в карточке гостя (склейка по телефону),
+        // но не в группах по имени ниже: там два «Ахметов А.» — обычное дело,
+        // и приписать паспорт одного человека другому хуже, чем не показать.
+        document: pickDocument(g.bookings),
         bookings: g.bookings
           .map(bookingRow)
           .sort((a, b) => (a.checkIn < b.checkIn ? 1 : -1)),
@@ -266,4 +330,66 @@ async function list(_req, res, next) {
   }
 }
 
-module.exports = { list, normalizePhone, formatPhone }
+// ─── GET /api/guests/lookup?phone=… ──────────────────────────────────────────
+
+/**
+ * Подстановка документа из прошлого визита. Ничего не пишет.
+ *
+ * Зачем: постоянный гость не должен диктовать паспорт заново каждый приезд —
+ * это ровно та работа, которую стойка сейчас делает в тетради. Диктовка заново
+ * не только медленная, но и врёт: цифры на слух записывают с ошибками, и у
+ * одного человека в базе заводится три разных номера документа.
+ *
+ * Почему сравнение в JS, а не `where: { guestPhone }`: один и тот же номер
+ * записан в базе как попало («+7 701…», «8701…», со скобками), и точное
+ * совпадение строки нашло бы только тех, кому повезло. Ключ — нормализованный
+ * номер (`normalizePhone`, та же функция, что склеивает карточки в списке:
+ * второй нормализации в проекте быть не должно, иначе подстановка и адресная
+ * книга однажды разойдутся в том, кто есть кто).
+ *
+ * Читаем при этом не все брони, а только те, где документ ЗАПОЛНЕН: прочие
+ * ответу всё равно не помогут, а таких строк в базе меньшинство.
+ */
+async function lookup(req, res, next) {
+  try {
+    const key = normalizePhone(req.query.phone)
+    // Номер не опознан (обрывок, пять цифр) — это не ошибка запроса: стойка
+    // набирает номер по цифре, и 400 на каждый недобранный символ был бы шумом.
+    if (!key) {
+      return res.json({ data: { found: false, phoneKey: null, guestName: null, document: null } })
+    }
+
+    const rows = await prisma.booking.findMany({
+      where: { guestPhone: { not: null }, guestDocNumber: { not: null } },
+      select: {
+        id: true, guestName: true, guestPhone: true, checkIn: true, checkOut: true,
+        guestCitizenship: true, guestDocType: true, guestDocNumber: true,
+        guestDocExpiry: true, guestBirthDate: true, guestSex: true,
+        room: { select: { number: true } },
+      },
+    })
+
+    const mine = rows.filter(b => normalizePhone(b.guestPhone) === key)
+    const document = pickDocument(mine)
+    if (!document) {
+      return res.json({ data: { found: false, phoneKey: key, guestName: null, document: null } })
+    }
+
+    // Имя — из ТОЙ ЖЕ брони, что и документ, а не «самое полное из всех», как
+    // в списке: в форму подставляется комплект ОДНОГО визита, и имя из другой
+    // брони не совпало бы с фамилией в подставленном документе.
+    const latest = mine.find(b => b.id === document.from.bookingId)
+    res.json({
+      data: {
+        found: true,
+        phoneKey: key,
+        guestName: latest?.guestName ?? null,
+        document,
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+module.exports = { list, lookup, normalizePhone, formatPhone, pickDocument }

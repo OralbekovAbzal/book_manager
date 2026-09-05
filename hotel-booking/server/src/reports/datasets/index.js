@@ -1,7 +1,14 @@
 const bookings = require('./bookings')
 const roomNights = require('./roomNights')
+const charges = require('./charges')
+const payments = require('./payments')
 
-const DATASETS = { [bookings.id]: bookings, [roomNights.id]: roomNights }
+const DATASETS = {
+  [bookings.id]: bookings,
+  [roomNights.id]: roomNights,
+  [charges.id]: charges,
+  [payments.id]: payments,
+}
 
 function getDataset(id) {
   return DATASETS[id] || null

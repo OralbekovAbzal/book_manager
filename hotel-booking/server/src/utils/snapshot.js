@@ -150,6 +150,10 @@ async function listSnapshots() {
 
 const BOOKING_FIELDS = [
   'id', 'roomId', 'guestName', 'guestPhone', 'checkIn', 'checkOut', 'status',
+  // Документ гостя: список белый, и колонки, которой в нём нет, откат лишает
+  // молча — паспорта у 110 броней исчезли бы без единого сообщения.
+  'guestCitizenship', 'guestDocType', 'guestDocNumber', 'guestDocExpiry',
+  'guestBirthDate', 'guestSex',
   'source', 'notes', 'adultsWithMeals', 'childrenWithMeals', 'adultsNoMeals',
   'childrenNoMeals', 'extraBedsWithMeals', 'extraBedsNoMeals', 'disabledAdults',
   'disabledChildren', 'discountPercent', 'prepaymentPercent', 'totalAmount',
@@ -159,8 +163,10 @@ const BOOKING_FIELDS = [
 ]
 // actualCheckInAt/actualCheckOutAt — настоящие timestamp'ы: в JSON снимка они лежат
 // строками, и без этого списка pickRow вернул бы строку туда, где Prisma ждёт Date.
+// guestDocExpiry/guestBirthDate — по той же причине, хоть они и @db.Date.
 const BOOKING_DATE_FIELDS = [
-  'checkIn', 'checkOut', 'actualCheckInAt', 'actualCheckOutAt', 'createdAt', 'updatedAt',
+  'checkIn', 'checkOut', 'actualCheckInAt', 'actualCheckOutAt',
+  'guestDocExpiry', 'guestBirthDate', 'createdAt', 'updatedAt',
 ]
 
 const CHARGE_FIELDS = [

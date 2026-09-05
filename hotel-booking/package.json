@@ -9,7 +9,7 @@
     "dev:electron": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"wait-on http://localhost:5173 && cd electron && npm run dev\"",
     "build": "npm run build:client && npm run build:electron",
     "build:client": "cd client && npm run build",
-    "build:electron": "cd electron && npm run build",
+    "build:electron": "node server/scripts/stamp-build-date.js && cd electron && npm run build",
     "db:migrate": "cd server && npx prisma migrate dev",
     "db:migrate:create": "cd server && npx prisma migrate dev --create-only",
     "db:migrate:prod": "cd server && npx prisma migrate deploy",

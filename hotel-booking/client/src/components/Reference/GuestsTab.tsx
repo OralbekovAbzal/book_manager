@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { fetchGuests } from '../../api/guests'
-import type { Guest, GuestBook, GuestBooking, UnnamedGuestGroup } from '../../types'
+import type { Guest, GuestBook, GuestBooking, GuestDocument, UnnamedGuestGroup } from '../../types'
 import { EmptyBox, inputStyle, secondaryBtn } from '../Settings/sections/sectionUi'
 
 /**
@@ -39,6 +39,14 @@ const STATUS_COLORS: Record<string, string> = {
   CHECKED_OUT: 'var(--s-out)',
   CANCELLED: 'var(--s-overdue)',
   NO_SHOW: 'var(--s-maint)',
+}
+
+// Подписи типов документа — те же слова, что в форме брони и в её просмотре:
+// одно поле не должно называться по-разному в трёх окнах.
+const DOC_TYPE_LABELS: Record<string, string> = {
+  passport: 'Паспорт',
+  id_card: 'Удостоверение личности',
+  other: 'Документ',
 }
 
 type SortKey = 'recent' | 'visits' | 'name'
@@ -334,6 +342,11 @@ export const GuestsTab: React.FC<Props> = ({ onCopyPhone, onJump }) => {
                 )}
               </div>
 
+              {/* Документ гостя — из самого свежего визита, где он заполнен.
+                  Ради него карточка и заводилась: «звонит постоянный гость» —
+                  паспорт уже есть, диктовать заново не надо. */}
+              {openGuest.document && <DocumentBox doc={openGuest.document} />}
+
               {/* Доказательства склейки: администратор должен ВИДЕТЬ, что мы
                   объединили, а не верить нам на слово. */}
               {openGuest.nameVariants.length > 1 && (
@@ -596,6 +609,42 @@ const MoreHint: React.FC<{ shown: number; total: number }> = ({ shown, total }) 
       </div>
     : null
 )
+
+/**
+ * Документ гостя в его карточке. Показываем гражданство, тип и номер — то, что
+ * стойка переписывает в тетрадь и о чём спрашивают чаще всего.
+ *
+ * Подпись «из брони …» не украшение: документ взят из ОДНОГО конкретного визита
+ * (самого свежего с заполненным паспортом), и администратор должен видеть, из
+ * какого именно — паспорт меняют, и старый номер здесь может быть просто старым.
+ */
+const DocumentBox: React.FC<{ doc: GuestDocument }> = ({ doc }) => {
+  const typeLabel = doc.guestDocType
+    ? DOC_TYPE_LABELS[doc.guestDocType] ?? doc.guestDocType
+    : 'Документ'
+  const number = (doc.guestDocNumber ?? '').trim()
+  return (
+    <div style={{
+      marginTop: 12, padding: '10px 12px', borderRadius: 8,
+      background: 'var(--surface)', border: '1px solid var(--border-subtle)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: '0.88rem', fontWeight: 600, color: 'var(--text)' }}>
+          {typeLabel}{number ? ` ${number}` : ''}
+        </span>
+        {doc.guestCitizenship && (
+          <span style={{
+            fontSize: '0.78rem', fontWeight: 600, padding: '2px 8px', borderRadius: 6,
+            background: 'var(--surface-2)', color: 'var(--text-muted)',
+          }}>{doc.guestCitizenship}</span>
+        )}
+      </div>
+      <div style={{ fontSize: '0.75rem', color: 'var(--text-faint)', marginTop: 5 }}>
+        Из брони{doc.from.roomNumber ? ` №${doc.from.roomNumber}` : ''} от {fmtDate(doc.from.checkIn)}
+      </div>
+    </div>
+  )
+}
 
 const Note: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div style={{

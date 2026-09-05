@@ -5,6 +5,7 @@ import { useSettingsStore } from '../../store/useSettingsStore'
 import { useAuthStore } from '../../store/useAuthStore'
 import { fetchBooking } from '../../api/bookings'
 import { BookingMoneyBar } from '../Payments/BookingMoneyBar'
+import { BookingPrintDialog, type PrintDocKind } from '../Print/BookingPrintDialog'
 import type { Booking } from '../../types'
 
 const STATUS_LABELS: Record<string, string> = {
@@ -41,6 +42,22 @@ const secondaryBtnStyle: React.CSSProperties = {
   fontSize: 'inherit', fontWeight: 600, cursor: 'pointer',
 }
 
+// Кнопки печатных документов — компактнее остальных: в подвале их теперь
+// четыре, а окно брони всего 480px шириной.
+const docBtnStyle: React.CSSProperties = {
+  ...secondaryBtnStyle, padding: '8px 12px', fontSize: '0.9em',
+}
+
+// Документ гостя. Подписи — те же слова, что в форме брони: одно и то же поле
+// не должно называться по-разному в двух окнах.
+const DOC_TYPE_LABELS: Record<string, string> = {
+  passport: 'Паспорт',
+  id_card: 'Удостоверение личности',
+  other: 'Иной документ',
+}
+
+const SEX_LABELS: Record<string, string> = { m: 'Мужской', f: 'Женский' }
+
 const fmtDate = (iso?: string) => {
   if (!iso) return '—'
   return new Date(iso.slice(0, 10) + 'T12:00:00Z').toLocaleDateString('ru-RU', {
@@ -70,6 +87,9 @@ export const BookingViewModal: React.FC = () => {
   // Объект из сетки может прийти без гостей/сумм — тогда подгружаем полную бронь с сервера
   const [full, setFull] = useState<Booking | null>(null)
 
+  // Какой печатный документ открыт поверх карточки (null — ни одного).
+  const [printKind, setPrintKind] = useState<PrintDocKind | null>(null)
+
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') closeModal() }
@@ -82,6 +102,10 @@ export const BookingViewModal: React.FC = () => {
   // карточка врала бы — «гость без завтрака», хотя завтрак у него есть.
   useEffect(() => {
     setFull(null)
+    // Открытый документ принадлежит КОНКРЕТНОЙ брони: при смене брони (и при
+    // закрытии карточки) его надо убрать, иначе следующий открытый гость
+    // увидит счёт предыдущего.
+    setPrintKind(null)
     if (!open || !booking) return
     let cancelled = false
     fetchBooking(booking.id)
@@ -130,6 +154,26 @@ export const BookingViewModal: React.FC = () => {
   // Блокировка номера («Ремонт») — не бронь: денег по ней не бывает.
   const isMaintenance = booking.source === 'ремонт'
 
+  // ─── Документ ───────────────────────────────────────────────────────────────
+  // Только из полной брони: объект сетки этих полей не несёт, и по нему нельзя
+  // отличить «документа нет» от «его не прислали». Пока `full` не загрузилась,
+  // блока нет вовсе — соврать «документ не записан» хуже, чем промолчать.
+  // Тип и номер — одной строкой: «Паспорт AC1234567» читается как в тетради.
+  const docRows: { label: string; value: string }[] = []
+  if (full) {
+    const typeLabel = full.guestDocType ? DOC_TYPE_LABELS[full.guestDocType] ?? full.guestDocType : ''
+    const number = (full.guestDocNumber ?? '').trim()
+    if (full.guestCitizenship) docRows.push({ label: 'Гражданство', value: full.guestCitizenship })
+    if (typeLabel || number) {
+      docRows.push({ label: 'Документ', value: [typeLabel, number].filter(Boolean).join(' ') })
+    }
+    // Даты документа — `@db.Date`, приходят полным ISO. fmtDate режет строку и
+    // показывает с timeZone:'UTC' — иначе сдвиг на день назад.
+    if (full.guestDocExpiry) docRows.push({ label: 'Действителен до', value: fmtDate(full.guestDocExpiry) })
+    if (full.guestBirthDate) docRows.push({ label: 'Дата рождения', value: fmtDate(full.guestBirthDate) })
+    if (full.guestSex) docRows.push({ label: 'Пол', value: SEX_LABELS[full.guestSex] ?? full.guestSex })
+  }
+
   // Правило видимости «Редактировать» — ТО ЖЕ, что в BookingGrid/BookingContextMenu.tsx.
   // Два разных правила в двух местах означали бы кнопку, на которую сервер отвечает 400/403:
   // закрытую бронь `update()` не пускает править вовсе, а CHECKED_OUT администратор
@@ -139,6 +183,7 @@ export const BookingViewModal: React.FC = () => {
   const canEdit = !isClosed || (booking.status === 'CHECKED_OUT' && isAdmin)
 
   return (
+    <>
     <Overlay onClose={closeModal}>
       {/* Header */}
       <div style={{
@@ -189,6 +234,19 @@ export const BookingViewModal: React.FC = () => {
             {guests.adults > 0 && <Row label="Взрослые" value={String(guests.adults)} />}
             {guests.children > 0 && <Row label="Дети" value={String(guests.children)} />}
             {guests.extraBeds > 0 && <Row label="Доп. места" value={String(guests.extraBeds)} />}
+          </Section>
+        )}
+
+        {/* Документ гостя. У «Ремонта» гостя нет — блок ему не показываем. */}
+        {full && !isMaintenance && (
+          <Section title="Документ">
+            {docRows.length > 0
+              ? docRows.map(r => <Row key={r.label} label={r.label} value={r.value} />)
+              : (
+                <div style={{ fontSize: '0.9rem', color: 'var(--text-faint)' }}>
+                  Документ не записан
+                </div>
+              )}
           </Section>
         )}
 
@@ -245,8 +303,23 @@ export const BookingViewModal: React.FC = () => {
       {/* Footer */}
       <div style={{
         padding: '14px 24px', borderTop: '1px solid var(--border)',
-        display: 'flex', justifyContent: 'flex-end', gap: 8,
+        display: 'flex', justifyContent: 'flex-end', alignItems: 'center',
+        gap: 8, flexWrap: 'wrap',
       }}>
+        {/* Печатные документы. Статус не важен: подтверждение отменённой брони
+            тоже спрашивают («покажите, что именно было забронировано»), а счёт
+            остаётся счётом. Исключение — «Ремонт»: это блокировка номера,
+            гостя и денег у неё нет. */}
+        {!isMaintenance && (
+          <div style={{ display: 'flex', gap: 8, marginRight: 'auto' }}>
+            <button onClick={() => setPrintKind('confirmation')} style={docBtnStyle}>
+              Подтверждение
+            </button>
+            <button onClick={() => setPrintKind('invoice')} style={docBtnStyle}>
+              Счёт
+            </button>
+          </div>
+        )}
         {/* «Закрыть» уступает акцент «Редактировать» только когда та есть: у закрытой
             брони без прав единственная кнопка не должна выглядеть второстепенной. */}
         <button onClick={closeModal} style={canEdit ? secondaryBtnStyle : primaryBtnStyle}>Закрыть</button>
@@ -257,6 +330,18 @@ export const BookingViewModal: React.FC = () => {
         )}
       </div>
     </Overlay>
+
+    {/* Документ рисуется РЯДОМ с карточкой, а не внутри неё: предпросмотр
+        уходит порталом в body, и клик по его фону не должен всплывать
+        к обработчику «клик мимо окна закрывает бронь». */}
+    {printKind && (
+      <BookingPrintDialog
+        bookingId={booking.id}
+        kind={printKind}
+        onClose={() => setPrintKind(null)}
+      />
+    )}
+    </>
   )
 }
 

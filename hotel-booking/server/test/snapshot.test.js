@@ -172,6 +172,11 @@ function fixture() {
         id: 41, roomId: 10, guestName: 'Асель', guestPhone: '+77010000000',
         checkIn: d('2026-08-25'), checkOut: d('2026-08-28'), status: 'CONFIRMED',
         source: null, notes: null,
+        // Документ гостя: заселившийся человек, паспорт записан. Откат обязан
+        // вернуть его целиком — иначе журнал регистрации теряет постояльца.
+        guestCitizenship: 'Казахстан', guestDocType: 'id_card',
+        guestDocNumber: '990514300123',
+        guestDocExpiry: d('2030-05-14'), guestBirthDate: d('1999-05-14'), guestSex: 'f',
         adultsWithMeals: 2, childrenWithMeals: 0, adultsNoMeals: 0, childrenNoMeals: 0,
         extraBedsWithMeals: 0, extraBedsNoMeals: 0, disabledAdults: 0, disabledChildren: 0,
         discountPercent: 0, prepaymentPercent: 50,
@@ -184,6 +189,9 @@ function fixture() {
         id: 42, roomId: 11, guestName: 'Ержан', guestPhone: null,
         checkIn: d('2026-09-01'), checkOut: d('2026-09-03'), status: 'CONFIRMED',
         source: null, notes: null,
+        // Бронь по телефону: гость ещё не приехал, документа нет и не должно быть
+        guestCitizenship: null, guestDocType: null, guestDocNumber: null,
+        guestDocExpiry: null, guestBirthDate: null, guestSex: null,
         adultsWithMeals: 1, childrenWithMeals: 0, adultsNoMeals: 0, childrenNoMeals: 0,
         extraBedsWithMeals: 0, extraBedsNoMeals: 0, disabledAdults: 0, disabledChildren: 0,
         discountPercent: 0, prepaymentPercent: 50,
@@ -348,6 +356,39 @@ describe('восстановление', () => {
     expect(db.tables.payment.map(p => p.id).sort()).toEqual([5, 6, 7])
     expect(db.tables.bookingCharge.map(c => c.id).sort()).toEqual([71, 72])
     expect(db.tables.bookingService.map(s => s.id)).toEqual([21])
+  })
+
+  it('документ гостя переживает откат', async () => {
+    const snap = await snapshotOf(db)
+    await db.prisma.booking.deleteMany({})
+    await snapshot.restoreSnapshot(snap.id, 1)
+
+    const back = db.tables.booking.find(b => b.id === 41)
+    expect(back).toMatchObject({
+      guestCitizenship: 'Казахстан',
+      guestDocType: 'id_card',
+      guestDocNumber: '990514300123',
+      guestSex: 'f',
+    })
+    // Даты обязаны вернуться Date, а не ISO-строкой из JSON снимка: строку
+    // Prisma в колонку @db.Date не примет, и откат упал бы посреди вставки.
+    expect(back.guestBirthDate).toBeInstanceOf(Date)
+    expect(back.guestBirthDate.toISOString().slice(0, 10)).toBe('1999-05-14')
+    expect(back.guestDocExpiry.toISOString().slice(0, 10)).toBe('2030-05-14')
+  })
+
+  it('откат не теряет НИ ОДНОЙ колонки брони: белый список сверяется со снимком', async () => {
+    // Сторож на будущее. Восстановление идёт по BOOKING_FIELDS, и колонка, которую
+    // забыли туда дописать, исчезает МОЛЧА — так уже дважды теряли данные
+    // (деньги в снимках, касса в резервной копии). Этот тест ломается сразу,
+    // как только в схеме появится седьмое поле, а в списке — нет.
+    const before = { ...db.tables.booking.find(b => b.id === 41) }
+    const snap = await snapshotOf(db)
+    await db.prisma.booking.deleteMany({})
+    await snapshot.restoreSnapshot(snap.id, 1)
+
+    const after = db.tables.booking.find(b => b.id === 41)
+    expect(Object.keys(before).filter(k => !(k in after))).toEqual([])
   })
 
   it('ручная строка начисления возвращается вместе с причиной', async () => {

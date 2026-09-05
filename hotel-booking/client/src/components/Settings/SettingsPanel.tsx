@@ -14,13 +14,19 @@ import { BackupSection } from './sections/BackupSection'
 import { HotelSection } from './sections/HotelSection'
 import { UsersSection } from './sections/UsersSection'
 import { AboutSection } from './sections/AboutSection'
+import { LicenseSection } from './sections/LicenseSection'
+
+export type ActiveSection = 'hotel' | 'users' | 'visual' | 'buildings' | 'categories' | 'features' | 'capacities' | 'rooms' | 'filters' | 'bookingFlags' | 'optimizer' | 'partners' | 'allotments' | 'backup' | 'license' | 'about'
 
 interface Props {
   open: boolean
   onClose: () => void
+  /**
+   * С какого раздела открыть. Нужен полосе «Лицензия не введена» в шапке: клик
+   * по ней должен приводить именно в «Лицензию», а не в раздел по умолчанию.
+   */
+  initialSection?: ActiveSection | null
 }
-
-type ActiveSection = 'hotel' | 'users' | 'visual' | 'buildings' | 'categories' | 'features' | 'capacities' | 'rooms' | 'filters' | 'bookingFlags' | 'optimizer' | 'partners' | 'allotments' | 'backup' | 'about'
 
 interface NavItem { id: ActiveSection; label: string; icon: string }
 interface NavGroup { title: string; items: NavItem[] }
@@ -54,13 +60,18 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'filters', label: 'Фильтры',     icon: 'M22 3H2l8 9.46V19l4 2v-8.54z' },
       { id: 'backup',  label: 'Бэкап',       icon: 'M12 8c4.4 0 8-1.3 8-3s-3.6-3-8-3-8 1.3-8 3 3.6 3 8 3 M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5 M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6' },
       { id: 'visual',  label: 'Внешний вид', icon: 'M12 22a10 10 0 1 1 10-10c0 2-2 3-4 3h-2a2 2 0 0 0-1 4 1 1 0 0 1-1 1z M13.5 6.5h.01 M17.5 10.5h.01 M8.5 7.5h.01 M6.5 12.5h.01' },
+      { id: 'license', label: 'Лицензия',    icon: 'M2.6 17.4A2 2 0 0 0 2 18.8V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.2a2 2 0 0 0 1.4-.6l.8-.8a6.5 6.5 0 1 0-4-4z M16.5 7.5h.01' },
       { id: 'about',   label: 'О программе', icon: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 16v-4 M12 8h.01' },
     ],
   },
 ]
 
-export const SettingsPanel: React.FC<Props> = ({ open, onClose }) => {
-  const [activeSection, setActiveSection] = useState<ActiveSection>('visual')
+export const SettingsPanel: React.FC<Props> = ({ open, onClose, initialSection }) => {
+  const [activeSection, setActiveSection] = useState<ActiveSection>(initialSection ?? 'visual')
+
+  // Раздел настроек уже открыт, а из шапки попросили «Лицензию» — переключаем.
+  // Начальное значение useState этот случай не покрывает: компонент не размонтируется.
+  useEffect(() => { if (initialSection) setActiveSection(initialSection) }, [initialSection])
 
   useEffect(() => {
     if (!open) return
@@ -186,6 +197,7 @@ export const SettingsPanel: React.FC<Props> = ({ open, onClose }) => {
           {activeSection === 'partners'     && <PartnersSection />}
           {activeSection === 'allotments'   && <AllotmentsSection />}
           {activeSection === 'backup'       && <BackupSection />}
+          {activeSection === 'license'      && <LicenseSection />}
           {activeSection === 'about'        && <AboutSection />}
         </div>
       </div>

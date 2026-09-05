@@ -56,6 +56,11 @@ const bookingBodyRules = [
   ...bookingNumericRules,
 ]
 
+const actualTimesRules = [
+  body(['actualCheckInAt', 'actualCheckOutAt']).optional({ nullable: true }).isISO8601()
+    .withMessage('Фактическое время заезда/выезда — дата и время в формате ISO 8601'),
+]
+
 // PUT — все поля необязательные, но если пришли — проверяются так же, как при создании
 const bookingUpdateRules = [
   body('roomId').optional().isInt({ min: 1 }).withMessage('roomId должен быть целым числом').toInt(),
@@ -63,6 +68,10 @@ const bookingUpdateRules = [
   body('guestPhone').optional({ nullable: true }).trim().isLength({ max: 30 }),
   body('checkIn').optional().isDate().withMessage('checkIn в формате YYYY-MM-DD'),
   body('checkOut').optional().isDate().withMessage('checkOut в формате YYYY-MM-DD'),
+  // Фактические заезд/выезд — момент времени целиком (не YYYY-MM-DD, как checkIn),
+  // поэтому isISO8601, а не isDate. null допустим: им администратор стирает
+  // ошибочно проставленное время. Право на саму правку проверяет контроллер.
+  ...actualTimesRules,
   body('source').optional({ nullable: true }).isIn(SOURCES).withMessage('Недопустимый источник брони'),
   body('notes').optional({ nullable: true }).isLength({ max: 1000 }),
   ...bookingNumericRules,
@@ -98,6 +107,9 @@ router.put('/:id', param('id').isInt(), bookingUpdateRules, validate, ctrl.updat
 router.delete('/:id', param('id').isInt(), validate, ctrl.cancel)
 router.patch('/:id/checkin', param('id').isInt(), validate, ctrl.checkIn)
 router.patch('/:id/checkout', param('id').isInt(), validate, ctrl.checkOut)
+// Правка фактического времени заезда/выезда администратором — работает и на
+// закрытой (CHECKED_OUT/CANCELLED) брони, в отличие от общего PUT /:id.
+router.patch('/:id/actual-times', param('id').isInt(), actualTimesRules, validate, ctrl.updateActualTimes)
 router.post('/:id/move',
   param('id').isInt(),
   body('newRoomId').isInt({ min: 1 }),

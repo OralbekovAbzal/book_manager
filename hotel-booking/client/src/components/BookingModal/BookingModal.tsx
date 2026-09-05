@@ -3,6 +3,7 @@ import { format } from 'date-fns'
 import { useForm, Controller } from 'react-hook-form'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore, BookingFlagItem } from '../../store/useSettingsStore'
+import { useAuthStore } from '../../store/useAuthStore'
 import { fetchRooms } from '../../api/rooms'
 import { compareRooms } from '../../utils/sortRooms'
 import {
@@ -11,6 +12,7 @@ import {
   cancelBooking,
   checkInBooking,
   checkOutBooking,
+  updateActualTimes,
   checkAvailability,
   fetchBooking,
 } from '../../api/bookings'
@@ -56,11 +58,46 @@ const STATUS_LABELS: Record<string, string> = {
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 const Field: React.FC<{ label: string; error?: string; children: React.ReactNode }> = ({ label, error, children }) => (
-  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+  <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
     <label style={{ fontSize: '0.9em', fontWeight: 600, color: 'var(--text)' }}>{label}</label>
     {children}
     {error && <span style={{ fontSize: '0.85rem', color: '#dc2626' }}>{error}</span>}
   </div>
+)
+
+// ─── Раскладка формы ──────────────────────────────────────────────────────────
+// Окно тянется по вьюпорту, поэтому фиксированного числа колонок у групп полей
+// нет: `auto-fit` + `minmax` сам решает, встанут поля рядом или друг под другом.
+// Это заменяет медиазапросы (стили в проекте инлайновые) и работает от ширины
+// САМОЙ колонки, а не окна — левая колонка узкая и в широком окне тоже.
+
+/** Пара полей рядом; ниже ~460px колонки схлопываются в одну. */
+const fieldGrid = (min = 210): React.CSSProperties => ({
+  display: 'grid',
+  gridTemplateColumns: `repeat(auto-fit, minmax(${min}px, 1fr))`,
+  gap: 14,
+  alignItems: 'start',
+})
+
+/**
+ * Смысловая группа полей: заголовок + разделитель сверху. Раньше форма шла одним
+ * потоком из полутора десятков полей — глазу не за что было зацепиться.
+ */
+const FormSection: React.FC<{ title: string; first?: boolean; children: React.ReactNode }> = ({ title, first, children }) => (
+  <section style={{
+    display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0,
+    paddingTop: first ? 0 : 20,
+    marginTop: first ? 0 : 4,
+    borderTop: first ? undefined : '1px solid var(--border-subtle)',
+  }}>
+    <div style={{
+      fontSize: '0.74rem', fontWeight: 700, letterSpacing: '0.06em',
+      textTransform: 'uppercase', color: 'var(--text-faint)',
+    }}>
+      {title}
+    </div>
+    {children}
+  </section>
 )
 
 const counterBtnStyle: React.CSSProperties = {
@@ -87,7 +124,7 @@ const GuestCounter: React.FC<{
   max?: number
   small?: boolean
 }> = ({ label, value, onChange, max, small }) => (
-  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: small ? '4px 4px' : '7px 4px' }}>
+  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: small ? '5px 2px' : '9px 2px' }}>
     <span style={{ fontSize: small ? '0.85rem' : '0.95rem', color: 'var(--text-muted)' }}>{label}</span>
     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
       <button type="button" onClick={() => onChange(Math.max(0, value - 1))} style={counterBtnStyle}>−</button>
@@ -232,7 +269,7 @@ const AddServiceRow: React.FC<{
 const CalcSection: React.FC<{ title: string; defaultOpen?: boolean; badge?: number; children: React.ReactNode }> = ({ title, defaultOpen = true, badge, children }) => {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 10, overflow: 'hidden', marginBottom: 12 }}>
+    <div style={{ border: '1px solid var(--border-subtle)', borderRadius: 10, overflow: 'hidden', marginBottom: 14 }}>
       <button type="button" onClick={() => setOpen(o => !o)} style={{
         width: '100%', display: 'flex', alignItems: 'center', gap: 10, height: 44, padding: '0 14px',
         background: 'var(--surface)', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left',
@@ -249,7 +286,7 @@ const CalcSection: React.FC<{ title: string; defaultOpen?: boolean; badge?: numb
         </svg>
       </button>
       {open && (
-        <div style={{ padding: '4px 14px 8px', borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ padding: '6px 16px 12px', borderTop: '1px solid var(--border-subtle)' }}>
           {children}
         </div>
       )}
@@ -278,6 +315,73 @@ const fmtDay = (iso?: string) => {
   const [y, m, d] = iso.slice(0, 10).split('-')
   return `${d}.${m}.${y}`
 }
+
+// ─── Фактические заезд и выезд ────────────────────────────────────────────────
+// Это НАСТОЯЩИЕ моменты времени, а не `@db.Date`, как плановые checkIn/checkOut.
+// Поэтому здесь нигде нет `timeZone:'UTC'`: показываем и вводим местное время
+// браузера — правило про UTC-полночь к этим полям не относится.
+
+/**
+ * ISO-момент → значение `<input type="datetime-local">`. Инпут живёт в местном
+ * времени и без секунд, поэтому строку собираем из локальных частей даты:
+ * `toISOString().slice(0,16)` дал бы UTC и сдвинул время на часовой пояс.
+ */
+const isoToLocalInput = (iso?: string | null): string => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** Обратно: 'YYYY-MM-DDTHH:mm' (местное) → ISO. Пусто = «не отмечено», то есть null. */
+const localInputToIso = (value: string): string | null => {
+  if (!value) return null
+  const d = new Date(value)   // без 'Z' браузер разбирает строку как МЕСТНОЕ время
+  return Number.isNaN(d.getTime()) ? null : d.toISOString()
+}
+
+/** Показ для роли без права правки — тот же формат, что в карточке просмотра. */
+const fmtDateTime = (value?: string | null) => {
+  if (!value) return '—'
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? '—' : format(d, 'dd.MM.yyyy HH:mm')
+}
+
+/**
+ * Время проставляется само кнопками «Заезд»/«Выезд». Правка руками нужна на тот
+ * случай, когда кнопку нажали не вовремя, и разрешена только ADMIN/SUPER_ADMIN —
+ * ровно как на сервере (STAFF получил бы 403). Поэтому у стойки это текст.
+ */
+const ActualTimeField: React.FC<{
+  label: string
+  /** 'YYYY-MM-DDTHH:mm' или '' */
+  value: string
+  canEdit: boolean
+  /** Пока не загрузилась полная бронь — сравнивать изменения не с чем */
+  readOnly?: boolean
+  onChange: (v: string) => void
+}> = ({ label, value, canEdit, readOnly, onChange }) => (
+  <Field label={label}>
+    {canEdit && !readOnly ? (
+      <input
+        type="datetime-local"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        style={inputStyle}
+      />
+    ) : (
+      <div style={{
+        ...inputStyle,
+        background: 'var(--surface-2)',
+        color: 'var(--text-muted)',
+        cursor: 'default',
+      }}>
+        {fmtDateTime(value)}
+      </div>
+    )}
+  </Field>
+)
 
 // Сохранённые суммы брони (edit без пересчёта). totalAmount/prepaidAmount могут отсутствовать,
 // если полную версию с сервера загрузить не удалось.
@@ -472,6 +576,9 @@ const ResultCard: React.FC<ResultCardProps> = ({
 export const BookingModal: React.FC = () => {
   const { modal, closeModal, fetchGrid, fetchToday, shiftDate } = useGridStore()
   const { roomFund, hiddenFlagCodes } = useSettingsStore()
+  const admin = useAuthStore(s => s.admin)
+  // Фактическое время правят только администраторы — то же правило, что на сервере
+  const canEditActualTimes = admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN'
   const [rooms, setRooms] = useState<Room[]>([])
   const [conflict, setConflict] = useState<GridBooking | null>(null)
   const [checking, setChecking] = useState(false)
@@ -517,6 +624,10 @@ export const BookingModal: React.FC = () => {
   const [paidAmount, setPaidAmount] = useState(0)
   const [selectedFlags, setSelectedFlags] = useState<string[]>([])
   const [customFlag, setCustomFlag] = useState('')
+  // Фактические заезд/выезд держим в формате datetime-local ('YYYY-MM-DDTHH:mm',
+  // местное время). Пустая строка = «не отмечено», на сервер уйдёт null.
+  const [actualCheckInAt, setActualCheckInAt] = useState('')
+  const [actualCheckOutAt, setActualCheckOutAt] = useState('')
 
   // Edit: полная бронь с сервера (объект из сетки может быть частичным) и её загрузка
   const [serverBooking, setServerBooking] = useState<Booking | null>(null)
@@ -577,6 +688,10 @@ export const BookingModal: React.FC = () => {
     setDiscountPercent(b.discountPercent ?? 0)
     setPrepaymentPercent(b.prepaymentPercent ?? 50)
     setPaidAmount(b.paidAmount ?? 0)
+    // Объект сетки этих полей не отдаёт вовсе — там будет пусто, настоящие значения
+    // приедут вторым вызовом, уже с полной бронью из GET /bookings/:id.
+    setActualCheckInAt(isoToLocalInput(b.actualCheckInAt))
+    setActualCheckOutAt(isoToLocalInput(b.actualCheckOutAt))
   }
 
   // Pre-fill form for edit/create mode
@@ -969,6 +1084,17 @@ export const BookingModal: React.FC = () => {
         // место могло принять деньги минуту назад). Сервер пишет поле только
         // при `paidAmount !== undefined`, поэтому пропуск ключа его не трогает.
         ...(hasPayments ? {} : { paidAmount }),
+        // Фактические заезд/выезд отправляем ТОЛЬКО если админ их действительно
+        // изменил. Причина та же, что у «Оплачено»: обычно время ставят кнопки
+        // «Заезд»/«Выезд», и слать своё на каждое сохранение брони — значит
+        // затирать то, что минуту назад отметило соседнее рабочее место.
+        // Сравниваем с серверной версией; пока она не загружена, сравнивать не с чем.
+        ...(canEditActualTimes && serverBooking && actualCheckInAt !== isoToLocalInput(serverBooking.actualCheckInAt)
+          ? { actualCheckInAt: localInputToIso(actualCheckInAt) }
+          : {}),
+        ...(canEditActualTimes && serverBooking && actualCheckOutAt !== isoToLocalInput(serverBooking.actualCheckOutAt)
+          ? { actualCheckOutAt: localInputToIso(actualCheckOutAt) }
+          : {}),
         flags: [...selectedFlags, ...(customFlag.trim() ? [customFlag.trim()] : [])],
         // Строки начислений сервер пересобирает сам при изменении дат/гостей/скидки;
         // здесь просим это явно, когда админ нажал «Пересчитать по тарифу».
@@ -1060,6 +1186,38 @@ export const BookingModal: React.FC = () => {
     }
   }
 
+  // Правка фактического времени у ЗАКРЫТОЙ брони: общей кнопки «Сохранить» тут
+  // нет (isClosed её прячет), поэтому эти два поля сохраняются отдельным
+  // запросом на выделенный эндпоинт (единственный, который принимает правку
+  // после того, как бронь уже CHECKED_OUT/CANCELLED).
+  const actualTimesChanged = !!serverBooking && (
+    actualCheckInAt !== isoToLocalInput(serverBooking.actualCheckInAt) ||
+    actualCheckOutAt !== isoToLocalInput(serverBooking.actualCheckOutAt)
+  )
+
+  const handleSaveActualTimes = async () => {
+    if (!booking || !serverBooking) return
+    const payload: { actualCheckInAt?: string | null; actualCheckOutAt?: string | null } = {}
+    if (actualCheckInAt !== isoToLocalInput(serverBooking.actualCheckInAt)) {
+      payload.actualCheckInAt = localInputToIso(actualCheckInAt)
+    }
+    if (actualCheckOutAt !== isoToLocalInput(serverBooking.actualCheckOutAt)) {
+      payload.actualCheckOutAt = localInputToIso(actualCheckOutAt)
+    }
+    if (Object.keys(payload).length === 0) return
+
+    setSubmitting(true)
+    try {
+      await updateActualTimes(booking.id, payload)
+      closeModal()
+      await Promise.all([fetchGrid(), fetchToday()])
+    } catch {
+      setApiError('Ошибка сохранения фактического времени')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   if (!modal.open) return null
   if (modal.mode === 'move') return null  // Move-режим обрабатывает MoveBookingModal
   if (modal.mode === 'view') return null  // View-режим обрабатывает BookingViewModal
@@ -1071,6 +1229,15 @@ export const BookingModal: React.FC = () => {
   const canCheckIn = isEdit && booking?.status === 'CONFIRMED' &&
     !!booking?.checkIn && booking.checkIn.slice(0, 10) <= effectiveToday
   const canCheckOut = isEdit && isCheckedIn
+
+  // Фактическое время показываем, когда оно уже есть либо когда статус говорит,
+  // что оно должно быть. У подтверждённой брони (никто не заехал) пара пустых
+  // полей — просто шум, а у заселённого без отметки это как раз тот случай,
+  // ради которого правку и просили: кнопку нажать забыли.
+  const showActualIn = isEdit && !isMaintenance &&
+    (!!actualCheckInAt || isCheckedIn || booking?.status === 'CHECKED_OUT')
+  const showActualOut = isEdit && !isMaintenance &&
+    (!!actualCheckOutAt || booking?.status === 'CHECKED_OUT')
 
   const title = isMaintenance
     ? '🔧 Ремонт / Блокировка'
@@ -1097,10 +1264,15 @@ export const BookingModal: React.FC = () => {
       }}
     >
       <div
+        className="booking-form-modal"
         style={{
           // relative — чтобы диалог «Ранний выезд» (absolute; inset: 0) накрывал только форму
           position: 'relative',
-          width: 960,
+          // Ширина по вьюпорту, а не жёсткие 960px: на широком мониторе вокруг окна
+          // оставалось пустое затемнение, а поля жались в узкую колонку. Потолок
+          // 1280px — дальше строки формы становятся неудобно длинными для чтения.
+          // У «Ремонта» правой колонки нет, и та же ширина выглядела бы пустой.
+          width: isMaintenance ? 'min(760px, 92vw)' : 'min(1280px, 92vw)',
           maxWidth: '100%',
           maxHeight: 'calc(100vh - 56px)',
           background: 'var(--bg)',
@@ -1122,7 +1294,7 @@ export const BookingModal: React.FC = () => {
         }}>
           {/* Header */}
           <div style={{
-            padding: '18px 22px',
+            padding: '20px 28px',
             borderBottom: '1px solid var(--border-subtle)',
             display: 'flex',
             justifyContent: 'space-between',
@@ -1166,34 +1338,40 @@ export const BookingModal: React.FC = () => {
           <form
             id="booking-form"
             onSubmit={handleSubmit(onSubmit)}
-            style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}
+            style={{ flex: 1, overflowY: 'auto', padding: '22px 28px 26px', display: 'flex', flexDirection: 'column', gap: 4 }}
           >
-            {/* Guest name / Reason — самым первым */}
-            <Field label={isMaintenance ? 'Причина' : 'Имя гостя'} error={errors.guestName?.message}>
-              <input
-                type="text"
-                placeholder={isMaintenance ? 'Ремонт, замена сантехники...' : 'Иванов Иван'}
-                {...register('guestName', { required: isMaintenance ? 'Укажите причину' : 'Укажите имя гостя' })}
-                disabled={isClosed}
-                style={inputStyle}
-              />
-            </Field>
+            {/* ── Гость ── имя и телефон читают и диктуют вместе, поэтому и стоят
+                рядом, а не друг под другом двумя узкими строками. */}
+            <FormSection first title={isMaintenance ? 'Блокировка' : 'Гость'}>
+              <div style={fieldGrid()}>
+                <Field label={isMaintenance ? 'Причина' : 'Имя гостя'} error={errors.guestName?.message}>
+                  <input
+                    type="text"
+                    placeholder={isMaintenance ? 'Ремонт, замена сантехники...' : 'Иванов Иван'}
+                    {...register('guestName', { required: isMaintenance ? 'Укажите причину' : 'Укажите имя гостя' })}
+                    disabled={isClosed}
+                    style={inputStyle}
+                  />
+                </Field>
 
-            {/* Phone — вторым */}
-            {!isMaintenance && (
-              <Field label="Телефон">
-                <input
-                  type="tel"
-                  placeholder="+7 (___) ___-__-__"
-                  {...register('guestPhone')}
-                  disabled={isClosed}
-                  style={inputStyle}
-                />
-              </Field>
-            )}
+                {!isMaintenance && (
+                  <Field label="Телефон">
+                    <input
+                      type="tel"
+                      placeholder="+7 (___) ___-__-__"
+                      {...register('guestPhone')}
+                      disabled={isClosed}
+                      style={inputStyle}
+                    />
+                  </Field>
+                )}
+              </div>
+            </FormSection>
 
-            {/* Room */}
-            <Field label="Номер комнаты" error={errors.roomId?.message}>
+            {/* ── Размещение ── у группы теперь свой заголовок, поэтому обёртка
+                Field с подписью «Номер комнаты» убрана: она дублировала подпись
+                внутри самого выбора номера. Ошибка валидации показывается тут же. */}
+            <FormSection title="Размещение">
               <Controller
                 name="roomId"
                 control={control}
@@ -1211,120 +1389,154 @@ export const BookingModal: React.FC = () => {
                   />
                 )}
               />
-            </Field>
+              {errors.roomId?.message && (
+                <span style={{ fontSize: '0.85rem', color: '#dc2626' }}>{errors.roomId.message}</span>
+              )}
+            </FormSection>
 
-            {/* Dates */}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <Field label="Дата заезда" error={errors.checkIn?.message}>
-                <Controller
-                  name="checkIn"
-                  control={control}
-                  rules={{ required: 'Укажите дату заезда' }}
-                  render={({ field }) => (
-                    <DatePicker value={field.value} onChange={field.onChange} disabled={isClosed} />
-                  )}
-                />
-              </Field>
-              <Field label="Дата выезда" error={errors.checkOut?.message}>
-                <Controller
-                  name="checkOut"
-                  control={control}
-                  rules={{
-                    required: 'Укажите дату выезда',
-                    validate: (v) => v > watchedCheckIn || 'Выезд должен быть позже заезда',
-                  }}
-                  render={({ field }) => (
-                    <DatePicker value={field.value} onChange={field.onChange} min={watchedCheckIn} disabled={isClosed} />
-                  )}
-                />
-              </Field>
-            </div>
+            {/* ── Даты ── плановые и фактические в одной сетке: их читают вместе
+                («по брони до 12-го, вышел 10-го в 11:40»). В широком окне все
+                четыре встают в строку, в узком — попарно, это решает auto-fit.
+                Плановые даты — сутки (`@db.Date`), фактические — моменты времени
+                в МЕСТНОЙ зоне, поэтому и формат ввода у них разный. */}
+            <FormSection title="Даты">
+              <div style={fieldGrid(185)}>
+                <Field label="Дата заезда" error={errors.checkIn?.message}>
+                  <Controller
+                    name="checkIn"
+                    control={control}
+                    rules={{ required: 'Укажите дату заезда' }}
+                    render={({ field }) => (
+                      <DatePicker value={field.value} onChange={field.onChange} disabled={isClosed} />
+                    )}
+                  />
+                </Field>
+                <Field label="Дата выезда" error={errors.checkOut?.message}>
+                  <Controller
+                    name="checkOut"
+                    control={control}
+                    rules={{
+                      required: 'Укажите дату выезда',
+                      validate: (v) => v > watchedCheckIn || 'Выезд должен быть позже заезда',
+                    }}
+                    render={({ field }) => (
+                      <DatePicker value={field.value} onChange={field.onChange} min={watchedCheckIn} disabled={isClosed} />
+                    )}
+                  />
+                </Field>
 
-            {/* Availability feedback */}
-            {checking && (
-              <div style={infoBoxStyle('#f0f9ff', '#0369a1')}>Проверяем доступность...</div>
-            )}
-            {conflict && !checking && (
-              <div style={{
-                ...infoBoxStyle('#fef2f2', '#dc2626'),
-                fontWeight: 600,
-                border: '1px solid #fca5a5',
-              }}>
-                🚫 Номер занят: <strong>{conflict.guestName}</strong>{' '}
-                ({conflict.checkIn.slice(0, 10)} — {conflict.checkOut.slice(0, 10)})<br />
-                <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>Сохранение заблокировано — выберите другой номер или измените даты.</span>
-              </div>
-            )}
-            {!conflict && !checking && roomOccupied && watchedCheckIn && watchedCheckOut && (
-              <div style={{
-                ...infoBoxStyle('#fef2f2', '#dc2626'),
-                fontWeight: 600,
-                border: '1px solid #fca5a5',
-              }}>
-                🚫 Выбранный номер занят на эти даты.<br />
-                <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>Сохранение заблокировано — выберите другой номер или измените даты.</span>
-              </div>
-            )}
-            {!conflict && !checking && !roomOccupied && watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn && (
-              <div style={infoBoxStyle('#f0fdf4', '#15803d')}>
-                ✓ Номер свободен на выбранные даты
-              </div>
-            )}
-
-
-            {/* Source */}
-            {!isMaintenance && (
-              <Field label="Источник брони">
-                <select {...register('source')} disabled={isClosed} style={selectStyle}>
-                  {SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </Field>
-            )}
-
-            {/* Booking flags — только видимые (скрытые настраиваются в Настройки → Метки броней) */}
-            {!isMaintenance && (
-              <FlagsField
-                flags={(roomFund.bookingFlags ?? []).filter(f => !hiddenFlagCodes.includes(f.id))}
-                selected={selectedFlags}
-                customFlag={customFlag}
-                onToggle={(id) => setSelectedFlags(prev =>
-                  prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+                {showActualIn && (
+                  <ActualTimeField
+                    label="Факт. заезд"
+                    value={actualCheckInAt}
+                    canEdit={canEditActualTimes}
+                    readOnly={loadingBooking}
+                    onChange={setActualCheckInAt}
+                  />
                 )}
-                onCustomChange={setCustomFlag}
-                disabled={isClosed}
-              />
-            )}
+                {showActualOut && (
+                  <ActualTimeField
+                    label="Факт. выезд"
+                    value={actualCheckOutAt}
+                    canEdit={canEditActualTimes}
+                    readOnly={loadingBooking}
+                    onChange={setActualCheckOutAt}
+                  />
+                )}
+              </div>
 
-            {/* Notes */}
-            <Field label="Примечания">
-              <textarea
-                rows={2}
-                placeholder="Особые пожелания..."
-                {...register('notes')}
-                disabled={isClosed}
-                style={{ ...inputStyle, resize: 'vertical', height: 56 }}
-              />
-            </Field>
+              {/* Availability feedback */}
+              {checking && (
+                <div style={infoBoxStyle('#f0f9ff', '#0369a1')}>Проверяем доступность...</div>
+              )}
+              {conflict && !checking && (
+                <div style={{
+                  ...infoBoxStyle('#fef2f2', '#dc2626'),
+                  fontWeight: 600,
+                  border: '1px solid #fca5a5',
+                }}>
+                  🚫 Номер занят: <strong>{conflict.guestName}</strong>{' '}
+                  ({conflict.checkIn.slice(0, 10)} — {conflict.checkOut.slice(0, 10)})<br />
+                  <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>Сохранение заблокировано — выберите другой номер или измените даты.</span>
+                </div>
+              )}
+              {!conflict && !checking && roomOccupied && watchedCheckIn && watchedCheckOut && (
+                <div style={{
+                  ...infoBoxStyle('#fef2f2', '#dc2626'),
+                  fontWeight: 600,
+                  border: '1px solid #fca5a5',
+                }}>
+                  🚫 Выбранный номер занят на эти даты.<br />
+                  <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>Сохранение заблокировано — выберите другой номер или измените даты.</span>
+                </div>
+              )}
+              {!conflict && !checking && !roomOccupied && watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn && (
+                <div style={infoBoxStyle('#f0fdf4', '#15803d')}>
+                  ✓ Номер свободен на выбранные даты
+                </div>
+              )}
+            </FormSection>
+
+            {/* ── Дополнительно ── источник, метки и примечания. */}
+            <FormSection title="Дополнительно">
+              {!isMaintenance && (
+                // Выпадающий список из четырёх коротких слов во всю ширину широкой
+                // колонки выглядел бы нелепо — ограничиваем, но не жёстко.
+                <div style={{ maxWidth: 340 }}>
+                  <Field label="Источник брони">
+                    <select {...register('source')} disabled={isClosed} style={selectStyle}>
+                      {SOURCES.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                  </Field>
+                </div>
+              )}
+
+              {/* Booking flags — только видимые (скрытые настраиваются в Настройки → Метки броней) */}
+              {!isMaintenance && (
+                <FlagsField
+                  flags={(roomFund.bookingFlags ?? []).filter(f => !hiddenFlagCodes.includes(f.id))}
+                  selected={selectedFlags}
+                  customFlag={customFlag}
+                  onToggle={(id) => setSelectedFlags(prev =>
+                    prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+                  )}
+                  onCustomChange={setCustomFlag}
+                  disabled={isClosed}
+                />
+              )}
+
+              {/* Notes */}
+              <Field label="Примечания">
+                <textarea
+                  rows={2}
+                  placeholder="Особые пожелания..."
+                  {...register('notes')}
+                  disabled={isClosed}
+                  style={{ ...inputStyle, resize: 'vertical', height: 76, lineHeight: 1.45 }}
+                />
+              </Field>
+            </FormSection>
 
             {/* immediateCheckIn управляется программно через prefillImmediateCheckIn */}
             <input type="hidden" {...register('immediateCheckIn')} />
 
             {apiError && (
-              <div style={infoBoxStyle('#fef2f2', '#dc2626')}>{apiError}</div>
+              <div style={{ ...infoBoxStyle('#fef2f2', '#dc2626'), marginTop: 14 }}>{apiError}</div>
             )}
           </form>
 
           {/* Action buttons (bottom, fixed) */}
           <div style={{
-            padding: '14px 24px',
+            padding: '16px 28px',
             borderTop: '1px solid var(--border)',
             background: 'var(--bg)',
             display: 'flex',
-            gap: 8,
+            gap: 12,
             flexShrink: 0,
+            flexWrap: 'wrap',
             justifyContent: 'space-between',
           }}>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
               {canCheckIn && (
                 <button type="button" onClick={handleCheckIn} disabled={submitting} style={actionBtn('#059669')}>
                   ✓ Заезд
@@ -1341,10 +1553,20 @@ export const BookingModal: React.FC = () => {
                 </button>
               )}
             </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div style={{ display: 'flex', gap: 10, marginLeft: 'auto' }}>
               <button type="button" onClick={closeModal} style={cancelBtnStyle}>
                 Закрыть
               </button>
+              {isClosed && canEditActualTimes && (showActualIn || showActualOut) && (
+                <button
+                  type="button"
+                  onClick={handleSaveActualTimes}
+                  disabled={submitting || loadingBooking || !actualTimesChanged}
+                  style={submitBtnStyle(submitting || loadingBooking || !actualTimesChanged)}
+                >
+                  {submitting ? 'Сохранение...' : 'Сохранить время'}
+                </button>
+              )}
               {!isClosed && (
                 <button
                   form="booking-form"
@@ -1510,7 +1732,10 @@ export const BookingModal: React.FC = () => {
 
         {/* ── RIGHT: Calculator ── */}
         {!isMaintenance && (
-          <div style={{ width: 340, flexShrink: 0, display: 'flex', flexDirection: 'column', background: 'var(--surface)', minWidth: 0 }}>
+          // Калькулятор растёт вместе с окном, а не остаётся полоской в 340px:
+          // раньше вся прибавка ширины доставалась левой колонке, и справа
+          // счётчики с суммами продолжали жаться. Нижняя граница — прежние 340px.
+          <div style={{ width: 'clamp(340px, 32%, 440px)', flexShrink: 0, display: 'flex', flexDirection: 'column', background: 'var(--surface)', minWidth: 0 }}>
             {/* Header */}
             <div style={{
               padding: '20px 24px',
@@ -1527,7 +1752,7 @@ export const BookingModal: React.FC = () => {
             </div>
 
             {/* Calculator form (scrollable) */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px 22px 24px' }}>
 
               {/* Начисления существуют только у сохранённой брони: строки привязаны к её id.
                   Для новой брони справа виден предпросмотр по тарифу, а строки создаст сервер. */}
@@ -1728,7 +1953,7 @@ export const BookingModal: React.FC = () => {
             {/* Итог брони. Раньше здесь были зашитые #fff и #111827 — в тёмной теме
                 блок оставался белым островом посреди тёмной формы. */}
             <div style={{
-              padding: '16px 20px',
+              padding: '18px 22px',
               borderTop: '1px solid var(--border-subtle)',
               background: 'var(--surface)',
               flexShrink: 0,
@@ -1834,9 +2059,11 @@ const RoomPicker: React.FC<RoomPickerProps> = ({
   const selectedStatus = datesOk && value ? availability[value] : undefined
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    // Категория и номер — один выбор в два шага, поэтому при достаточной ширине
+    // они стоят рядом, а не двумя строчками одна под другой.
+    <div style={fieldGrid(230)}>
       {/* Category dropdown */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 5, minWidth: 0 }}>
         <label style={{ fontSize: '0.85em', fontWeight: 600, color: 'var(--text-faint)' }}>
           Категория
         </label>
@@ -2089,10 +2316,13 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
       </div>
 
       {/* Status badge for selected room */}
+      {/* Плашка остаётся В КОЛОНКЕ НОМЕРА, а не во всю ширину формы: ниже, в блоке
+          дат, есть своя зелёная плашка о свободных датах, и две одинаковые полосы
+          подряд читались бы как ошибка. Здесь она явно относится к выбору номера. */}
       {value > 0 && datesOk && !loadingAvail && selectedStatus && (
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 6,
-          padding: '7px 10px', borderRadius: 6,
+          display: 'flex', alignItems: 'center', gap: 7,
+          padding: '8px 11px', borderRadius: 'var(--ui-radius)',
           background: selectedStatus === 'free' ? '#f0fdf4' : '#fef2f2',
           border: `1px solid ${selectedStatus === 'free' ? '#86efac' : '#fca5a5'}`,
         }}>
@@ -2101,7 +2331,7 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
             background: selectedStatus === 'free' ? '#16a34a' : '#dc2626',
           }} />
           <span style={{
-            fontSize: '0.88rem', fontWeight: 600,
+            fontSize: '0.88rem', fontWeight: 600, lineHeight: 1.35,
             color: selectedStatus === 'free' ? '#15803d' : '#dc2626',
           }}>
             {selectedStatus === 'free'
@@ -2138,9 +2368,11 @@ const FlagsField: React.FC<FlagsFieldProps> = ({ flags, selected, customFlag, on
   if (flags.length === 0 && !hasAny) return null
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
       <label style={{ fontSize: '0.9em', fontWeight: 600, color: 'var(--text)' }}>Метки</label>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+      {/* Пилюли переносятся на несколько рядов почти всегда. Прежний общий gap 6px
+          склеивал ряды в кашу — вертикальный зазор нужен заметно больше. */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', columnGap: 8, rowGap: 10 }}>
         {flags.map(f => {
           const active = selected.includes(f.id)
           return (
@@ -2150,7 +2382,7 @@ const FlagsField: React.FC<FlagsFieldProps> = ({ flags, selected, customFlag, on
               disabled={disabled}
               onClick={() => onToggle(f.id)}
               style={{
-                padding: '5px 12px',
+                padding: '6px 14px',
                 borderRadius: 20,
                 border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
                 background: active ? 'var(--accent-bg)' : 'var(--surface)',
@@ -2175,7 +2407,8 @@ const FlagsField: React.FC<FlagsFieldProps> = ({ flags, selected, customFlag, on
         placeholder="Или введите произвольную метку..."
         style={{
           ...({
-            padding: '6px 10px',
+            marginTop: 2,
+            padding: '8px 10px',
             border: `1px solid ${customFlag.trim() ? 'var(--accent)' : 'var(--border)'}`,
             borderRadius: 'var(--ui-radius)',
             fontSize: 'inherit',
@@ -2194,16 +2427,17 @@ const FlagsField: React.FC<FlagsFieldProps> = ({ flags, selected, customFlag, on
 
 // ─── Shared styles ────────────────────────────────────────────────────────────
 
+// border/background намеренно не заданы инлайн — обычное и focus-состояние
+// (мягкая заливка / акцентная обводка со свечением) держит .booking-form-modal
+// в theme.css, а инлайн перебил бы CSS :focus.
 const inputStyle: React.CSSProperties = {
   padding: '8px 10px',
-  border: '1px solid var(--border)',
   borderRadius: 'var(--ui-radius)',
   fontSize: 'inherit',
   outline: 'none',
   width: '100%',
   boxSizing: 'border-box',
   fontFamily: 'inherit',
-  background: 'var(--bg)',
   color: 'var(--text)',
 }
 

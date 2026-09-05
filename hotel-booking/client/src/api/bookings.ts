@@ -38,6 +38,14 @@ export interface BookingPayload {
   prepaidAmount?: number
   paidAmount?: number
   flags?: string[]
+  /**
+   * Фактические заезд/выезд (ISO datetime или null). Обычно их проставляют кнопки
+   * «Заезд»/«Выезд», здесь — ручная правка администратором, если кнопку нажали
+   * не вовремя. Сервер принимает поля только у ADMIN/SUPER_ADMIN (иначе 403),
+   * поэтому клиент их и не отправляет с ролью STAFF.
+   */
+  actualCheckInAt?: string | null
+  actualCheckOutAt?: string | null
   services?: BookingServicePayload[]
   shiftId?: number | null
   /** Осознанная продажа номера из квоты партнёра (после 409 ALLOTMENT_CONFLICT) */
@@ -74,6 +82,19 @@ export async function checkInBooking(id: number): Promise<Booking> {
 
 export async function checkOutBooking(id: number): Promise<Booking> {
   const { data } = await api.patch(`/bookings/${id}/checkout`)
+  return data.data
+}
+
+/**
+ * Ручная правка фактического заезда/выезда администратором. В отличие от
+ * `updateBooking`, работает и на ЗАКРЫТОЙ (CHECKED_OUT/CANCELLED) брони —
+ * ровно тот случай, когда время выезда чаще всего и нужно поправить.
+ */
+export async function updateActualTimes(
+  id: number,
+  payload: { actualCheckInAt?: string | null; actualCheckOutAt?: string | null },
+): Promise<Booking> {
+  const { data } = await api.patch(`/bookings/${id}/actual-times`, payload)
   return data.data
 }
 

@@ -96,6 +96,12 @@ const BOOKING_SELECT = {
   guestPhone: true,
   checkIn: true,
   checkOut: true,
+  // Фактические моменты заезда/выезда — настоящие timestamp'ы (не @db.Date):
+  // checkIn/checkOut это ПЛАН по суткам отеля, а эти два — когда гость реально
+  // пришёл и ушёл. Держим их в общем select, иначе поля не уйдут ни в REST-ответ,
+  // ни в socket-события (payload у них один и тот же).
+  actualCheckInAt: true,
+  actualCheckOutAt: true,
   status: true,
   source: true,
   notes: true,
@@ -321,7 +327,7 @@ async function update(req, res, next) {
       adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
       extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
       discountPercent, prepaymentPercent, totalAmount, prepaidAmount, paidAmount, flags, shiftId,
-      services,
+      services, actualCheckInAt, actualCheckOutAt,
     } = req.body
 
     const existing = await prisma.booking.findUnique({ where: { id } })
@@ -329,6 +335,27 @@ async function update(req, res, next) {
 
     if (['CHECKED_OUT', 'CANCELLED'].includes(existing.status)) {
       return next(createError('Нельзя редактировать закрытую бронь', 400))
+    }
+
+    // Фактические заезд/выезд ставит система в момент операции — это свидетельство
+    // о произошедшем, а не поле формы. Правка задним числом иногда нужна (стойка
+    // отметила заезд через час), но это уже исправление истории → только администратор.
+    // Молча игнорировать попытку нельзя: STAFF решил бы, что время сохранено.
+    const editsActualTimes = actualCheckInAt !== undefined || actualCheckOutAt !== undefined
+    if (editsActualTimes && !['SUPER_ADMIN', 'ADMIN'].includes(req.admin?.role)) {
+      return next(createError('Изменить фактическое время заезда/выезда может только администратор', 403))
+    }
+
+    // Сверяем ИТОГОВУЮ пару (новое значение либо уже записанное): прислали один
+    // actualCheckOutAt — он всё равно не должен оказаться раньше сохранённого заезда.
+    const nextActualIn = actualCheckInAt !== undefined
+      ? (actualCheckInAt ? new Date(actualCheckInAt) : null)
+      : existing.actualCheckInAt
+    const nextActualOut = actualCheckOutAt !== undefined
+      ? (actualCheckOutAt ? new Date(actualCheckOutAt) : null)
+      : existing.actualCheckOutAt
+    if (nextActualIn && nextActualOut && nextActualOut.getTime() < nextActualIn.getTime()) {
+      return next(createError('Фактический выезд не может быть раньше фактического заезда', 400))
     }
 
     const newRoomId = roomId ?? existing.roomId
@@ -445,6 +472,8 @@ async function update(req, res, next) {
           ...(paidAmount !== undefined && { paidAmount }),
           ...(flags !== undefined && { flags: Array.isArray(flags) ? flags : [] }),
           ...(shiftId !== undefined && { shiftId: shiftId ? parseInt(shiftId) : null }),
+          ...(actualCheckInAt !== undefined && { actualCheckInAt: nextActualIn }),
+          ...(actualCheckOutAt !== undefined && { actualCheckOutAt: nextActualOut }),
         },
         select: BOOKING_SELECT,
       })
@@ -498,6 +527,47 @@ async function cancel(req, res, next) {
   }
 }
 
+// PATCH /api/bookings/:id/actual-times — правка фактического заезда/выезда
+// администратором задним числом (кнопку «Заезд»/«Выезд» нажали позже, чем
+// гость реально приехал/уехал). Отдельный узкий эндпоинт, а не общий update():
+// общая форма блокирует редактирование ЗАКРЫТОЙ (CHECKED_OUT) брони целиком,
+// а фактический выезд обычно и нужно поправить именно ПОСЛЕ того, как бронь
+// уже закрыта. Разрешаем и на CANCELLED — отменённая бронь тоже могла успеть
+// зафиксировать заезд, который потом захотят поправить.
+async function updateActualTimes(req, res, next) {
+  try {
+    const id = parseInt(req.params.id)
+    const { actualCheckInAt, actualCheckOutAt } = req.body
+
+    if (!['SUPER_ADMIN', 'ADMIN'].includes(req.admin?.role)) {
+      return next(createError('Изменить фактическое время заезда/выезда может только администратор', 403))
+    }
+
+    const existing = await prisma.booking.findUnique({ where: { id } })
+    if (!existing) return next(createError('Бронь не найдена', 404))
+
+    const nextIn = actualCheckInAt !== undefined
+      ? (actualCheckInAt ? new Date(actualCheckInAt) : null)
+      : existing.actualCheckInAt
+    const nextOut = actualCheckOutAt !== undefined
+      ? (actualCheckOutAt ? new Date(actualCheckOutAt) : null)
+      : existing.actualCheckOutAt
+    if (nextIn && nextOut && nextOut.getTime() < nextIn.getTime()) {
+      return next(createError('Фактический выезд не может быть раньше фактического заезда', 400))
+    }
+
+    const data = {}
+    if (actualCheckInAt !== undefined) data.actualCheckInAt = nextIn
+    if (actualCheckOutAt !== undefined) data.actualCheckOutAt = nextOut
+
+    const booking = await prisma.booking.update({ where: { id }, data, select: BOOKING_SELECT })
+    emitBookingEvent('booking:updated', { booking })
+    res.json({ data: booking })
+  } catch (err) {
+    next(err)
+  }
+}
+
 // PATCH /api/bookings/:id/checkin
 async function checkIn(req, res, next) {
   try {
@@ -527,7 +597,10 @@ async function checkIn(req, res, next) {
 
     const booking = await prisma.booking.update({
       where: { id },
-      data: { status: 'CHECKED_IN' },
+      // Момент нажатия кнопки «Заезд» и есть фактический заезд: дата смены может
+      // отставать от календаря (поздний заезд оформляют «вчерашним» днём), а здесь
+      // нужен реальный час — по нему считают ранние/поздние заезды и разбирают споры.
+      data: { status: 'CHECKED_IN', actualCheckInAt: new Date() },
       select: BOOKING_SELECT,
     })
 
@@ -581,7 +654,10 @@ async function checkOut(req, res, next) {
       return res.json({ data: booking })
     }
 
-    const data = { status: 'CHECKED_OUT' }
+    // actualCheckOutAt — реальный момент выезда; checkOut ниже остаётся датой суток
+    // отеля. Их специально двое: гость, уехавший в 11:40 рабочего дня, и гость,
+    // уехавший ночью, дают одну и ту же дату выезда, но разное время освобождения.
+    const data = { status: 'CHECKED_OUT', actualCheckOutAt: new Date() }
     // Ранний выезд — фиксируем фактическую дату выезда (сегодня)
     if (todayUTC < existing.checkOut) {
       data.checkOut = todayUTC
@@ -608,6 +684,11 @@ async function move(req, res, next) {
   try {
     const id = parseInt(req.params.id)
     const { newRoomId, moveDate } = req.body
+
+    // Момент переезда берём ОДИН на всю операцию: обе записи (закрываемый оригинал и
+    // новая бронь в другом номере) описывают один физический факт, и два разных
+    // new Date() внутри транзакции дали бы им разное время с разрывом в миллисекунды.
+    const movedAt = new Date()
 
     if (!newRoomId || !moveDate) {
       return next(createError('newRoomId и moveDate обязательны', 400))
@@ -715,6 +796,11 @@ async function move(req, res, next) {
         data: {
           checkOut: moveDateD,
           status: 'CHECKED_OUT',
+          // Это НЕ выезд гостя из отеля — он продолжает жить, просто в другом номере.
+          // Но запись в этой комнате физически перестала быть активной именно сейчас,
+          // а поле про это и есть; оставить его пустым у CHECKED_OUT значило бы
+          // потерять момент освобождения номера.
+          actualCheckOutAt: movedAt,
           totalAmount: money.total,
           prepaidAmount: money.prepaid,
           paidAmount: money.paid,
@@ -732,6 +818,10 @@ async function move(req, res, next) {
           checkIn: moveDateD,
           checkOut: existing.checkOut,
           status: 'CHECKED_IN',
+          // Гость НЕ заезжает заново — он тот же самый и приехал когда приехал.
+          // Поставить сюда момент переезда значило бы стереть настоящий заезд:
+          // после переезда «время заезда» стало бы серединой проживания.
+          actualCheckInAt: existing.actualCheckInAt,
           source: existing.source,
           notes: `Переезд из №${existing.room.number} (${moveDate})`,
           adultsWithMeals: existing.adultsWithMeals,
@@ -1090,6 +1180,7 @@ async function rebuildCharges(req, res, next) {
 // BOOKING_SELECT экспортируется для optimizeController — payload socket-событий должен быть единым
 module.exports = {
   list, getOne, create, update, cancel, checkIn, checkOut, checkAvailability, move,
+  updateActualTimes,
   listCharges, addCharge, updateCharge, removeCharge, rebuildCharges,
   BOOKING_SELECT,
 }

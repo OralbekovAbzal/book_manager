@@ -28,6 +28,14 @@ export interface Booking {
   checkIn: string   // YYYY-MM-DD
   checkOut: string  // YYYY-MM-DD
   status: BookingStatus
+  /**
+   * Фактические заезд и выезд — НАСТОЯЩИЕ моменты времени (ISO datetime), а не
+   * `@db.Date`, как плановые checkIn/checkOut. Показывать их надо в МЕСТНОМ времени,
+   * без `timeZone:'UTC'`: иначе стойка увидит заезд «в 09:00» вместо 14:00.
+   * null — гость ещё не заехал / не выехал.
+   */
+  actualCheckInAt?: string | null
+  actualCheckOutAt?: string | null
   source?: string
   notes?: string
   adultsWithMeals?: number

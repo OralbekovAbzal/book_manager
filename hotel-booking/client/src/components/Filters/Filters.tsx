@@ -118,21 +118,29 @@ export const Filters: React.FC<Props> = ({ open }) => {
     applyFilters()
   }
 
-  // Видимость управляется кнопкой в тулбаре (TodayStats)
-  if (!open) return null
-
+  // Видимость управляется кнопкой в тулбаре (TodayStats). Панель остаётся
+  // смонтированной всегда (черновик фильтров не сбрасывается при скрытии) —
+  // анимируется только ширина/прозрачность, иначе плавный переход не из чего
+  // было бы играть: раньше `if (!open) return null` убирал панель мгновенно.
   return (
-    <aside style={{
-      width: 240, flexShrink: 0,
-      background: 'var(--surface)',
-      borderRight: '1px solid var(--border)',
-      display: 'flex', flexDirection: 'column',
-      overflow: 'hidden',
-    }}>
+    <aside
+      aria-hidden={!open}
+      style={{
+        width: open ? 240 : 0,
+        flexShrink: 0,
+        background: 'var(--surface)',
+        borderRight: open ? '1px solid var(--border)' : '1px solid transparent',
+        display: 'flex', flexDirection: 'column',
+        overflow: 'hidden',
+        opacity: open ? 1 : 0,
+        pointerEvents: open ? 'auto' : 'none',
+        transition: 'width 0.22s ease, opacity 0.16s ease, border-color 0.22s ease',
+      }}>
       {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '12px 14px', borderBottom: '1px solid var(--border)',
+        width: 240,
       }}>
         <span style={{
           fontSize: '0.7rem', fontWeight: 600, color: 'var(--text-faint)',
@@ -144,6 +152,7 @@ export const Filters: React.FC<Props> = ({ open }) => {
       <div style={{
         flex: 1, overflowY: 'auto', padding: 14,
         display: 'flex', flexDirection: 'column', gap: 14,
+        width: 240,
       }}>
         {/* Search by name */}
         <div style={{ position: 'relative' }}>

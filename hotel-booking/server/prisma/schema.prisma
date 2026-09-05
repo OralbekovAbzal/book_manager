@@ -147,6 +147,15 @@ model Booking {
   checkIn            DateTime      @db.Date
   checkOut           DateTime      @db.Date
   status             BookingStatus @default(CONFIRMED)
+  /// ФАКТИЧЕСКИЙ момент заезда/выезда (часы:минуты), а не плановая дата:
+  /// checkIn/checkOut — это @db.Date без времени, они говорят «на какие сутки
+  /// продан номер», и по ним считаются пересечения и деньги. Здесь же —
+  /// когда статус реально проставили: заполняется автоматически кнопками
+  /// «Заезд»/«Выезд», админ может поправить вручную (заехали ночью, выезд
+  /// оформили задним числом). Nullable: у старых броней этого следа нет,
+  /// и у брони, до которой гость не доехал, его не будет никогда.
+  actualCheckInAt    DateTime?
+  actualCheckOutAt   DateTime?
   source             String?
   notes              String?
   adultsWithMeals    Int           @default(0)

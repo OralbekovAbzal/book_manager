@@ -28,18 +28,18 @@
   --border-subtle:   #e5e7eb;
   --border-strong:   #9ca3af;
 
-  /* Accent — спокойный синий */
-  --accent:          #4f76c9;
-  --accent-hover:    #3f63b0;
-  --accent-bg:       #eef3fb;
-  --accent-text:     #34548f;
+  /* Accent — насыщенный синий */
+  --accent:          #3b66d4;
+  --accent-hover:    #2e54b8;
+  --accent-bg:       #eaf0fd;
+  --accent-text:     #2a4785;
 
-  /* Status colors — приглушённая палитра (мягкий синий / шалфей / янтарь / коралл) */
-  --s-confirmed:     #5a82c4;
-  --s-in:            #5b9e7e;
-  --s-out:           #d3a25c;
-  --s-overdue:       #cc6b6b;
-  --s-maint:         #97a2b3;
+  /* Status colors — насыщенная, но не кричащая палитра (синий / изумруд / янтарь / алый) */
+  --s-confirmed:     #3f6fd8;
+  --s-in:            #26a06b;
+  --s-out:           #dd8a1f;
+  --s-overdue:       #dc4747;
+  --s-maint:         #7c8aa3;
   /* Aliases — старые имена ссылаются на новую палитру (не ломаем существующий код) */
   --status-confirmed:    var(--s-confirmed);
   --status-checked-in:   var(--s-in);
@@ -49,8 +49,8 @@
   --status-no-show:      #9aa3b2;
 
   /* Calendar */
-  --today-bg:        #eef3fb;
-  --today-line:      #4f76c9;
+  --today-bg:        #eaf0fd;
+  --today-line:      #3b66d4;
   --weekend-bg:      #f8f9fb;
   --past-bg:         #f8f9fb;
 
@@ -79,18 +79,18 @@
   --border-subtle:   #2d2d33;
   --border-strong:   #71717a;
 
-  /* Accent — спокойный синий (чуть светлее для тёмного фона) */
-  --accent:          #7ba0db;
-  --accent-hover:    #9bb9e8;
-  --accent-bg:       rgba(123,160,219,0.16);
-  --accent-text:     #a8c2e6;
+  /* Accent — насыщенный синий (чуть светлее для тёмного фона) */
+  --accent:          #5c90e6;
+  --accent-hover:    #7ba8ec;
+  --accent-bg:       rgba(92,144,230,0.18);
+  --accent-text:     #9dbdf0;
 
-  /* Status colors — приглушённая палитра, чуть ярче для тёмного фона */
-  --s-confirmed:     #6e93d0;
-  --s-in:            #6fb495;
-  --s-out:           #ddb070;
-  --s-overdue:       #d98686;
-  --s-maint:         #8a93a3;
+  /* Status colors — насыщенная палитра, чуть ярче для тёмного фона */
+  --s-confirmed:     #5588e2;
+  --s-in:            #2fb87e;
+  --s-out:           #e6a52e;
+  --s-overdue:       #e06060;
+  --s-maint:         #93a0b8;
   --status-confirmed:    var(--s-confirmed);
   --status-checked-in:   var(--s-in);
   --status-checked-out:  var(--s-out);
@@ -99,8 +99,8 @@
   --status-no-show:      #6b7280;
 
   /* Calendar */
-  --today-bg:        rgba(123,160,219,0.12);
-  --today-line:      #7ba0db;
+  --today-bg:        rgba(92,144,230,0.14);
+  --today-line:      #5c90e6;
   --weekend-bg:      #18181b;
   --past-bg:         #111115;
 
@@ -199,6 +199,40 @@ textarea {
 /* Toolbar nav / filter buttons */
 .tb-btn:hover { background: var(--surface-2); }
 .tb-today:hover { background: var(--accent-bg); border-color: var(--accent); }
+
+/* ─── Форма брони (BookingModal) — мягкие поля вместо жёсткой серой обводки.
+   Обычное состояние — заливка без видимой границы; обводка и лёгкое свечение
+   акцентным цветом появляются только в фокусе. inputStyle/selectStyle в
+   BookingModal.tsx намеренно не задают border/background инлайн — иначе
+   инлайн-стиль перебил бы :focus ниже. */
+.booking-form-modal input:not([type="checkbox"]):not([type="radio"]),
+.booking-form-modal select,
+.booking-form-modal textarea {
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.booking-form-modal input:not([type="checkbox"]):not([type="radio"]):focus,
+.booking-form-modal select:focus,
+.booking-form-modal textarea:focus {
+  background: var(--bg);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+.booking-form-modal input:disabled,
+.booking-form-modal select:disabled,
+.booking-form-modal textarea:disabled {
+  opacity: 0.65;
+}
+/* Кнопки — лёгкий подъём тенью при наведении, без сдвига (мелкие кнопки-счётчики
+   рядом не должны дёргаться). */
+.booking-form-modal button:not(:disabled) {
+  transition: box-shadow 0.15s ease, filter 0.15s ease;
+}
+.booking-form-modal button:not(:disabled):hover {
+  box-shadow: 0 3px 10px rgba(0,0,0,0.14);
+  filter: brightness(1.04);
+}
 
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes slideUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }

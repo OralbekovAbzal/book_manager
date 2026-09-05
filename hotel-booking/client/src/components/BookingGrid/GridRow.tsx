@@ -2,7 +2,7 @@ import React, { useCallback, useRef, useState, useEffect } from 'react'
 import { differenceInCalendarDays, parseISO, addDays, format } from 'date-fns'
 import { BookingBlock } from './BookingBlock'
 import { SelectionMenu } from './SelectionMenu'
-import { dateFromX, nightFromX } from './utils'
+import { dateFromX } from './utils'
 import { useGridSettings } from './GridSettingsContext'
 import { useGridStore } from '../../store/useGridStore'
 import type { FlatRow, GridBooking, GridAllotment } from '../../types'
@@ -47,6 +47,11 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
   const dayWidthRef  = useRef(DAY_WIDTH)
   dayWidthRef.current = DAY_WIDTH
   const downPos      = useRef<{ x: number; y: number } | null>(null)
+  // Экранная позиция курсора во время протягивания — только для подписи
+  // рядом с курсором (см. рендер ниже); re-render уже происходит на каждый
+  // mousemove (setSelectionState вызывается безусловно), поэтому обычного
+  // ref-а достаточно, отдельный state не нужен.
+  const cursorPos    = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   // Брони комнаты — чтобы выделение упиралось в них день-в-день (без наложения).
   // Через ref, чтобы document-обработчик всегда видел актуальный список.
   const bookingsRef  = useRef(row.room.bookings)
@@ -84,17 +89,36 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
         if (!dragging.current) return
       }
       if (!dragAnchor.current || !areaRef.current) return
+      cursorPos.current = { x: e.clientX, y: e.clientY }
 
       // Пересчитываем rect на каждом шаге чтобы учесть горизонтальный скролл
       const rect = areaRef.current.getBoundingClientRect()
       const x    = Math.max(0, e.clientX - rect.left)
-      // Ночь по «полуячеечной» схеме (как рисуются блоки) + не левее видимого начала
-      let date = nightFromX(x, dateFrom, dayWidthRef.current)
+      // Поклеточно — вся ширина колонки дня N выделяется как день N, без сдвига
+      // на полдня (в отличие от рендера самих броней, см. getBlockGeometry).
+      // Не левее видимого начала.
+      let date = dateFromX(x, dateFrom, dayWidthRef.current)
       if (date < dateFrom) date = dateFrom
 
       const anchor  = dragAnchor.current
-      const rawFrom = anchor <= date ? anchor : date
-      const rawTo   = anchor <= date ? date   : anchor
+      // Тронутая курсором клетка — это ДЕНЬ ВЫЕЗДА (или день заезда, если тянем
+      // влево от якоря), а не ещё одна включённая ночь. Если курсор ещё не ушёл
+      // с клетки якоря — минимум 1 ночь при этой клетке (иначе получился бы
+      // выезд в день заезда). selection.from/to ниже — по-прежнему «последняя
+      // ночь» (не сам выезд), поэтому тут же переводим день выезда в ночь-1,
+      // чтобы clampToFreeGap и вся остальная логика ниже не менялись.
+      let rawFrom: string
+      let rawTo: string
+      if (date === anchor) {
+        rawFrom = anchor
+        rawTo   = anchor
+      } else if (date > anchor) {
+        rawFrom = anchor
+        rawTo   = format(addDays(parseISO(date), -1), 'yyyy-MM-dd')
+      } else {
+        rawFrom = date
+        rawTo   = format(addDays(parseISO(anchor), -1), 'yyyy-MM-dd')
+      }
       // Не даём выделению наехать на существующую бронь — упираем в неё день-в-день.
       const newSel: Selection = clampToFreeGap(anchor, rawFrom, rawTo, bookingsRef.current)
       selectionRef.current = newSel
@@ -141,7 +165,7 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
     roomIdRef.current = row.room.id
     const rect = e.currentTarget.getBoundingClientRect()
     const x    = Math.max(0, e.clientX - rect.left)
-    let date = nightFromX(x, dateFrom, dayWidthRef.current)
+    let date = dateFromX(x, dateFrom, dayWidthRef.current)
     if (date < dateFrom) date = dateFrom
 
     dragging.current   = false
@@ -174,12 +198,12 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
   // ─── Room row ─────────────────────────────────────────────────────────────
   const { room, categoryColor, categoryName } = row
 
-  // Overlay: от середины первой ячейки до середины (last + 1)
+  // Overlay: от СЕРЕДИНЫ стартовой ячейки до СЕРЕДИНЫ конечной (выезд) — так же,
+  // как рисуется итоговая бронь (см. getBlockGeometry, та же половинная логика).
+  // Фиксация по датам (selection.from/to), а не по сырому курсору.
   const selectionOverlay = selection ? (() => {
     const fromOffset = differenceInCalendarDays(parseISO(selection.from), parseISO(dateFrom))
     const nights     = differenceInCalendarDays(parseISO(selection.to), parseISO(selection.from)) + 1
-    // От СЕРЕДИНЫ стартовой ячейки до СЕРЕДИНЫ конечной (выезд) — половинки на концах,
-    // чтобы день-в-день стыковать выезд/заезд (на том же дне может начаться другая бронь).
     return { left: fromOffset * DAY_WIDTH + DAY_WIDTH / 2, width: nights * DAY_WIDTH }
   })() : null
 
@@ -321,6 +345,35 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
           }} />
         )}
 
+        {/* Подпись рядом с курсором во время протягивания — полоса рисуется
+            серединой ячейки в середину (как итоговая бронь), поэтому день
+            выезда виден лишь наполовину и легко принимается за «на день меньше».
+            Подпись явно называет число ночей и дату выезда, чтобы не гадать. */}
+        {selection && (() => {
+          const nights = differenceInCalendarDays(parseISO(selection.to), parseISO(selection.from)) + 1
+          const checkOutDate = addDays(parseISO(selection.to), 1)
+          const nightsLabel = nights === 1 ? '1 ночь' : nights < 5 ? `${nights} ночи` : `${nights} ночей`
+          return (
+            <div style={{
+              position: 'fixed',
+              left: cursorPos.current.x + 16,
+              top:  cursorPos.current.y + 16,
+              background: 'var(--text)',
+              color: 'var(--bg)',
+              padding: '6px 10px',
+              borderRadius: 6,
+              fontSize: '0.92rem',
+              fontWeight: 600,
+              pointerEvents: 'none',
+              zIndex: 10000,
+              whiteSpace: 'nowrap',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+            }}>
+              {nightsLabel} · выезд {format(checkOutDate, 'dd.MM')}
+            </div>
+          )
+        })()}
+
         {/* Booking blocks */}
         {room.bookings.map((booking) => (
           <BookingBlock
@@ -366,12 +419,17 @@ const isBlocking = (st: string) => st === 'CONFIRMED' || st === 'CHECKED_IN'
  * неё день-в-день: справа — до дня заезда брони (становится выездом), слева —
  * до дня выезда брони (становится заездом).
  */
-function clampToFreeGap(
+/**
+ * Границы свободного окна вокруг anchor — вынесено отдельно от clampToFreeGap,
+ * потому что те же самые gapStart/gapEnd нужны и полосе выделения (см.
+ * selectionOverlay), причём НЕЗАВИСИМО от того, докуда её уже успели дотянуть:
+ * это абсолютный предел «куда вообще можно», а не производная от текущей
+ * (возможно, ещё однодневной) selection.from/to.
+ */
+function freeGapBounds(
   anchor: string,
-  rawFrom: string,
-  rawTo: string,
   bookings: GridBooking[],
-): { from: string; to: string } {
+): { gapStart: string | null; gapEnd: string | null } {
   let gapStart: string | null = null  // самая левая допустимая ячейка (выезд левой брони)
   let gapEnd:   string | null = null  // первая ЗАНЯТАЯ ячейка справа (заезд правой брони)
 
@@ -386,7 +444,16 @@ function clampToFreeGap(
       if (gapEnd === null || ci < gapEnd) gapEnd = ci
     }
   }
+  return { gapStart, gapEnd }
+}
 
+function clampToFreeGap(
+  anchor: string,
+  rawFrom: string,
+  rawTo: string,
+  bookings: GridBooking[],
+): { from: string; to: string } {
+  const { gapStart, gapEnd } = freeGapBounds(anchor, bookings)
   let from = rawFrom
   let to = rawTo
   if (gapStart !== null && from < gapStart) from = gapStart

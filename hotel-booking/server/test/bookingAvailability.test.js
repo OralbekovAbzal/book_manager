@@ -45,6 +45,10 @@ function room(id) {
 const CREATE_DEFAULTS = {
   partnerId: null,
   partner: null,
+  // Фактические заезд/выезд: у брони их проставляют кнопки «Заезд»/«Выезд», create
+  // их не пишет — но BOOKING_SELECT спрашивает, и фейк падает на отсутствующем поле.
+  actualCheckInAt: null,
+  actualCheckOutAt: null,
   room: room(101),
   createdBy: { id: 1, name: 'Админ' },
   createdAt: d('2026-06-01'),

@@ -64,19 +64,16 @@ export function getBlockGeometry(
   return { left, width, visible: width > 0, isPoint: false }
 }
 
-/** Дата по x-позиции клика внутри зоны дат */
+/**
+ * Дата по x-позиции клика внутри зоны дат — поклеточно: вся ширина колонки дня N
+ * относится к дню N (совпадает с заголовком колонки). Используется и для курсора,
+ * и для выделения дат под новую бронь — в отличие от рендера уже существующих
+ * броней (`getBlockGeometry`), который намеренно рисует блок со сдвигом на полдня
+ * (чтобы выезд и заезд в один день стыковались в одной колонке, не наезжая друг на
+ * друга). Поэтому созданная бронь визуально «сядет» на полдня позже того, что было
+ * подсвечено при протягивании — так же, как выглядят все остальные брони в сетке.
+ */
 export function dateFromX(x: number, dateFrom: string, dayWidth = DAY_WIDTH): string {
   const dayOffset = Math.floor(x / dayWidth)
-  return format(addDays(parseISO(dateFrom), dayOffset), 'yyyy-MM-dd')
-}
-
-/**
- * Дата НОЧИ по x для выделения — с учётом «полуячеечного» рендера броней
- * (блок рисуется от середины дня заезда до середины дня выезда). Левая половина
- * ячейки X → ночь X-1, правая → ночь X. Так выделение совпадает с краями блоков
- * и не попадает в визуально занятую часть соседней брони.
- */
-export function nightFromX(x: number, dateFrom: string, dayWidth = DAY_WIDTH): string {
-  const dayOffset = Math.floor((x - dayWidth / 2) / dayWidth)
   return format(addDays(parseISO(dateFrom), dayOffset), 'yyyy-MM-dd')
 }

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react'
-import { differenceInCalendarDays, parseISO } from 'date-fns'
+import { differenceInCalendarDays, format, parseISO } from 'date-fns'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
+import { useAuthStore } from '../../store/useAuthStore'
 import { fetchBooking } from '../../api/bookings'
 import { BookingMoneyBar } from '../Payments/BookingMoneyBar'
 import type { Booking } from '../../types'
@@ -22,6 +23,24 @@ const STATUS_COLORS: Record<string, string> = {
   NO_SHOW:     '#b45309',
 }
 
+// Стили кнопок — ДО компонента: константа, объявленная ниже по файлу, при горячей
+// перезагрузке падает с «is not defined» (временная мёртвая зона). Уже ловили.
+const closeBtnStyle: React.CSSProperties = {
+  background: 'none', border: 'none', cursor: 'pointer',
+  fontSize: '1.6rem', color: 'var(--text-faint)', lineHeight: 1, padding: '0 4px', fontWeight: 300,
+}
+
+const primaryBtnStyle: React.CSSProperties = {
+  padding: '8px 18px', background: 'var(--accent)', color: '#fff',
+  border: 'none', borderRadius: 'var(--ui-radius)', fontSize: 'inherit', fontWeight: 600, cursor: 'pointer',
+}
+
+const secondaryBtnStyle: React.CSSProperties = {
+  padding: '8px 16px', background: 'transparent', color: 'var(--text)',
+  border: '1px solid var(--border)', borderRadius: 'var(--ui-radius)',
+  fontSize: 'inherit', fontWeight: 600, cursor: 'pointer',
+}
+
 const fmtDate = (iso?: string) => {
   if (!iso) return '—'
   return new Date(iso.slice(0, 10) + 'T12:00:00Z').toLocaleDateString('ru-RU', {
@@ -29,9 +48,21 @@ const fmtDate = (iso?: string) => {
   })
 }
 
+/**
+ * Фактические заезд/выезд — настоящий момент времени, а не `@db.Date`. Поэтому
+ * НИКАКОГО `timeZone:'UTC'`, в отличие от fmtDate выше: показываем местное время
+ * браузера, иначе стойка увидит «09:00» вместо реальных 14:00.
+ */
+const fmtDateTime = (iso?: string | null) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '—' : format(d, 'dd.MM.yyyy HH:mm')
+}
+
 export const BookingViewModal: React.FC = () => {
-  const { modal, closeModal } = useGridStore()
+  const { modal, closeModal, openEditModal } = useGridStore()
   const { roomFund } = useSettingsStore()
+  const role = useAuthStore(s => s.admin?.role)
 
   const open = modal.open && modal.mode === 'view'
   const booking = modal.booking
@@ -99,6 +130,14 @@ export const BookingViewModal: React.FC = () => {
   // Блокировка номера («Ремонт») — не бронь: денег по ней не бывает.
   const isMaintenance = booking.source === 'ремонт'
 
+  // Правило видимости «Редактировать» — ТО ЖЕ, что в BookingGrid/BookingContextMenu.tsx.
+  // Два разных правила в двух местах означали бы кнопку, на которую сервер отвечает 400/403:
+  // закрытую бронь `update()` не пускает править вовсе, а CHECKED_OUT администратор
+  // всё-таки открывает — ради правки фактического времени заезда/выезда.
+  const isClosed = ['CHECKED_OUT', 'CANCELLED', 'NO_SHOW'].includes(booking.status)
+  const isAdmin = role === 'SUPER_ADMIN' || role === 'ADMIN'
+  const canEdit = !isClosed || (booking.status === 'CHECKED_OUT' && isAdmin)
+
   return (
     <Overlay onClose={closeModal}>
       {/* Header */}
@@ -137,6 +176,10 @@ export const BookingViewModal: React.FC = () => {
           <Row label="Заезд" value={fmtDate(booking.checkIn)} />
           <Row label="Выезд" value={fmtDate(booking.checkOut)} />
           <Row label="Ночей" value={String(nights)} />
+          {/* Фактические время заезда/выезда: только из полной брони — в объекте
+              сетки этих полей нет. Пустые строки не показываем, как и «Источник». */}
+          {full?.actualCheckInAt && <Row label="Факт. заезд" value={fmtDateTime(full.actualCheckInAt)} />}
+          {full?.actualCheckOutAt && <Row label="Факт. выезд" value={fmtDateTime(full.actualCheckOutAt)} />}
           {booking.source && <Row label="Источник" value={booking.source} />}
         </Section>
 
@@ -202,9 +245,16 @@ export const BookingViewModal: React.FC = () => {
       {/* Footer */}
       <div style={{
         padding: '14px 24px', borderTop: '1px solid var(--border)',
-        display: 'flex', justifyContent: 'flex-end',
+        display: 'flex', justifyContent: 'flex-end', gap: 8,
       }}>
-        <button onClick={closeModal} style={primaryBtnStyle}>Закрыть</button>
+        {/* «Закрыть» уступает акцент «Редактировать» только когда та есть: у закрытой
+            брони без прав единственная кнопка не должна выглядеть второстепенной. */}
+        <button onClick={closeModal} style={canEdit ? secondaryBtnStyle : primaryBtnStyle}>Закрыть</button>
+        {canEdit && (
+          // Передаём объект из сетки, как и контекстное меню: форма правки сама
+          // догружает полную бронь по id (BookingModal → fetchBooking).
+          <button onClick={() => openEditModal(booking)} style={primaryBtnStyle}>Редактировать</button>
+        )}
       </div>
     </Overlay>
   )
@@ -249,12 +299,3 @@ const Row: React.FC<{ label: string; value: string; valueColor?: string }> = ({ 
   </div>
 )
 
-const closeBtnStyle: React.CSSProperties = {
-  background: 'none', border: 'none', cursor: 'pointer',
-  fontSize: '1.6rem', color: 'var(--text-faint)', lineHeight: 1, padding: '0 4px', fontWeight: 300,
-}
-
-const primaryBtnStyle: React.CSSProperties = {
-  padding: '8px 18px', background: 'var(--accent)', color: '#fff',
-  border: 'none', borderRadius: 'var(--ui-radius)', fontSize: 'inherit', fontWeight: 600, cursor: 'pointer',
-}

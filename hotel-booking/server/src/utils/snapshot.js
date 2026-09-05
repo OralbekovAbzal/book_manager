@@ -154,9 +154,14 @@ const BOOKING_FIELDS = [
   'childrenNoMeals', 'extraBedsWithMeals', 'extraBedsNoMeals', 'disabledAdults',
   'disabledChildren', 'discountPercent', 'prepaymentPercent', 'totalAmount',
   'prepaidAmount', 'paidAmount', 'flags', 'partnerId', 'shiftId', 'adminId',
+  'actualCheckInAt', 'actualCheckOutAt',
   'createdAt', 'updatedAt',
 ]
-const BOOKING_DATE_FIELDS = ['checkIn', 'checkOut', 'createdAt', 'updatedAt']
+// actualCheckInAt/actualCheckOutAt — настоящие timestamp'ы: в JSON снимка они лежат
+// строками, и без этого списка pickRow вернул бы строку туда, где Prisma ждёт Date.
+const BOOKING_DATE_FIELDS = [
+  'checkIn', 'checkOut', 'actualCheckInAt', 'actualCheckOutAt', 'createdAt', 'updatedAt',
+]
 
 const CHARGE_FIELDS = [
   'id', 'bookingId', 'kind', 'label', 'quantity', 'unitPrice', 'amount', 'date',

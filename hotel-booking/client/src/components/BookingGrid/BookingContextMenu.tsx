@@ -44,9 +44,11 @@ export const BookingContextMenu: React.FC = () => {
 
   // Закрытые брони сервер не даёт ни редактировать («Нельзя редактировать закрытую бронь»),
   // ни отменять — пункты не показываем. Отмена заселённого гостя — только администраторам (403).
+  // Исключение: у CHECKED_OUT администратор может поправить фактическое время заезда/выезда
+  // (единственное, что форма позволит изменить у закрытой брони) — открываем «Редактировать».
   const isClosed = ['CHECKED_OUT', 'CANCELLED', 'NO_SHOW'].includes(booking.status)
   const isAdmin = role === 'SUPER_ADMIN' || role === 'ADMIN'
-  const canEdit = !isClosed
+  const canEdit = !isClosed || (booking.status === 'CHECKED_OUT' && isAdmin)
   const canDelete = !isClosed && (booking.status !== 'CHECKED_IN' || isAdmin)
 
   return (

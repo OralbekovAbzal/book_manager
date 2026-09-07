@@ -34,29 +34,39 @@ function untrackSocket(socket) {
  * продолжал бы слать обновления сетки до истечения токена — до восьми часов.
  * Клиент после разрыва попробует переподключиться и получит отказ в handshake.
  */
+function dropSocket(socket, reason) {
+  // Сообщаем причину до разрыва: клиент показывает её на экране входа
+  try { socket.emit('auth:revoked', { reason }) } catch { /* сокет уже мёртв */ }
+  socket.disconnect(true)
+}
+
 function disconnectAdmin(adminId, reason = 'account_disabled') {
   const set = socketsByAdmin.get(Number(adminId))
   if (!set || !set.size) return 0
   const n = set.size
-  for (const socket of [...set]) {
-    // Сообщаем причину до разрыва: клиент может показать «учётная запись отключена»
-    try { socket.emit('auth:revoked', { reason }) } catch { /* сокет уже мёртв */ }
-    socket.disconnect(true)
-  }
+  for (const socket of [...set]) dropSocket(socket, reason)
   logger.info(`Socket: разорвано ${n} соединение(й) сотрудника ${adminId} (${reason})`)
   return n
 }
 
-/** Периодическая перепроверка активности подключённых — один запрос на всех. */
+/** Периодическая перепроверка подключённых — один запрос на всех: учётку
+ *  выключили или версию сессии подняли мимо API (правкой в базе). */
 async function recheckConnectedAdmins() {
   const ids = [...socketsByAdmin.keys()]
   if (!ids.length) return
   try {
-    const gone = await prisma.admin.findMany({
-      where: { id: { in: ids }, isActive: false },
-      select: { id: true },
+    const admins = await prisma.admin.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, isActive: true, tokenVersion: true },
     })
-    for (const a of gone) disconnectAdmin(a.id)
+    const byId = new Map(admins.map((a) => [a.id, a]))
+    for (const id of ids) {
+      const a = byId.get(id)
+      if (!a || !a.isActive) { disconnectAdmin(id); continue }
+      for (const socket of [...(socketsByAdmin.get(id) || [])]) {
+        if (socket.tokenVersion !== a.tokenVersion) dropSocket(socket, 'session_revoked')
+      }
+    }
   } catch (err) {
     // Сбой базы не должен рвать живые соединения — просто ждём следующего круга
     logger.error(`Socket: перепроверка активности не удалась — ${err.message}`)
@@ -90,7 +100,7 @@ function initSocket(server) {
     try {
       admin = await prisma.admin.findUnique({
         where: { id: payload.id },
-        select: { id: true, username: true, name: true, role: true, isActive: true },
+        select: { id: true, username: true, name: true, role: true, isActive: true, tokenVersion: true },
       })
     } catch (err) {
       // Сбой базы — не «неверный токен»: клиент сам переподключится позже.
@@ -99,8 +109,12 @@ function initSocket(server) {
     }
 
     if (!admin || !admin.isActive) return next(new Error('Unauthorized'))
+    // Та же проверка версии сессии, что в middleware/auth.js: отозванный
+    // токен не должен открыть сокет и получать обновления сетки.
+    if ((payload.tv ?? 0) !== admin.tokenVersion) return next(new Error('Session revoked'))
 
     socket.admin = { id: admin.id, username: admin.username, name: admin.name, role: admin.role }
+    socket.tokenVersion = admin.tokenVersion
     next()
   })
 

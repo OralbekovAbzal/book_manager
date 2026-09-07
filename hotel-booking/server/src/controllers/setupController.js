@@ -7,11 +7,11 @@ const { prisma } = require('../utils/prisma')
 // ни одной настоящей учётной записи — входить некому. Защита от повторного
 // прогона — HotelSettings.setupCompletedAt: после завершения POST /complete → 403.
 
-// Тот же токен, что выдаёт authController.signToken (claims { id, role }).
+// Тот же токен, что выдаёт authController.signToken (claims { id, role, tv }).
 // Продублировано, чтобы не трогать authController.
 function signToken(admin) {
   return jwt.sign(
-    { id: admin.id, role: admin.role },
+    { id: admin.id, role: admin.role, tv: admin.tokenVersion ?? 0 },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
   )

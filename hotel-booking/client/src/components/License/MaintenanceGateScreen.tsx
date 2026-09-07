@@ -13,8 +13,10 @@ import { LicenseKeyForm, formatIsoRu } from './licenseUi'
  * показывается обычный экран входа с текстом сервера в баннере — ключ примет
  * только SUPER_ADMIN (POST /api/license), значит сперва нужно войти.
  *
- * Выход работает: `logout()` чисто клиентский, на сервер не ходит, — иначе из-под
- * гейта нельзя было бы сменить пользователя на главного администратора.
+ * Выход работает и под гейтом: `logout()` сначала стирает сессию локально, и
+ * только потом шлёт `POST /auth/logout` — под гейтом тот получит 402 и будет
+ * проигнорирован (чужие сессии этой учётки в таком случае не отзываются, но
+ * сменить пользователя на главного администратора можно всегда).
  */
 
 const cardStyle: React.CSSProperties = {
@@ -74,7 +76,7 @@ export const MaintenanceGateScreen: React.FC = () => {
           </span>
           <button
             type="button"
-            onClick={logout}
+            onClick={() => logout()}
             style={{
               height: 32, padding: '0 14px', background: 'transparent', border: '1px solid var(--border)',
               borderRadius: 8, fontSize: '0.84rem', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'inherit',

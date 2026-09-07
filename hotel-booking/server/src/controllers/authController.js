@@ -1,10 +1,14 @@
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const { prisma } = require('../utils/prisma')
+const { revokeSessions } = require('../utils/sessions')
 
+// `tv` — версия сессии (Admin.tokenVersion): middleware/auth.js и handshake
+// сокета сверяют её с базой, несовпадение — 401. Та же функция продублирована
+// в setupController.signToken — claims менять в обоих местах.
 function signToken(admin) {
   return jwt.sign(
-    { id: admin.id, role: admin.role },
+    { id: admin.id, role: admin.role, tv: admin.tokenVersion ?? 0 },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
   )
@@ -34,9 +38,16 @@ async function login(req, res, next) {
   }
 }
 
-async function logout(_req, res) {
-  // JWT stateless — клиент просто удаляет токен
-  res.json({ message: 'Выход выполнен' })
+// Выход — это отзыв ВСЕХ сессий учётной записи, а не только этой вкладки:
+// скопированный или оставленный на другом ноутбуке токен после выхода тоже
+// перестаёт работать. Раньше ответ был stateless, а токен жил до 8 ч.
+async function logout(req, res, next) {
+  try {
+    await revokeSessions(req.admin.id, { reason: 'session_revoked' })
+    res.json({ message: 'Выход выполнен' })
+  } catch (err) {
+    next(err)
+  }
 }
 
 async function me(req, res) {
@@ -54,9 +65,12 @@ async function changePassword(req, res, next) {
     }
 
     const hash = await bcrypt.hash(newPassword, 12)
-    await prisma.admin.update({ where: { id: req.admin.id }, data: { password: hash } })
+    // Смена пароля обязана убивать чужие сессии — иначе после утечки она
+    // бессмысленна. Своя уходит вместе с ними: вызывающий входит заново
+    // с новым паролем (клиент получает auth:revoked по сокету).
+    await revokeSessions(req.admin.id, { reason: 'password_changed', data: { password: hash } })
 
-    res.json({ message: 'Пароль изменён' })
+    res.json({ message: 'Пароль изменён, войдите заново' })
   } catch (err) {
     next(err)
   }

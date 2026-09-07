@@ -247,7 +247,8 @@ export const App: React.FC = () => {
             <IconBtn onClick={() => setSnapshotsOpen(true)} title="Откат / снапшоты" icon={ICONS.history} />
             <IconBtn onClick={() => setAuditOpen(true)} title="Аудит" icon={ICONS.audit} />
             <IconBtn onClick={toggleTheme} title="Сменить тему" icon={visual.theme === 'light' ? ICONS.moon : ICONS.sun} />
-            <IconBtn onClick={logout} title="Выйти" icon={ICONS.logout} />
+            {/* Не `onClick={logout}`: событие клика ушло бы в параметр `reason` */}
+            <IconBtn onClick={() => logout()} title="Выйти" icon={ICONS.logout} />
           </div>
           <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 2 }}>

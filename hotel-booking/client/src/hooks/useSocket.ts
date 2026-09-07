@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { SOCKET_URL } from '../config'
 import { useGridStore } from '../store/useGridStore'
-import { useAuthStore } from '../store/useAuthStore'
+import { useAuthStore, type SessionEndReason } from '../store/useAuthStore'
 import type { GridBooking } from '../types'
 
 let socket: Socket | null = null
@@ -39,11 +39,12 @@ export function useSocket(token: string | null) {
     socket.on('booking:checkin', withBooking(onBookingUpdated))
     socket.on('booking:checkout', withBooking(onBookingUpdated))
 
-    // Учётную запись отключили: сервер рвёт сокет и больше не пустит его обратно
-    // (handshake проверяет isActive). Не ждём, пока в 401 упрётся первый REST-запрос —
-    // сразу выходим на экран входа, иначе рабочее место молча «замерзает».
-    socket.on('auth:revoked', () => {
-      useAuthStore.getState().logout()
+    // Сервер отозвал сессию (учётку отключили, сменили пароль, вышли на другом
+    // устройстве): сокет рвётся и обратно его не пустят. Не ждём, пока в 401
+    // упрётся первый REST-запрос — сразу на экран входа с пояснением, иначе
+    // рабочее место молча «замерзает».
+    socket.on('auth:revoked', (payload?: { reason?: SessionEndReason }) => {
+      useAuthStore.getState().logout(payload?.reason ?? 'account_disabled')
     })
 
     socket.on('booking:cancelled', (payload: { bookingId?: number } | null | undefined) => {

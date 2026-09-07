@@ -8,7 +8,9 @@ interface Props {
 }
 
 export const Login: React.FC<Props> = ({ serverError }) => {
-  const { login } = useAuthStore()
+  const { login, notice } = useAuthStore()
+  // Состояние сервера важнее пояснения о завершённой сессии
+  const banner = serverError || notice
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -79,8 +81,8 @@ export const Login: React.FC<Props> = ({ serverError }) => {
           </p>
         </div>
 
-        {/* Баннер о состоянии сервера (передаёт App при старте) */}
-        {serverError && (
+        {/* Баннер: состояние сервера (передаёт App при старте) или почему сессия закончилась */}
+        {banner && (
           <div style={{
             padding: '9px 12px',
             marginBottom: 14,
@@ -91,7 +93,7 @@ export const Login: React.FC<Props> = ({ serverError }) => {
             fontSize: '0.92rem',
             lineHeight: 1.45,
           }}>
-            {serverError}
+            {banner}
           </div>
         )}
 

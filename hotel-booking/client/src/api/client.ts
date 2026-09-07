@@ -52,10 +52,11 @@ api.interceptors.response.use(
     }
 
     // Вход и мастер настройки показывают ошибку сами — неверный пароль не должен
-    // перезагружать страницу. 5xx и сетевые ошибки токен не трогают: сервер вернётся,
-    // а сессия ещё жива.
+    // перезагружать страницу. Выход: токен уже стёрт стором, а 401 здесь значит
+    // «сессию отозвали раньше» — перезагрузка смыла бы пояснение на экране входа.
+    // 5xx и сетевые ошибки токен не трогают: сервер вернётся, а сессия ещё жива.
     const url: string = err.config?.url ?? ''
-    const isAuthFlow = url.includes('/auth/login') || url.includes('/setup/')
+    const isAuthFlow = url.includes('/auth/login') || url.includes('/auth/logout') || url.includes('/setup/')
     if (status === 401 && !isAuthFlow) {
       localStorage.removeItem('token')
       window.location.reload()

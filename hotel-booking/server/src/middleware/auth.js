@@ -25,7 +25,7 @@ async function authenticate(req, res, next) {
   try {
     admin = await prisma.admin.findUnique({
       where: { id: payload.id },
-      select: { id: true, username: true, name: true, role: true, isActive: true },
+      select: { id: true, username: true, name: true, role: true, isActive: true, tokenVersion: true },
     })
   } catch (err) {
     logger.error(`authenticate: ошибка запроса к базе — ${err.message}`)
@@ -36,7 +36,14 @@ async function authenticate(req, res, next) {
     return res.status(401).json({ error: 'Пользователь не найден или деактивирован' })
   }
 
-  req.admin = admin
+  // Отозванная сессия: выход, смена или сброс пароля подняли tokenVersion, а в
+  // токене осталась прежняя. Токены без claim'а (выпущены до появления поля)
+  // читаются как 0 — иначе обновление программы разлогинило бы всех разом.
+  if ((payload.tv ?? 0) !== admin.tokenVersion) {
+    return res.status(401).json({ error: 'Сессия завершена, войдите заново' })
+  }
+
+  req.admin = { id: admin.id, username: admin.username, name: admin.name, role: admin.role, isActive: admin.isActive }
   next()
 }
 

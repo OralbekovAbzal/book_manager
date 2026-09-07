@@ -2,13 +2,29 @@ import { create } from 'zustand'
 import api from '../api/client'
 import type { Admin } from '../types'
 
+/** Почему сервер завершил сессию — payload события `auth:revoked` (socketManager.js). */
+export type SessionEndReason = 'account_disabled' | 'session_revoked' | 'password_changed'
+
+const SESSION_END_NOTICE: Record<SessionEndReason, string> = {
+  account_disabled: 'Учётная запись отключена администратором',
+  session_revoked: 'Сессия завершена: выполнен выход на другом устройстве',
+  password_changed: 'Пароль изменён — войдите заново с новым паролем',
+}
+
 interface AuthStore {
   admin: Admin | null
   token: string | null
   /** Название отеля для шапки: из /api/setup/status до входа, из /api/hotel после. */
   hotelName: string | null
+  /** Пояснение на экране входа, почему сессия закончилась (после auth:revoked). */
+  notice: string | null
   login: (username: string, password: string) => Promise<void>
-  logout: () => void
+  /**
+   * Без причины — выход по кнопке: сервер отзывает ВСЕ сессии учётной записи
+   * (authController.logout). С причиной — сессию уже отозвал сервер,
+   * остаётся только стереть токен и объяснить почему.
+   */
+  logout: (reason?: SessionEndReason) => void
   restore: () => Promise<void>
   /** Установить сессию, полученную не через /auth/login (авто-вход после мастера настройки). */
   setSession: (token: string, admin: Admin) => void
@@ -19,16 +35,26 @@ export const useAuthStore = create<AuthStore>((set) => ({
   admin: null,
   token: localStorage.getItem('token'),
   hotelName: null,
+  notice: null,
 
   login: async (username, password) => {
     const { data } = await api.post('/auth/login', { username, password })
     localStorage.setItem('token', data.token)
-    set({ admin: data.admin, token: data.token })
+    set({ admin: data.admin, token: data.token, notice: null })
   },
 
-  logout: () => {
+  logout: (reason) => {
+    const token = localStorage.getItem('token')
     localStorage.removeItem('token')
-    set({ admin: null, token: null })
+    set({
+      admin: null,
+      token: null,
+      notice: reason ? (SESSION_END_NOTICE[reason] ?? SESSION_END_NOTICE.session_revoked) : null,
+    })
+    if (reason || !token) return
+    // Токен из localStorage уже стёрт (интерцептор его не подставит) — передаём
+    // явно. Ответ не важен: 401 значит, что сессию уже отозвали с другой стороны.
+    api.post('/auth/logout', null, { headers: { Authorization: `Bearer ${token}` } }).catch(() => {})
   },
 
   restore: async () => {
@@ -52,7 +78,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
   // Токен кладём в localStorage так же, как login — его читает axios-интерцептор.
   setSession: (token, admin) => {
     localStorage.setItem('token', token)
-    set({ admin, token })
+    set({ admin, token, notice: null })
   },
 
   setHotelName: (name) => set({ hotelName: name }),

@@ -101,6 +101,14 @@ function project(rec, args) {
   return { ...rec }
 }
 
+/** `data` записи: обычные значения и атомарный `{ increment: n }` (Admin.tokenVersion). */
+function applyData(rec, data) {
+  for (const [k, v] of Object.entries(data)) {
+    if (isPlainCondition(v) && 'increment' in v) rec[k] = (rec[k] ?? 0) + v.increment
+    else rec[k] = v
+  }
+}
+
 function makeModel(name, rows, calls) {
   let seq = rows.reduce((m, r) => Math.max(m, Number(r.id) || 0), 0)
   const select = (args = {}) => applyOrder(rows.filter((r) => matchWhere(r, args.where)), args.orderBy)
@@ -153,7 +161,7 @@ function makeModel(name, rows, calls) {
     async updateMany(args) {
       calls.push({ model: name, op: 'updateMany', args })
       const hits = rows.filter((r) => matchWhere(r, args.where))
-      for (const r of hits) Object.assign(r, args.data)
+      for (const r of hits) applyData(r, args.data)
       return { count: hits.length }
     },
     async delete(args) {
@@ -168,7 +176,7 @@ function makeModel(name, rows, calls) {
       const rec = rows.find((r) => matchWhere(r, args.where))
       // Prisma на update несуществующей записи бросает P2025 — тест должен видеть то же
       if (!rec) { const e = new Error('Record to update not found'); e.code = 'P2025'; throw e }
-      Object.assign(rec, args.data)
+      applyData(rec, args.data)
       return project(rec, args)
     },
     get rows() { return rows },

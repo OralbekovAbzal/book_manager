@@ -248,6 +248,13 @@ model Admin {
   name          String
   role          AdminRole @default(STAFF)
   isActive      Boolean   @default(true)
+  /// Версия сессии. JWT несёт её в claim `tv`; middleware/auth.js и handshake
+  /// сокета сравнивают claim с этим полем, несовпадение — 401. Увеличивается
+  /// при выходе и при смене/сбросе пароля: так «выйти на всех устройствах»
+  /// стоит одно сравнение в уже существующем запросе, без таблицы отозванных
+  /// токенов и без чистки по cron. Токены, выпущенные до появления поля,
+  /// claim'а не имеют и читаются как версия 0 — обновление никого не разлогинит.
+  tokenVersion  Int       @default(0)
   bookings      Booking[]
   shiftsCreated Shift[]   @relation("ShiftCreator")
   snapshots     Snapshot[]

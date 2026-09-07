@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs')
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
 const { disconnectAdmin } = require('../socket/socketManager')
+const { revokeSessions } = require('../utils/sessions')
 const logger = require('../utils/logger')
 
 // Учётные записи сотрудников — только SUPER_ADMIN (см. routes/users.js).
@@ -86,8 +87,10 @@ async function setPassword(req, res, next) {
     const existing = await prisma.admin.findUnique({ where: { id }, select: { id: true } })
     if (!existing) return next(createError('Пользователь не найден', 404))
 
-    await prisma.admin.update({
-      where: { id },
+    // Сброс пароля отзывает сессии сотрудника: иначе тот, у кого остался старый
+    // токен, работал бы под этой учёткой ещё до 8 ч после смены.
+    await revokeSessions(id, {
+      reason: 'password_changed',
       data: { password: await bcrypt.hash(req.body.password, 12) },
     })
     res.json({ message: 'Пароль изменён' })

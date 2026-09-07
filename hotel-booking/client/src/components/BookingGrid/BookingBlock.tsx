@@ -30,6 +30,31 @@ interface DragState {
 
 const DRAG_THRESHOLD = 5
 
+/**
+ * Шеврон (мыс слева и справа) с мягко скруглённым, а не острым, кончиком.
+ * Геометрия — 1:1 с дизайн-хендоффом (taper=7px), меняется только то, как
+ * рисуется сам кончик: вместо одной острой вершины — квадратичная кривая,
+ * идущая от точки на скошенном ребре ДО кончика (control point — сам
+ * исходный острый угол) к симметричной точке ПОСЛЕ кончика.
+ */
+function roundedChevronPath(w: number, h: number, taper: number, round: number): string {
+  const halfH = h / 2
+  const edgeLen = Math.sqrt(taper * taper + halfH * halfH) || 1
+  const rx = (round * taper) / edgeLen
+  const ry = (round * halfH) / edgeLen
+  const n = (v: number) => Math.round(v * 100) / 100
+
+  return `path('M ${n(taper)} 0 ` +
+    `L ${n(w - taper)} 0 ` +
+    `L ${n(w - rx)} ${n(halfH - ry)} ` +
+    `Q ${n(w)} ${n(halfH)} ${n(w - rx)} ${n(halfH + ry)} ` +
+    `L ${n(w - taper)} ${n(h)} ` +
+    `L ${n(taper)} ${n(h)} ` +
+    `L ${n(rx)} ${n(halfH + ry)} ` +
+    `Q 0 ${n(halfH)} ${n(rx)} ${n(halfH - ry)} ` +
+    `Z')`
+}
+
 /** Две брони пересекаются, если их интервалы [checkIn, checkOut) перекрываются */
 function hasCollision(
   data: GridData | null,
@@ -345,9 +370,10 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
     )
   }
 
-  // Треугольные мысы по краям — фиксированные 7px (1:1 с дизайн-хендоффом)
+  // Треугольные мысы по краям — фиксированные 7px (1:1 с дизайн-хендоффом).
+  // Кончик мыса скруглён (round=3px) — острая вершина смотрелась грубовато.
   const taperPx = 7
-  const clipPath = `polygon(${taperPx}px 0, calc(100% - ${taperPx}px) 0, 100% 50%, calc(100% - ${taperPx}px) 100%, ${taperPx}px 100%, 0 50%)`
+  const clipPath = roundedChevronPath(width, blockHeight, taperPx, 3)
   // padding учитывает обрезаемые мысы — текст не должен наезжать на скос
   const padX = taperPx + 6
 

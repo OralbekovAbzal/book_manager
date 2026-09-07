@@ -94,7 +94,7 @@ async function main() {
 
   const res = await fetch(`http://127.0.0.1:${PORT}/api/auth/login`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'admin123' }),
+    body: JSON.stringify({ username: 'admin', password: 'admin' }),
   })
   const body = await res.json()
   log(`login: HTTP ${res.status}, token=${body.token ? body.token.slice(0, 12) + '…' : 'НЕТ'}`)

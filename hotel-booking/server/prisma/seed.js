@@ -62,13 +62,13 @@ async function main() {
   console.log(`Rooms created: ${created}`)
 
   // Super admin
-  const hash = await bcrypt.hash('admin123', 12)
+  const hash = await bcrypt.hash('admin', 12)
   await prisma.admin.upsert({
     where: { username: 'admin' },
     create: { username: 'admin', password: hash, name: 'Главный администратор', role: 'SUPER_ADMIN' },
     update: {},
   })
-  console.log('Super admin created: admin / admin123')
+  console.log('Super admin created: admin / admin')
 
   console.log('Seed complete!')
 }

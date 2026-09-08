@@ -207,19 +207,39 @@ export async function updateActualTimes(
   return data.data
 }
 
+/**
+ * Почему номер недоступен. Причины РАЗНЫЕ по смыслу, и форма ведёт себя с ними
+ * по-разному: `overlap` и `buffer` — жёсткий запрет (сохранение блокируется),
+ * `allotment` — предупреждение, продать можно с подтверждением
+ * (`docs/decisions/bookings.md`, 2026-09-08).
+ */
+export type UnavailableReason = 'overlap' | 'buffer' | 'allotment' | 'range'
+
 export async function checkAvailability(params: {
   roomId: number
   checkIn: string
   checkOut: string
   excludeBookingId?: number
-}): Promise<{ available: boolean; conflict: Booking | null }> {
+}): Promise<{
+  available: boolean
+  conflict: Booking | null
+  /** null — номер свободен */
+  reason: UnavailableReason | null
+  /** Текст сервера: какой партнёр, какая метка, чья бронь. Показываем его как есть. */
+  message: string | null
+}> {
   const { data } = await api.post('/bookings/check-availability', params)
   return data
 }
 
 export interface MoveResult {
   original: Booking
-  created: Booking | null  // null если same-day move (без сплита)
+  /**
+   * Вторая часть переезда — null при переезде «день в день» (без сплита).
+   * Это ПРОДОЛЖЕНИЕ счёта, а не отдельная бронь: `accountBookingId` у неё
+   * указывает на первую часть, деньги остаются там же (data-and-money.md).
+   */
+  created: Booking | null
 }
 
 /**

@@ -4,9 +4,9 @@ const { emitBookingEvent } = require('../socket/socketManager')
 const { getCurrentBusinessDate, ensureCurrentShift } = require('../utils/businessDate')
 const {
   toUTCDate, dateKey, nightsOf, sumCharges, recalcBookingTotals, pinLegacyTotal,
-  planCancelCharges, planEarlyCheckout, loadStayContext,
+  planCancelCharges, planEarlyCheckout, loadChainStayContext,
 } = require('../utils/charges')
-const { round2, chargedOf, bookingMoney } = require('../utils/bookingMoney')
+const { round2, chargedOf, bookingMoney, resolveAccountId } = require('../utils/bookingMoney')
 const bookingCtrl = require('./bookingController')
 const paymentCtrl = require('./paymentController')
 
@@ -77,8 +77,12 @@ function orderRows(keep, create) {
  * @returns {{ rows: Array, statusAfter: string, nights: {planned:number, stayed:number, removed:number} }}
  */
 async function planSettlement(booking, action, businessDate, client = prisma) {
+  // Строки — у головы счёта: расчёт с гостем, переехавшим в другой номер, считается
+  // по всей цепочке, иначе у продолжения не нашлось бы ни одной строки и «к возврату»
+  // равнялось бы всей оплате.
+  const accountId = booking.accountBookingId ?? booking.id
   const charges = await client.bookingCharge.findMany({
-    where: { bookingId: booking.id },
+    where: { bookingId: accountId },
     orderBy: [{ date: 'asc' }, { id: 'asc' }],
   })
   const planned = nightsOf(booking.checkIn, booking.checkOut).length
@@ -111,7 +115,7 @@ async function planSettlement(booking, action, businessDate, client = prisma) {
         nights: { planned, stayed: planned, removed: 0 },
       }
     }
-    const ctx = await loadStayContext(booking, businessDate, client)
+    const { headId, ...ctx } = await loadChainStayContext(booking, businessDate, client)
     const plan = planEarlyCheckout({ booking, charges, newCheckOut: businessDate, ...ctx })
     const stayed = nightsOf(booking.checkIn, businessDate).length
     return {
@@ -134,12 +138,13 @@ async function planSettlement(booking, action, businessDate, client = prisma) {
  * правилу, что касса и отчёты (`chargedOf`): у 107 старых броней строк начислений не
  * было никогда, и без этого калькулятор показал бы всю их оплату «к возврату».
  */
-function chargedOfPlan(rows, booking, statusAfter) {
+function chargedOfPlan(rows, booking, statusAfter, accountTotal = null) {
   if (rows.length > 0) return sumCharges(rows)
   return Math.round(chargedOf({
     chargesTotal: 0,
     hasCharges: false,
-    totalAmount: booking.totalAmount,
+    // У продолжения свой `totalAmount` всегда ноль — итог живёт на голове счёта
+    totalAmount: accountTotal !== null ? accountTotal : booking.totalAmount,
     status: statusAfter,
   }))
 }
@@ -194,9 +199,10 @@ async function preview(req, res, next) {
       if (denied) return next(denied)
     }
 
+    const accountId = booking.accountBookingId ?? booking.id
     const plan = await planSettlement(booking, action, businessDate)
-    const charged = chargedOfPlan(plan.rows, booking, plan.statusAfter)
     const money = await bookingMoney(id)
+    const charged = chargedOfPlan(plan.rows, booking, plan.statusAfter, money.totalAmount)
     const paid = money.paid
 
     res.json({
@@ -211,7 +217,9 @@ async function preview(req, res, next) {
         due: round2(Math.max(0, charged - paid)),
         nights: plan.nights,
         rows: plan.rows,
-        payments: (await refundablePayments(id)).map((p) => ({
+        /// Счёт, по которому идёт расчёт (у продолжения — голова цепочки)
+        accountBookingId: money.accountBookingId,
+        payments: (await refundablePayments(accountId)).map((p) => ({
           id: p.id,
           paidAt: p.paidAt,
           method: p.method,
@@ -265,6 +273,10 @@ async function settle(req, res, next) {
     // по кассе. Берём ДО транзакции — как в paymentController.
     const shift = refundAmount > 0 ? await ensureCurrentShift(req.admin.id) : null
 
+    // Штраф и возврат пишутся на СЧЁТ: у продолжения после переезда своих строк
+    // и платежей нет, они лежат на голове цепочки.
+    const accountId = await resolveAccountId(id)
+
     const result = await prisma.$transaction(async (tx) => {
       // (а) само действие
       let event = null
@@ -281,10 +293,10 @@ async function settle(req, res, next) {
       if (penaltyAmount > 0) {
         // Счёт брони без строк держится на кэше `totalAmount` — фиксируем его строкой,
         // иначе пересчёт ниже приравняет весь счёт к штрафу (см. `pinLegacyTotal`).
-        await pinLegacyTotal(id, { client: tx, adminId: req.admin.id })
+        await pinLegacyTotal(accountId, { client: tx, adminId: req.admin.id })
         penalty = await tx.bookingCharge.create({
           data: {
-            bookingId: id,
+            bookingId: accountId,
             kind: 'extra',
             label: penaltyReason ? `Штраф: ${penaltyReason}` : DEFAULT_PENALTY_LABEL,
             quantity: 1,
@@ -296,7 +308,7 @@ async function settle(req, res, next) {
             createdById: req.admin.id,
           },
         })
-        await recalcBookingTotals(id, { client: tx })
+        await recalcBookingTotals(accountId, { client: tx })
       }
 
       // (в) возврат — не больше переплаты по счёту, УЖЕ включающему штраф
@@ -310,7 +322,7 @@ async function settle(req, res, next) {
 
         // Раскладываем от НОВЫХ приёмов к старым: свежий платёж чаще всего и есть тот,
         // который отменяют, а старая предоплата обычно уже закрыта услугами.
-        const sources = await refundablePayments(id, tx)
+        const sources = await refundablePayments(accountId, tx)
         let left = refundAmount
         for (const source of sources) {
           if (left <= 0) break
@@ -318,7 +330,7 @@ async function settle(req, res, next) {
           const part = round2(Math.min(source.refundable, left))
           const created = await tx.payment.create({
             data: {
-              bookingId: id,
+              bookingId: accountId,
               kind: 'refund',
               amount: part,
               method: refundMethod || source.method,
@@ -340,7 +352,7 @@ async function settle(req, res, next) {
           // администратор отдал бы гостю не ту сумму.
           throw createError(`Вернуть можно не больше ${round2(refundAmount - left)}`, 400)
         }
-        await paymentCtrl.recalcBookingPaid(id, tx)
+        await paymentCtrl.recalcBookingPaid(accountId, tx)
       }
 
       return { event, penalty, refunds }

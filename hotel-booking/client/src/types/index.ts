@@ -1,5 +1,9 @@
 export type BookingStatus = 'CONFIRMED' | 'CHECKED_IN' | 'CHECKED_OUT' | 'CANCELLED' | 'NO_SHOW'
-export type AdminRole = 'SUPER_ADMIN' | 'ADMIN' | 'STAFF'
+// Ролей две. STAFF убран решением владельца (docs/decisions/interface.md,
+// 2026-09-08): по факту он мог почти всё, и половина проверок в интерфейсе
+// сводилась к «а что можно сотруднику». Сервер создание STAFF отклоняет (400),
+// существующие учётки миграцией переведены в ADMIN.
+export type AdminRole = 'SUPER_ADMIN' | 'ADMIN'
 export type BookingSource = 'телефон' | 'стойка' | 'онлайн' | 'Каспи'
 
 // ─── Документ гостя ───────────────────────────────────────────────────────────
@@ -27,8 +31,43 @@ export interface Room {
   category: Category
 }
 
+// ─── Цепочка брони (переезд = один счёт) ──────────────────────────────────────
+// Переезд со сплитом делает ДВЕ записи в шахматке, но счёт у гостя один:
+// начисления и платежи физически лежат на первой брони («голове»), а вторая
+// («продолжение») ссылается на неё через `accountBookingId`. Решение —
+// `docs/decisions/data-and-money.md` (2026-09-08). Раньше `move()` делил
+// `paidAmount` пропорцией, а платежи оставались на первой части (D3-001/002, D7-013).
+
+/** Голова счёта у продолжения: id и номер, чтобы показать «Счёт брони №N». */
+export interface BookingAccountRef {
+  id: number
+  room?: { number: string } | null
+}
+
+/** Отрезок цепочки. Приходит у ГОЛОВЫ — по одному на каждый переезд. */
+export interface BookingContinuation {
+  id: number
+  roomId: number
+  room?: { number: string } | null
+  checkIn: string
+  checkOut: string
+  status: BookingStatus
+}
+
 export interface Booking {
   id: number
+  /**
+   * Непусто — деньги этой брони лежат на счёте головы (`accountBookingId`),
+   * а свои `totalAmount/prepaidAmount/paidAmount` у неё нулевые. Все денежные
+   * экраны считают по `accountIdOf()` из `utils/bookingAccount.ts`.
+   */
+  accountBookingId?: number | null
+  /** Продана поверх квоты партнёра — вопрос больше не задаётся */
+  allotmentOverride?: boolean
+  /** Заполнено только у продолжения */
+  account?: BookingAccountRef | null
+  /** Заполнено только у головы; пустой массив — обычная бронь без переездов */
+  continuations?: BookingContinuation[]
   roomId: number
   guestName: string
   guestPhone?: string
@@ -87,6 +126,12 @@ export interface Booking {
 // Grid API types
 export interface GridBooking {
   id: number
+  /**
+   * Продолжение чужого счёта: деньги этой полоски лежат на брони №N.
+   * Грид отдаёт только id счёта — без него полоска не может показать значок
+   * цепочки, а её собственные суммы (нулевые) выглядели бы как «не оплачено».
+   */
+  accountBookingId?: number | null
   roomId: number
   guestName: string
   guestPhone?: string

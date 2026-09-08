@@ -225,6 +225,10 @@ function fixture() {
       discountPercent: 0, prepaymentPercent: 50,
       totalAmount: 90000, prepaidAmount: 45000, paidAmount: 50000,
       flags: [], partnerId: null, shiftId: null, adminId: 1,
+      // Волна 5b: голова счёта цепочки и «продана поверх квоты». Колонки берутся
+      // из DMMF сами, но проверять надо факт, а не механизм: на «забыли колонку»
+      // в этом проекте наступали дважды.
+      accountBookingId: null, allotmentOverride: true,
       createdAt: T('2026-08-01T10:00:00Z'), updatedAt: T('2026-08-02T10:00:00Z'),
     }],
     bookingCharge: [{
@@ -683,5 +687,79 @@ describe('проверки файла', () => {
     const { prisma } = createDb(fixture())
     const backup = loadBackup(prisma)
     await expect(backup.restoreBackup('../../etc/backup_x.json', 1)).rejects.toMatchObject({ status: 400 })
+  })
+})
+
+// ─── Цепочка «один счёт» (волна 5b) ──────────────────────────────────────────
+
+/**
+ * `Booking.accountBookingId` — вторая самоссылка в схеме после `Payment.refundOfId`,
+ * и обработчик у неё общий: `deferred` в `_schemaPlan()` берёт из DMMF любое поле,
+ * ссылающееся на свою же модель. Проверяем не механизм, а факт — на «забыли новую
+ * колонку» в этом проекте наступали дважды (касса в копии, деньги в снимках), и оба
+ * раза потеря была молчаливой.
+ */
+describe('копия и восстановление цепочки после переезда', () => {
+  /** Голова №41 из общей фикстуры + продолжение №43 с нулевыми деньгами. */
+  function withChain() {
+    const f = fixture()
+    f.booking.push({
+      ...f.booking[0],
+      id: 43, checkIn: D('2026-08-28'), checkOut: D('2026-08-30'), status: 'CHECKED_IN',
+      totalAmount: 0, prepaidAmount: 0, paidAmount: 0,
+      accountBookingId: 41, allotmentOverride: false,
+      createdAt: T('2026-08-28T10:00:00Z'), updatedAt: T('2026-08-28T10:00:00Z'),
+    })
+    return createDb(f)
+  }
+
+  it('обе новые колонки уезжают в файл', async () => {
+    const { prisma } = withChain()
+    const backup = loadBackup(prisma)
+
+    const { filename } = await backup.createBackup()
+    const rows = readDump(filename).tables.Booking
+
+    expect(rows.find((b) => b.id === 41)).toMatchObject({ accountBookingId: null, allotmentOverride: true })
+    expect(rows.find((b) => b.id === 43)).toMatchObject({ accountBookingId: 41, allotmentOverride: false })
+  })
+
+  it('ссылка на голову вставляется вторым проходом, как у возврата', async () => {
+    // Порядок строк внутри createMany зависит от разбиения на пачки, и класть
+    // самоссылку сразу значит поставить восстановление в зависимость от него.
+    const { prisma, tables, calls } = withChain()
+    const backup = loadBackup(prisma)
+    const { filename } = await backup.createBackup()
+    await prisma.booking.deleteMany({})
+
+    await backup.restoreBackup(filename, 1)
+
+    const second = calls.update.find((u) => u.model === 'booking' && u.id === 43)
+    expect(second, 'ссылка должна ставиться отдельным update, а не при вставке').toBeTruthy()
+    expect(second.data.accountBookingId).toBe(41)
+    expect(tables.booking.find((b) => b.id === 43).accountBookingId).toBe(41)
+  })
+
+  it('«продана поверх квоты» возвращается из копии', async () => {
+    const { prisma, tables } = withChain()
+    const backup = loadBackup(prisma)
+    const { filename } = await backup.createBackup()
+    await prisma.booking.deleteMany({})
+
+    await backup.restoreBackup(filename, 1)
+
+    expect(tables.booking.find((b) => b.id === 41).allotmentOverride).toBe(true)
+    expect(tables.booking.find((b) => b.id === 43).allotmentOverride).toBe(false)
+  })
+
+  it('у головы второго прохода нет: ссылки на себя она не имеет', async () => {
+    const { prisma, calls } = withChain()
+    const backup = loadBackup(prisma)
+    const { filename } = await backup.createBackup()
+    await prisma.booking.deleteMany({})
+
+    await backup.restoreBackup(filename, 1)
+
+    expect(calls.update.some((u) => u.model === 'booking' && u.id === 41)).toBe(false)
   })
 })

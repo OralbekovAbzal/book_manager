@@ -6,7 +6,9 @@ import { sameUsername, validateName, validatePassword, validateUsername } from '
 
 export interface HotelForm { name: string; city: string }
 export interface AdminForm { name: string; username: string; password: string; passwordConfirm: string }
-export type StaffRole = 'ADMIN' | 'STAFF'
+// Роль у создаваемых мастером учёток одна — ADMIN: STAFF убран (interface.md),
+// а SUPER_ADMIN в мастере ровно один, и его заводит отдельный шаг.
+export type StaffRole = 'ADMIN'
 export interface StaffDraft { key: string; name: string; username: string; password: string; role: StaffRole }
 export type StaffInput = Omit<StaffDraft, 'key'>
 
@@ -15,7 +17,7 @@ export type FieldErrors<T> = Partial<Record<keyof T, string>>
 export const emptyHotel = (): HotelForm => ({ name: '', city: '' })
 // Логин главного администратора по умолчанию — «admin»
 export const emptyAdmin = (): AdminForm => ({ name: '', username: 'admin', password: '', passwordConfirm: '' })
-export const emptyStaff = (): StaffInput => ({ name: '', username: '', password: '', role: 'STAFF' })
+export const emptyStaff = (): StaffInput => ({ name: '', username: '', password: '', role: 'ADMIN' })
 
 export const newStaffKey = (): string => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 

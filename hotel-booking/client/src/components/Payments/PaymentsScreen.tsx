@@ -208,7 +208,11 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
                             )}
                           </div>
                           <div style={{ fontSize: '0.76rem', color: 'var(--text-faint)' }}>
-                            №{b.room?.number ?? '—'}{b.guestPhone ? ` · ${b.guestPhone}` : ''}
+                            {/* «12 → 15» у гостя, который переезжал: цепочка —
+                                один счёт и одна строка в кассе (data-and-money.md).
+                                `rooms` считает сервер; старый ответ его не несёт —
+                                тогда показываем номер брони, как раньше. */}
+                            №{b.rooms ?? b.room?.number ?? '—'}{b.guestPhone ? ` · ${b.guestPhone}` : ''}
                           </div>
                         </td>
                         <td style={{ ...td, whiteSpace: 'nowrap', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
@@ -246,7 +250,7 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
                   <>
                     <div style={{ ...formTitle, marginBottom: 2 }}>{selected.guestName}</div>
                     <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>
-                      Номер {selected.room?.number ?? '—'} · {fmtDate(selected.checkIn)} — {fmtDate(selected.checkOut)}
+                      Номер {selected.rooms ?? selected.room?.number ?? '—'} · {fmtDate(selected.checkIn)} — {fmtDate(selected.checkOut)}
                     </div>
                   </>
                 }

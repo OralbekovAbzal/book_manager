@@ -1,6 +1,6 @@
 const { prisma } = require('../utils/prisma')
 const { createError } = require('../middleware/errorHandler')
-const { round2, signedPayment: signed, loadBookingMoney, bookingMoney } = require('../utils/bookingMoney')
+const { round2, signedPayment: signed, loadBookingMoney, bookingMoney, resolveAccountId } = require('../utils/bookingMoney')
 const { ensureCurrentShift, getCurrentShift, getCurrentBusinessDate } = require('../utils/businessDate')
 const { emitBookingEvent } = require('../socket/socketManager')
 const logger = require('../utils/logger')
@@ -64,8 +64,11 @@ async function listByBooking(req, res, next) {
     const money = await bookingMoney(bookingId)
     if (!money) return next(createError('Бронь не найдена', 404))
 
+    // Журнал ведётся по СЧЁТУ: у продолжения после переезда своих платежей нет,
+    // а стойка открывает журнал из той формы, что перед ней.
+    const accountId = money.accountBookingId ?? bookingId
     const payments = await prisma.payment.findMany({
-      where: { bookingId },
+      where: { bookingId: accountId },
       include: PAYMENT_INCLUDE,
       orderBy: [{ paidAt: 'desc' }, { id: 'desc' }],
     })
@@ -204,6 +207,10 @@ async function debts(req, res, next) {
     const DEBT_SELECT = {
       id: true, guestName: true, guestPhone: true, checkIn: true, checkOut: true,
       status: true, totalAmount: true, prepaidAmount: true, paidAmount: true,
+      // Счёт цепочки: продолжения в списке не показываем, но их даты, номера и
+      // статус нужны голове — иначе живущий гость выпадет из кассы через `days`
+      // дней после переезда (у головы `checkOut` = дата переезда).
+      accountBookingId: true,
       room: { select: { id: true, number: true, building: true } },
     }
 
@@ -222,14 +229,58 @@ async function debts(req, res, next) {
         where: cancelledWhere, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: 300,
       }),
     ])
-    const bookings = [...active, ...cancelled]
-    if (bookings.length === 0) return res.json({ data: { businessDate, bookings: [] } })
+    const matched = [...active, ...cancelled]
+    if (matched.length === 0) return res.json({ data: { businessDate, bookings: [] } })
 
-    const money = await loadBookingMoney(bookings)
-    const rows = bookings
+    // ── Цепочка = одна строка ──
+    // Совпасть с фильтром (по дате выезда или по номеру) мог любой отрезок, а
+    // показать нужно голову: деньги на ней. Поэтому от совпавших поднимаемся к
+    // головам и добираем ВСЕ их части.
+    const headIds = [...new Set(matched.map((b) => b.accountBookingId ?? b.id))]
+    const byId = new Map(matched.map((b) => [b.id, b]))
+    const absentHeads = headIds.filter((id) => !byId.has(id))
+    const [extraHeads, continuations] = await Promise.all([
+      absentHeads.length > 0
+        ? prisma.booking.findMany({ where: { id: { in: absentHeads } }, select: DEBT_SELECT })
+        : Promise.resolve([]),
+      prisma.booking.findMany({
+        where: { accountBookingId: { in: headIds } },
+        select: DEBT_SELECT,
+        orderBy: [{ checkIn: 'asc' }, { id: 'asc' }],
+      }),
+    ])
+    for (const h of extraHeads) byId.set(h.id, h)
+
+    const partsByHead = new Map()
+    for (const c of continuations) {
+      if (c.status === 'CANCELLED') continue  // переезд отыграли назад — счёту он не отрезок
+      if (!partsByHead.has(c.accountBookingId)) partsByHead.set(c.accountBookingId, [])
+      partsByHead.get(c.accountBookingId).push(c)
+    }
+
+    const heads = headIds.map((id) => byId.get(id)).filter(Boolean)
+    if (heads.length === 0) return res.json({ data: { businessDate, bookings: [] } })
+
+    const money = await loadBookingMoney(heads)
+    const rows = heads
       .map((b) => {
         const m = money.get(b.id)
-        return { ...b, charged: m.charged, chargesFromRows: m.chargesFromRows, paid: m.paid, due: m.due }
+        const parts = partsByHead.get(b.id) || []
+        const last = parts.length > 0 ? parts[parts.length - 1] : null
+        return {
+          ...b,
+          charged: m.charged, chargesFromRows: m.chargesFromRows, paid: m.paid, due: m.due,
+          // «12 → 15»: клиент читает `rooms`, если поле есть; `room` оставлен как
+          // у головы, чтобы старая разметка и поиск по номеру не сломались.
+          ...(parts.length > 0 && {
+            rooms: [b.room?.number, ...parts.map((p) => p.room?.number)].filter(Boolean).join(' → '),
+            // Срок всей цепочки: заезд первого отрезка → выезд последнего
+            checkOut: last.checkOut,
+            // Статус текущего отрезка: голова после переезда всегда CHECKED_OUT
+            status: last.status,
+            segmentIds: [b.id, ...parts.map((p) => p.id)],
+          }),
+        }
       })
       // Отменённая с закрытыми деньгами в рабочем списке не нужна: она ничего не требует
       .filter((b) => b.status !== 'CANCELLED' || b.paid !== 0 || b.due !== 0)
@@ -273,14 +324,16 @@ async function create(req, res, next) {
     const amount = parseAmount(req.body?.amount)
     if (amount === null) return next(createError('Сумма должна быть больше нуля', 400))
 
-    const booking = await prisma.booking.findUnique({ where: { id }, select: { id: true } })
-    if (!booking) return next(createError('Бронь не найдена', 404))
+    // Деньги пишутся на СЧЁТ: у гостя, переехавшего в другой номер, счёт один,
+    // и оплата, принятая в форме продолжения, обязана попасть на голову цепочки.
+    const accountId = await resolveAccountId(id)
+    if (accountId === null) return next(createError('Бронь не найдена', 404))
 
     let refundOf = null
     if (refundOfId != null) {
       refundOf = await prisma.payment.findUnique({ where: { id: parseInt(refundOfId) } })
       if (!refundOf) return next(createError('Исходный платёж не найден', 404))
-      if (refundOf.bookingId !== id) return next(createError('Исходный платёж относится к другой брони', 400))
+      if (refundOf.bookingId !== accountId) return next(createError('Исходный платёж относится к другой брони', 400))
     }
 
     // Смена нужна всегда: платёж вне смены не попадёт ни в один отчёт по кассе.
@@ -289,7 +342,7 @@ async function create(req, res, next) {
     const payment = await prisma.$transaction(async (tx) => {
       const created = await tx.payment.create({
         data: {
-          bookingId: id,
+          bookingId: accountId,
           kind,
           amount,
           method,
@@ -302,11 +355,11 @@ async function create(req, res, next) {
         },
         include: PAYMENT_INCLUDE,
       })
-      await recalcBookingPaid(id, tx)
+      await recalcBookingPaid(accountId, tx)
       return created
     })
 
-    await notifyBookingMoneyChanged(id)
+    await notifyBookingMoneyChanged(accountId)
     res.status(201).json({ data: { payment, summary: await bookingMoney(id) } })
   } catch (err) { next(err) }
 }
@@ -416,11 +469,21 @@ async function voidPayment(req, res, next) {
  */
 async function notifyBookingMoneyChanged(bookingId) {
   try {
-    const booking = await prisma.booking.findUnique({
-      where: { id: bookingId },
-      include: { partner: true },
+    // Событие уходит по ВСЕМ отрезкам счёта: деньги лежат на голове, а показывают
+    // их обе части цепочки — приняли оплату в продолжении, а долг в шахматке
+    // остался бы старым у головы (и наоборот).
+    const headId = (await resolveAccountId(bookingId)) ?? bookingId
+    const parts = await prisma.booking.findMany({
+      where: { accountBookingId: headId }, select: { id: true },
     })
-    if (booking) emitBookingEvent('booking:updated', { booking })
+    const ids = [headId, ...parts.map((p) => p.id)]
+    for (const id of ids) {
+      const booking = await prisma.booking.findUnique({
+        where: { id },
+        include: { partner: true },
+      })
+      if (booking) emitBookingEvent('booking:updated', { booking })
+    }
   } catch (err) {
     logger.warn(`payments: не удалось разослать booking:updated — ${err.message}`)
   }

@@ -9,9 +9,14 @@ const { passwordRule } = require('../utils/passwordPolicy')
 // Подключается в app.js: app.use('/api/users', apiLimiter, userRoutes)
 router.use(authenticate, requireRole('SUPER_ADMIN'))
 
-const ROLES = ['SUPER_ADMIN', 'ADMIN', 'STAFF']
+// Роль STAFF убрана решением 2026-09-08 (`docs/decisions/interface.md`): отличать
+// «стойку» от «администратора» оказалось нечем — рабочие места делают одно и то же,
+// а половина проверок STAFF держалась только с одной стороны. Значение из enum схемы
+// не удалено (миграция enum в Postgres дорога и бессмысленна), но назначить его
+// больше нельзя: сюда оно не проходит валидацию.
+const ROLES = ['SUPER_ADMIN', 'ADMIN']
 const USERNAME_RE = /^[a-z0-9._-]+$/
-const ROLE_MSG = "Роль: 'SUPER_ADMIN', 'ADMIN' или 'STAFF'"
+const ROLE_MSG = "Роль: 'SUPER_ADMIN' или 'ADMIN'"
 
 const idRule = param('id').isInt().withMessage('Некорректный id пользователя')
 

@@ -19,7 +19,6 @@ export const PASSWORD_HINT = `Не менее ${PASSWORD_MIN} символов, 
 export const ROLE_LABELS: Record<AdminRole, string> = {
   SUPER_ADMIN: 'Главный администратор',
   ADMIN: 'Администратор',
-  STAFF: 'Сотрудник',
 }
 
 /** Текст ошибки или пустая строка, если логин корректен. */

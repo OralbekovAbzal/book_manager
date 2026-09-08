@@ -62,9 +62,26 @@ function chargedOf({ chargesTotal, hasCharges, totalAmount, status = null }) {
  * @returns {Promise<Map<number, {charged:number, chargesTotal:number, chargesFromRows:boolean, paid:number, due:number}>>}
  */
 async function loadBookingMoney(bookings, client = prisma) {
-  const ids = bookings.map((b) => b.id)
   const out = new Map()
-  if (ids.length === 0) return out
+  if (bookings.length === 0) return out
+
+  // Счёт брони — её голова (переезд = одна цепочка, `docs/decisions/data-and-money.md`).
+  // `accountBookingId` может отсутствовать в select вызывающего (старые выборки) —
+  // тогда бронь сама себе счёт, как было до волны 5b.
+  const accountOf = (b) => b.accountBookingId ?? b.id
+  const ids = [...new Set(bookings.map(accountOf))]
+
+  // Итог и статус нужны от ГОЛОВЫ: у продолжения `totalAmount` ноль, и без этого
+  // «начислено» старой брони без строк потерялось бы при первом же переезде.
+  const known = new Map(bookings.map((b) => [b.id, b]))
+  const absent = ids.filter((id) => !known.has(id))
+  if (absent.length > 0) {
+    const heads = await client.booking.findMany({
+      where: { id: { in: absent } },
+      select: { id: true, totalAmount: true, status: true },
+    })
+    for (const h of heads) known.set(h.id, h)
+  }
 
   const [chargeRows, paymentRows] = await Promise.all([
     client.bookingCharge.groupBy({
@@ -86,11 +103,13 @@ async function loadBookingMoney(bookings, client = prisma) {
   }
 
   for (const b of bookings) {
-    const c = chargeMap.get(b.id)
+    const accId = accountOf(b)
+    const acc = known.get(accId) || b
+    const c = chargeMap.get(accId)
     const hasCharges = !!c && (c._count ? c._count._all > 0 : true)
     const chargesTotal = round2(c && c._sum ? c._sum.amount || 0 : 0)
-    const charged = chargedOf({ chargesTotal, hasCharges, totalAmount: b.totalAmount, status: b.status })
-    const paid = round2(paidMap.get(b.id) || 0)
+    const charged = chargedOf({ chargesTotal, hasCharges, totalAmount: acc.totalAmount, status: acc.status })
+    const paid = round2(paidMap.get(accId) || 0)
     out.set(b.id, {
       charged,
       chargesTotal,
@@ -103,28 +122,60 @@ async function loadBookingMoney(bookings, client = prisma) {
   return out
 }
 
+const MONEY_SELECT = {
+  id: true, guestName: true, status: true, totalAmount: true, prepaidAmount: true, paidAmount: true,
+  // Счёт цепочки: у продолжения все деньги лежат на голове
+  accountBookingId: true,
+}
+
 /**
- * Финансовая картина ОДНОЙ брони. Возвращает null, если брони нет.
- * Форма ответа — контракт API оплаты (`summary` в /api/payments/*), менять её
- * нельзя не поправив клиент.
+ * Голова счёта для брони: она сама либо бронь, на которую указывает
+ * `accountBookingId`. Возвращает null, если брони нет.
+ *
+ * Все точки записи денег (строки начислений, платежи, возвраты, штраф) обязаны
+ * ходить через неё: у продолжения после переезда своих `BookingCharge`/`Payment`
+ * нет и быть не должно, иначе один гость получил бы два счёта.
+ */
+async function resolveAccountId(bookingId, client = prisma) {
+  const b = await client.booking.findUnique({
+    where: { id: parseInt(bookingId) },
+    select: { id: true, accountBookingId: true },
+  })
+  if (!b) return null
+  return b.accountBookingId ?? b.id
+}
+
+/**
+ * Финансовая картина ОДНОЙ брони (для продолжения — её счёта). Возвращает null,
+ * если брони нет. Форма ответа — контракт API оплаты (`summary` в /api/payments/*),
+ * менять её нельзя не поправив клиент; поле `accountBookingId` в волне 5b добавлено.
  */
 async function bookingMoney(bookingId, client = prisma) {
   const booking = await client.booking.findUnique({
     where: { id: bookingId },
     // `status` — для правила «отмена обнуляет счёт» в chargedOf
-    select: { id: true, guestName: true, status: true, totalAmount: true, prepaidAmount: true, paidAmount: true },
+    select: MONEY_SELECT,
   })
   if (!booking) return null
 
-  const money = (await loadBookingMoney([booking], client)).get(booking.id)
+  // Деньги продолжения — это деньги головы: `totalAmount`/`prepaidAmount` в ответе
+  // тоже её, иначе форма продолжения показала бы «Итог 0» рядом с настоящим долгом.
+  const accountId = booking.accountBookingId ?? booking.id
+  const account = accountId === booking.id
+    ? booking
+    : (await client.booking.findUnique({ where: { id: accountId }, select: MONEY_SELECT })) || booking
+
+  const money = (await loadBookingMoney([account], client)).get(account.id)
   return {
     bookingId,
+    /// Голова счёта, если это продолжение после переезда (иначе null)
+    accountBookingId: booking.accountBookingId ?? null,
     /// Сколько должен: сумма строк начислений; без строк — сохранённый итог брони
     charged: money.charged,
     chargesTotal: money.chargesTotal,
     chargesFromRows: money.chargesFromRows,
-    totalAmount: round2(booking.totalAmount),
-    prepaidAmount: round2(booking.prepaidAmount),
+    totalAmount: round2(account.totalAmount),
+    prepaidAmount: round2(account.prepaidAmount),
     /// Сколько принято (возвраты вычтены, отменённые не в счёт)
     paid: money.paid,
     /// Долг. Отрицательный — переплата, её видно так же явно, как недоплату
@@ -132,4 +183,4 @@ async function bookingMoney(bookingId, client = prisma) {
   }
 }
 
-module.exports = { round2, signedPayment, chargedOf, loadBookingMoney, bookingMoney }
+module.exports = { round2, signedPayment, chargedOf, loadBookingMoney, bookingMoney, resolveAccountId }

@@ -182,6 +182,10 @@ function fixture() {
         discountPercent: 0, prepaymentPercent: 50,
         totalAmount: 90000, prepaidAmount: 45000, paidAmount: 50000,
         flags: [], partnerId: 3, shiftId: 5, adminId: 1,
+        // Волна 5b: счёт цепочки и «продана поверх квоты». Колонки в фикстуре не
+        // для красоты — сторож «откат не теряет ни одной колонки» сверяет ключи
+        // строки ДО и ПОСЛЕ восстановления, и без них он ничего не проверяет.
+        accountBookingId: null, allotmentOverride: true,
         createdAt: new Date('2026-08-01T10:00:00Z'), updatedAt: new Date('2026-08-02T10:00:00Z'),
       },
       {
@@ -197,6 +201,7 @@ function fixture() {
         discountPercent: 0, prepaymentPercent: 50,
         totalAmount: 30000, prepaidAmount: 15000, paidAmount: 7000,
         flags: [], partnerId: null, shiftId: null, adminId: 2,
+        accountBookingId: null, allotmentOverride: false,
         createdAt: new Date('2026-08-01T10:00:00Z'), updatedAt: new Date('2026-08-02T10:00:00Z'),
       },
     ],
@@ -629,5 +634,105 @@ describe('защита от молчаливой потери денег', () =>
 
   it('несуществующий снимок — понятная ошибка, а не падение', async () => {
     await expect(snapshot.restoreSnapshot(12345, 1)).rejects.toThrow('Снимок не найден')
+  })
+})
+
+// ─── Цепочка «один счёт» (волна 5b) ──────────────────────────────────────────────
+
+/**
+ * Самоссылка `Booking.accountBookingId` — самая хрупкая связь после `refundOfId`:
+ * она указывает внутрь ТОЙ ЖЕ таблицы, которую откат сначала стирает целиком, а
+ * потом наполняет заново пачками. Есть ровно два способа её потерять:
+ *   1. забыть колонку в `BOOKING_FIELDS` — продолжение станет отдельной бронью
+ *      с нулями, а деньги гостя останутся на голове (молча, как когда-то паспорта);
+ *   2. вставить продолжение раньше головы или при выпавшей голове — падение по
+ *      внешнему ключу посреди восстановления, то есть база без броней вообще.
+ */
+describe('откат восстанавливает цепочку после переезда', () => {
+  /** Голова №41 (номер 10) + продолжение №43 в другом номере, деньги на голове. */
+  function withChain(over = {}) {
+    const f = fixture()
+    f.booking.push({
+      ...f.booking[0],
+      id: 43, roomId: 11, guestName: 'Асель',
+      checkIn: d('2026-08-28'), checkOut: d('2026-08-30'), status: 'CHECKED_IN',
+      totalAmount: 0, prepaidAmount: 0, paidAmount: 0,
+      accountBookingId: 41, allotmentOverride: false,
+      partnerId: null, shiftId: 5, adminId: 1,
+      ...over,
+    })
+    return createDb(f)
+  }
+
+  it('ссылка продолжения на голову переживает откат', async () => {
+    const chain = withChain()
+    const mod = loadSnapshot(chain.prisma)
+    const snap = await mod.createSnapshot({ kind: 'manual', label: 'Точка', createdById: 1 })
+    await chain.prisma.booking.deleteMany({})
+
+    await mod.restoreSnapshot(snap.id, 1)
+
+    expect(chain.tables.booking.find(b => b.id === 43).accountBookingId).toBe(41)
+  })
+
+  it('«продана поверх квоты» тоже возвращается, а не сбрасывается в false', async () => {
+    // Иначе первая же правка восстановленной брони снова упрётся в квоту
+    // партнёра, и администратор не поймёт, почему.
+    const chain = withChain()
+    const mod = loadSnapshot(chain.prisma)
+    const snap = await mod.createSnapshot({ kind: 'manual', label: 'Точка', createdById: 1 })
+    await chain.prisma.booking.deleteMany({})
+
+    await mod.restoreSnapshot(snap.id, 1)
+
+    expect(chain.tables.booking.find(b => b.id === 41).allotmentOverride).toBe(true)
+    expect(chain.tables.booking.find(b => b.id === 43).allotmentOverride).toBe(false)
+  })
+
+  it('продолжение вставляется ПОСЛЕ головы, а не в произвольном порядке снимка', async () => {
+    // В снимке продолжение может лежать первым (порядок задаёт запрос), а
+    // внешний ключ этого не прощает: строки идут пачками по 500.
+    const chain = withChain()
+    const mod = loadSnapshot(chain.prisma)
+    const snap = await mod.createSnapshot({ kind: 'manual', label: 'Точка', createdById: 1 })
+    chain.tables.snapshot[0].data.bookings.reverse()
+    await chain.prisma.booking.deleteMany({})
+
+    await mod.restoreSnapshot(snap.id, 1)
+
+    const inserted = chain.calls.createMany.find(c => c.model === 'booking').rows.map(r => r.id)
+    expect(inserted.indexOf(41)).toBeLessThan(inserted.indexOf(43))
+  })
+
+  it('продолжение без головы (её номер удалён) вставляется без ссылки, а не роняет откат', async () => {
+    // Второй проход по самоссылке — та же защита, что для partnerId. Голова
+    // выпадает из восстановления, потому что её номера в базе больше нет;
+    // продолжение при этом обязано остаться в базе, иначе гость исчезает целиком.
+    const chain = withChain()
+    const mod = loadSnapshot(chain.prisma)
+    const snap = await mod.createSnapshot({ kind: 'manual', label: 'Точка', createdById: 1 })
+    await chain.prisma.booking.deleteMany({})
+    // Номер головы удалён уже ПОСЛЕ снимка — обычная история при откате назад
+    chain.tables.room = chain.tables.room.filter(r => r.id !== 10)
+
+    const res = await mod.restoreSnapshot(snap.id, 1)
+
+    const orphan = chain.tables.booking.find(b => b.id === 43)
+    expect(orphan).toBeDefined()
+    expect(orphan.accountBookingId).toBeNull()
+    expect(chain.tables.booking.find(b => b.id === 41)).toBeUndefined()
+    expect(res.skipped).toBe(1)
+  })
+
+  it('describeRestore не жалуется на новые колонки как на неизвестные', async () => {
+    // Сторож в другую сторону: `warnUnknownFields` сверяет снимок с BOOKING_FIELDS,
+    // и колонка, известная схеме, но забытая в списке, попала бы в лог.
+    const chain = withChain()
+    const mod = loadSnapshot(chain.prisma)
+    const snap = await mod.createSnapshot({ kind: 'manual', label: 'Точка', createdById: 1 })
+
+    await mod.describeRestore(snap.id, 1)
+
+    expect(warnings.join('\n')).not.toMatch(/accountBookingId|allotmentOverride/)
   })
 })

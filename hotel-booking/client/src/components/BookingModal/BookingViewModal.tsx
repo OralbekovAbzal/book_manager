@@ -2,8 +2,10 @@ import React, { useEffect, useState } from 'react'
 import { differenceInCalendarDays, format, parseISO } from 'date-fns'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore } from '../../store/useSettingsStore'
-import { useAuthStore } from '../../store/useAuthStore'
 import { fetchBooking } from '../../api/bookings'
+import {
+  accountIdOf, chainCheckOut, chainRoomsLabel, hasContinuations, isContinuation, lastSegment,
+} from '../../utils/bookingAccount'
 import { BookingMoneyBar } from '../Payments/BookingMoneyBar'
 import { BookingPrintDialog, type PrintDocKind } from '../Print/BookingPrintDialog'
 import type { Booking } from '../../types'
@@ -48,6 +50,22 @@ const docBtnStyle: React.CSSProperties = {
   ...secondaryBtnStyle, padding: '8px 12px', fontSize: '0.9em',
 }
 
+// Строка «это часть общего счёта». Токены темы, а не свои цвета: плашка живёт
+// внутри карточки и обязана темнеть вместе с ней.
+const chainNoticeStyle: React.CSSProperties = {
+  display: 'flex', alignItems: 'center', gap: 8,
+  padding: '8px 12px', borderRadius: 8,
+  background: 'var(--surface)', border: '1px solid var(--border-subtle)',
+  color: 'var(--text-muted)', fontSize: '0.85rem', lineHeight: 1.4,
+}
+
+const chainLinkStyle: React.CSSProperties = {
+  marginLeft: 'auto', flexShrink: 0,
+  background: 'none', border: 'none', padding: 0, cursor: 'pointer',
+  color: 'var(--accent-text)', fontFamily: 'inherit', fontSize: 'inherit',
+  textDecoration: 'underline',
+}
+
 // Документ гостя. Подписи — те же слова, что в форме брони: одно и то же поле
 // не должно называться по-разному в двух окнах.
 const DOC_TYPE_LABELS: Record<string, string> = {
@@ -77,9 +95,10 @@ const fmtDateTime = (iso?: string | null) => {
 }
 
 export const BookingViewModal: React.FC = () => {
-  const { modal, closeModal, openEditModal } = useGridStore()
+  const {
+    modal, closeModal, openEditModal, openViewModal, findBooking, currentSegment,
+  } = useGridStore()
   const { roomFund } = useSettingsStore()
-  const role = useAuthStore(s => s.admin?.role)
 
   const open = modal.open && modal.mode === 'view'
   const booking = modal.booking
@@ -175,12 +194,41 @@ export const BookingViewModal: React.FC = () => {
   }
 
   // Правило видимости «Редактировать» — ТО ЖЕ, что в BookingGrid/BookingContextMenu.tsx.
-  // Два разных правила в двух местах означали бы кнопку, на которую сервер отвечает 400/403:
-  // закрытую бронь `update()` не пускает править вовсе, а CHECKED_OUT администратор
-  // всё-таки открывает — ради правки фактического времени заезда/выезда.
+  // Два разных правила в двух местах означали бы кнопку, на которую сервер отвечает 400:
+  // закрытую бронь `update()` не пускает править вовсе, а CHECKED_OUT всё-таки
+  // открывается — ради правки фактического времени заезда/выезда.
+  // Роль здесь больше не спрашиваем: их две, и обе администраторские.
   const isClosed = ['CHECKED_OUT', 'CANCELLED', 'NO_SHOW'].includes(booking.status)
-  const isAdmin = role === 'SUPER_ADMIN' || role === 'ADMIN'
-  const canEdit = !isClosed || (booking.status === 'CHECKED_OUT' && isAdmin)
+  const canEdit = !isClosed || booking.status === 'CHECKED_OUT'
+
+  // ─── Счёт цепочки ───────────────────────────────────────────────────────────
+  // Деньги, печать и расчёт ведём по ГОЛОВЕ: у продолжения переезда своих
+  // начислений и платежей нет вовсе (data-and-money.md, 2026-09-08).
+  const accountId = accountIdOf(info)
+  const continuation = isContinuation(info)
+  const chainRooms = full ? chainRoomsLabel(full) : ''
+  const headRooms = full?.account?.room?.number
+
+  /** Открыть голову счёта — там виден весь счёт целиком. */
+  const openAccount = () => {
+    const local = findBooking(accountId)
+    if (local) { openViewModal(local); return }
+    fetchBooking(accountId).then(openViewModal).catch(() => { /* нечего показать — молчим */ })
+  }
+
+  /**
+   * «Редактировать» на ГОЛОВЕ с продолжениями открывает текущий отрезок: сама
+   * голова после переезда закрыта, и `PUT /bookings/:id` по ней отвечает 400.
+   * Отрезок ищем в сетке (`accountBookingId` есть у каждой полоски), а если он
+   * вне видимого окна дат — догружаем по `continuations`.
+   */
+  const handleEdit = () => {
+    const local = currentSegment(booking)
+    if (local.id !== booking.id) { openEditModal(local); return }
+    const last = full ? lastSegment(full) : null
+    if (!last || last.id === booking.id) { openEditModal(booking); return }
+    fetchBooking(last.id).then(openEditModal).catch(() => openEditModal(booking))
+  }
 
   return (
     <>
@@ -217,9 +265,37 @@ export const BookingViewModal: React.FC = () => {
 
       {/* Body */}
       <div style={{ padding: '18px 24px', display: 'flex', flexDirection: 'column', gap: 16, overflowY: 'auto' }}>
+        {/* ── Счёт цепочки ── переезд оставляет в шахматке две полоски, но счёт
+            у гостя один. Без этой строки карточка второй части выглядит как
+            бронь, за которую «ничего не начислено». */}
+        {continuation && (
+          <div style={chainNoticeStyle}>
+            <span aria-hidden>⛓</span>
+            <span style={{ minWidth: 0 }}>
+              Счёт брони №{accountId}
+              {headRooms ? ` · номера ${headRooms} → ${full?.room?.number ?? '?'}` : ''}
+              {' — '}начисления и платежи общие
+            </span>
+            <button onClick={openAccount} style={chainLinkStyle}>Открыть</button>
+          </div>
+        )}
+        {full && hasContinuations(full) && (
+          <div style={chainNoticeStyle}>
+            <span aria-hidden>⛓</span>
+            <span style={{ minWidth: 0 }}>
+              Гость переехал: счёт включает номера {chainRooms}. Здесь он целиком.
+            </span>
+          </div>
+        )}
+
         <Section title="Проживание">
           <Row label="Заезд" value={fmtDate(booking.checkIn)} />
           <Row label="Выезд" value={fmtDate(booking.checkOut)} />
+          {/* У головы цепочки собственный «Выезд» — это дата ПЕРЕЕЗДА, и без
+              второй строки кажется, будто гость уехал раньше, чем на самом деле. */}
+          {full && hasContinuations(full) && (
+            <Row label="Выезд из последнего номера" value={fmtDate(chainCheckOut(full))} />
+          )}
           <Row label="Ночей" value={String(nights)} />
           {/* Фактические время заезда/выезда: только из полной брони — в объекте
               сетки этих полей нет. Пустые строки не показываем, как и «Источник». */}
@@ -267,7 +343,9 @@ export const BookingViewModal: React.FC = () => {
           <Section title="Оплата">
             {(info.discountPercent ?? 0) > 0 && <Row label="Скидка" value={`${info.discountPercent}%`} />}
             <BookingMoneyBar
-              bookingId={booking.id}
+              // По счёту, а не по этой полоске: у продолжения переезда своих
+              // денег нет, они на голове цепочки.
+              bookingId={accountId}
               guestName={booking.guestName}
               subtitle={[
                 full?.room?.number ? `Номер ${full.room.number}` : '',
@@ -327,7 +405,8 @@ export const BookingViewModal: React.FC = () => {
         {canEdit && (
           // Передаём объект из сетки, как и контекстное меню: форма правки сама
           // догружает полную бронь по id (BookingModal → fetchBooking).
-          <button onClick={() => openEditModal(booking)} style={primaryBtnStyle}>Редактировать</button>
+          // У головы с продолжениями открывается текущий отрезок — см. handleEdit.
+          <button onClick={handleEdit} style={primaryBtnStyle}>Редактировать</button>
         )}
       </div>
     </Overlay>
@@ -337,7 +416,9 @@ export const BookingViewModal: React.FC = () => {
         к обработчику «клик мимо окна закрывает бронь». */}
     {printKind && (
       <BookingPrintDialog
-        bookingId={booking.id}
+        // Печатаем СЧЁТ, а не отрезок: и подтверждение, и счёт на оплату
+        // выписываются на всю цепочку, иначе гостю уедет половина проживания.
+        bookingId={accountId}
         kind={printKind}
         onClose={() => setPrintKind(null)}
       />

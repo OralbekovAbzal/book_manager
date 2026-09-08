@@ -210,6 +210,15 @@ model Booking {
   flags              String[]      @default([])
   partnerId          Int?
   partner            Partner?      @relation(fields: [partnerId], references: [id])
+  /// Бронь продана ПОВЕРХ квоты партнёра — вопрос «номер выделен партнёру X,
+  /// продать всё равно?» уже задан и подтверждён, повторно не спрашиваем.
+  /// Без этого флага любая последующая правка (поправить телефон гостя) снова
+  /// упиралась в 409 от проверки квоты — бронь становилась нередактируемой
+  /// (аудит D3-003, D7-005). Квота теперь предупреждение, а не запрет.
+  /// Флаг привязан к КОНКРЕТНОМУ размещению: при смене номера или дат сервер
+  /// сбрасывает его и задаёт вопрос заново — подтверждали продажу одного номера,
+  /// а не право игнорировать любые квоты.
+  allotmentOverride  Boolean       @default(false)
   shiftId            Int?
   shift              Shift?        @relation(fields: [shiftId], references: [id])
   adminId            Int
@@ -221,6 +230,27 @@ model Booking {
   services           BookingService[]
   /// Принятые деньги. paidAmount — кэш их суммы, источник истины здесь.
   payments           Payment[]
+  /// ─── Счёт брони: цепочка после переезда ───────────────────────────────────
+  /// Непусто = эта бронь ПРОДОЛЖЕНИЕ после переезда, а её деньги (строки
+  /// начислений и платежи) лежат на голове цепочки — броне, на которую указывает
+  /// ссылка. У продолжения totalAmount/prepaidAmount/paidAmount = 0 и своих
+  /// BookingCharge/Payment нет.
+  ///
+  /// Почему так, а не «половина денег в каждой части»: переезд физически делит
+  /// бронь на две записи (иначе не нарисовать два блока в шахматке и не проверить
+  /// пересечения), но для гостя это ОДИН счёт. Прежняя дележка paidAmount
+  /// пропорцией ночей оставляла платежи на первой части, не делила питание и
+  /// скидку и без посуточных строк удваивала начисления (аудит D3-001/002, D7-013).
+  /// Одна голова = стабильный id, к которому привязаны деньги, касса, печать
+  /// и долги; сегменты дают только даты, номер и категорию для расчёта отрезков.
+  ///
+  /// onDelete: SetNull, а не Cascade: удаление головы не должно уносить
+  /// продолжение вместе с прожитыми ночами — сирота лучше пропавшей брони.
+  /// Голова всегда старше продолжения по id, поэтому восстановление копии и
+  /// снимка в порядке id проставляет самоссылку без второго прохода.
+  accountBookingId   Int?
+  account            Booking?      @relation("BookingAccount", fields: [accountBookingId], references: [id], onDelete: SetNull)
+  continuations      Booking[]     @relation("BookingAccount")
   createdAt          DateTime      @default(now())
   updatedAt          DateTime      @updatedAt
 
@@ -231,6 +261,7 @@ model Booking {
   @@index([status, checkIn])
   @@index([shiftId])
   @@index([partnerId])
+  @@index([accountBookingId])
 }
 
 enum BookingStatus {
@@ -246,7 +277,12 @@ model Admin {
   username      String    @unique
   password      String
   name          String
-  role          AdminRole @default(STAFF)
+  /// Роль по умолчанию — ADMIN: STAFF убрана решением 2026-09-08
+  /// (`docs/decisions/interface.md`). Само значение STAFF из enum НЕ удаляем —
+  /// смена enum в Postgres требует пересоздания типа ради данных, которых после
+  /// миграции всё равно не останется. Создание STAFF запрещено на сервере,
+  /// в интерфейсе роли нет.
+  role          AdminRole @default(ADMIN)
   isActive      Boolean   @default(true)
   /// Версия сессии. JWT несёт её в claim `tv`; middleware/auth.js и handshake
   /// сокета сравнивают claim с этим полем, несовпадение — 401. Увеличивается

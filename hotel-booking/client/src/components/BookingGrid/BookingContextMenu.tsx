@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { useGridStore } from '../../store/useGridStore'
-import { useAuthStore } from '../../store/useAuthStore'
 
 const MENU_WIDTH = 180
 
 export const BookingContextMenu: React.FC = () => {
-  const { contextMenu, closeContextMenu, openEditModal, openDeleteConfirm } = useGridStore()
-  const role = useAuthStore(s => s.admin?.role)
+  const {
+    contextMenu, closeContextMenu, openEditModal, openDeleteConfirm, currentSegment,
+  } = useGridStore()
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
 
@@ -43,13 +43,16 @@ export const BookingContextMenu: React.FC = () => {
   const booking = contextMenu.booking
 
   // Закрытые брони сервер не даёт ни редактировать («Нельзя редактировать закрытую бронь»),
-  // ни отменять — пункты не показываем. Отмена заселённого гостя — только администраторам (403).
-  // Исключение: у CHECKED_OUT администратор может поправить фактическое время заезда/выезда
+  // ни отменять — пункты не показываем.
+  // Исключение: у CHECKED_OUT можно поправить фактическое время заезда/выезда
   // (единственное, что форма позволит изменить у закрытой брони) — открываем «Редактировать».
+  // Роль не спрашиваем: ролей две, и обе администраторские (interface.md, 2026-09-08).
   const isClosed = ['CHECKED_OUT', 'CANCELLED', 'NO_SHOW'].includes(booking.status)
-  const isAdmin = role === 'SUPER_ADMIN' || role === 'ADMIN'
-  const canEdit = !isClosed || (booking.status === 'CHECKED_OUT' && isAdmin)
-  const canDelete = !isClosed && (booking.status !== 'CHECKED_IN' || isAdmin)
+  const canEdit = !isClosed || booking.status === 'CHECKED_OUT'
+  // Продолжение переезда отменить нельзя: сервер отвечает 400 «Продолжение брони
+  // отменить нельзя — оформите выезд» (data-and-money.md). Пункт, который всегда
+  // кончается ошибкой, не показываем — выезд оформляют из формы брони.
+  const canDelete = !isClosed && booking.accountBookingId == null
 
   return (
     <div
@@ -74,7 +77,9 @@ export const BookingContextMenu: React.FC = () => {
         <MenuItem
           label="Редактировать"
           icon="✎"
-          onClick={() => openEditModal(booking)}
+          // У головы цепочки после переезда правится ТЕКУЩИЙ отрезок: сама она
+          // закрыта, и форма закрытой брони почти ничего не даёт изменить.
+          onClick={() => openEditModal(currentSegment(booking))}
         />
       )}
       {canDelete && (

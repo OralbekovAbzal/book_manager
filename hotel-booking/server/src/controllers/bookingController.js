@@ -8,6 +8,7 @@ const {
   replaceBookingServices, defaultServiceLinks, serviceLinksChanged, normalizeServiceLinks,
   buildAutoChargesDetailed, loadRateContext, sumCharges,
   dropAutoChargesOnCancel, trimChargesToCheckOut, pinLegacyTotal,
+  loadChainSegments, loadSegmentRates, rebuildChainCharges, segmentsToPrice,
 } = require('../utils/charges')
 
 /**
@@ -57,6 +58,23 @@ async function findRoomBlock({
   // Подтверждение снимает ТОЛЬКО причину квоты: пересечение и буфер им не обходятся.
   if (hit.reason === 'allotment' && allowAllotmentOverride) return null
   return hit
+}
+
+/**
+ * Действует ли ранее данное подтверждение «продать поверх квоты».
+ *
+ * Флаг `Booking.allotmentOverride` привязан к КОНКРЕТНОМУ размещению: подтверждали
+ * продажу этого номера на эти даты, а не право игнорировать любые квоты. Сменился
+ * номер или даты — вопрос задаётся заново (решение 2026-09-08,
+ * `docs/decisions/bookings.md`). Без флага бронь в квотном номере получала 409 при
+ * КАЖДОМ сохранении и становилась нередактируемой (аудит D3-003, D7-005).
+ */
+function keepsAllotmentOverride(existing, { roomId, checkIn, checkOut }) {
+  if (!existing?.allotmentOverride) return false
+  const sameDay = (a, b) => new Date(a).getTime() === new Date(b).getTime()
+  return parseInt(roomId) === existing.roomId
+    && sameDay(checkIn, existing.checkIn)
+    && sameDay(checkOut, existing.checkOut)
 }
 
 /**
@@ -195,6 +213,21 @@ const BOOKING_SELECT = {
   roomId: true,
   partnerId: true,
   partner: { select: { id: true, name: true, color: true } },
+  // ─── Счёт цепочки (волна 5b) ───
+  // `accountBookingId` непусто = это продолжение после переезда, деньги на голове.
+  // Клиенту нужны обе стороны связи: у продолжения — плашка «Счёт брони №N»,
+  // у головы — список её частей для строки «номера 12 → 15» и значка в шахматке.
+  accountBookingId: true,
+  account: { select: { id: true, room: { select: { number: true } } } },
+  continuations: {
+    select: {
+      id: true, roomId: true, room: { select: { number: true } },
+      checkIn: true, checkOut: true, status: true,
+    },
+    orderBy: { checkIn: 'asc' },
+  },
+  // «Продана поверх квоты партнёра» — вопрос уже задан и подтверждён
+  allotmentOverride: true,
   shiftId: true,
   createdAt: true,
   updatedAt: true,
@@ -225,6 +258,43 @@ const BOOKING_DETAIL_SELECT = {
     },
     orderBy: { id: 'asc' },
   },
+}
+
+/**
+ * Разослать `booking:updated` по ВСЕМ отрезкам счёта.
+ *
+ * Деньги цепочки живут на голове, а на экране их показывают все её части: приняли
+ * оплату в форме продолжения — полоса «Начислено/Долг» обязана обновиться и у головы,
+ * и наоборот. `skip` — записи, событие по которым уже отправлено вызывающим.
+ * Сбой сокета не должен ронять саму операцию: деньги уже записаны.
+ */
+async function emitChainUpdated(anyBookingId, skip = []) {
+  try {
+    const headId = await resolveAccountId(anyBookingId)
+    if (headId === null) return
+    const parts = await prisma.booking.findMany({
+      where: { accountBookingId: headId }, select: { id: true },
+    })
+    const skipSet = new Set(skip.map((x) => parseInt(x)))
+    for (const partId of [headId, ...parts.map((p) => p.id)]) {
+      if (skipSet.has(partId)) continue
+      const booking = await prisma.booking.findUnique({ where: { id: partId }, select: BOOKING_SELECT })
+      if (booking) emitBookingEvent('booking:updated', { booking })
+    }
+  } catch { /* сокет не инициализирован либо цепочка исчезла — операция уже выполнена */ }
+}
+
+/**
+ * Голова счёта брони: она сама либо бронь, на которую указывает `accountBookingId`.
+ * Считается своим запросом, а не через `utils/bookingMoney`, чтобы контроллер броней
+ * не зависел от денежного модуля ради одного `select` из двух колонок.
+ */
+async function resolveAccountId(bookingId, client = prisma) {
+  const b = await client.booking.findUnique({
+    where: { id: parseInt(bookingId) },
+    select: { id: true, accountBookingId: true },
+  })
+  return b ? (b.accountBookingId ?? b.id) : null
 }
 
 // GET /api/bookings
@@ -375,6 +445,9 @@ async function create(req, res, next) {
           // ставилось, а через walk-in из шахматки терялось (аудит D7-004).
           ...(initialStatus === 'CHECKED_IN' && { actualCheckInAt: new Date() }),
           flags: Array.isArray(flags) ? flags : [],
+          // Продали поверх квоты — запоминаем ответ администратора, чтобы не
+          // спрашивать снова при каждой правке брони (см. keepsAllotmentOverride)
+          allotmentOverride: req.body.allowAllotmentOverride === true,
           shiftId: resolvedShiftId,
           adminId: req.admin.id,
         },
@@ -489,6 +562,13 @@ async function update(req, res, next) {
       return next(createError('Дата выезда должна быть позже даты заезда', 400))
     }
 
+    // Подтверждение поверх квоты: новое из тела либо ранее данное, если размещение
+    // не менялось. При смене номера или дат флаг гаснет — вопрос будет задан заново.
+    const keptOverride = keepsAllotmentOverride(existing, {
+      roomId: newRoomId, checkIn: newCheckIn, checkOut: newCheckOut,
+    })
+    const nextOverride = req.body.allowAllotmentOverride === true || keptOverride
+
     // Та же проверка, что при создании: сама бронь себе не мешает (excludeBookingId),
     // а буфер считается по ИТОГОВЫМ меткам — тем, с которыми бронь останется после правки.
     const blockU = await findRoomBlock({
@@ -498,7 +578,7 @@ async function update(req, res, next) {
       excludeBookingId: id,
       flags: flags ?? existing.flags ?? [],
       partnerId: req.body.partnerId !== undefined ? req.body.partnerId : existing.partnerId,
-      allowAllotmentOverride: req.body.allowAllotmentOverride,
+      allowAllotmentOverride: nextOverride,
     })
     if (blockU) return respondRoomBlocked(res, blockU)
 
@@ -559,6 +639,7 @@ async function update(req, res, next) {
           ...(shiftId !== undefined && { shiftId: shiftId ? parseInt(shiftId) : null }),
           ...(actualCheckInAt !== undefined && { actualCheckInAt: nextActualIn }),
           ...(actualCheckOutAt !== undefined && { actualCheckOutAt: nextActualOut }),
+          allotmentOverride: nextOverride,
         },
         select: BOOKING_SELECT,
       })
@@ -567,6 +648,10 @@ async function update(req, res, next) {
       // пересоздавало бы строки (новые id, новая дата создания) без всякой причины.
       if (servicesChanged) await replaceBookingServices(id, services, tx)
 
+      // Все деньги — на голове счёта: правка продолжения после переезда пересобирает
+      // цепочку целиком, а не свои несуществующие строки.
+      const accountId = existing.accountBookingId ?? id
+
       if (!needsRebuild) {
         // Процент предоплаты на строки не влияет, но prepaidAmount считается от него.
         // Раньше новое значение присылал клиент; теперь его считает только сервер,
@@ -574,15 +659,24 @@ async function update(req, res, next) {
         const pctChanged = prepaymentPercent !== undefined
           && Number(prepaymentPercent) !== Number(existing.prepaymentPercent)
         if (!pctChanged) return updated
-        await recalcBookingTotals(id, { client: tx, keepIfEmpty: true })
+        await recalcBookingTotals(accountId, { client: tx, keepIfEmpty: true })
         return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
       }
 
-      await rebuildAutoCharges(id, { adminId: req.admin.id, client: tx, keepIfEmpty: true })
+      // Прожитые ночи не переоцениваем: у цепочки они лежат до заезда текущего
+      // отрезка, у одиночной брони замораживать нечего.
+      await rebuildChainCharges(accountId, {
+        adminId: req.admin.id,
+        client: tx,
+        keepIfEmpty: true,
+        frozenBefore: existing.accountBookingId ? existing.checkIn : null,
+      })
       return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
     })
 
     emitBookingEvent('booking:updated', { booking })
+    // Правка продолжения пересобрала счёт головы — её карточка тоже устарела
+    if (existing.accountBookingId) await emitChainUpdated(id, [id])
     res.json({ data: booking })
   } catch (err) {
     next(err)
@@ -601,6 +695,13 @@ function bookingDayUTC(date) {
  * @returns {Error|null} готовая ошибка для next() или null
  */
 function cancelGuard(existing, role) {
+  // Продолжение после переезда отменить нельзя. Отмена значит «гость не жил» —
+  // для второго отрезка это ложь, а `dropAutoChargesOnCancel` у брони без своих
+  // строк не снял бы ничего: голова продолжала бы начислять непрожитые ночи.
+  // Правильный выход из цепочки — выезд (в том числе ранний, через расчёт с гостем).
+  if (existing.accountBookingId) {
+    return createError('Продолжение брони отменить нельзя — оформите выезд', 400)
+  }
   if (existing.status === 'CANCELLED') return createError('Бронь уже отменена', 400)
   if (existing.status === 'CHECKED_OUT') return createError('Нельзя отменить закрытую бронь', 400)
   // Отмена живущего гостя — операция с последствиями для расчётов, только администраторам
@@ -625,6 +726,29 @@ function checkOutGuard(existing, businessDate) {
   return null
 }
 
+/**
+ * Возвращает `BookingService` отменённого продолжения на предыдущий активный отрезок.
+ *
+ * Набор услуг у счёта ровно один и всегда живёт у ТЕКУЩЕГО отрезка — так его правит
+ * стойка и так его читает генератор (`rebuildChainCharges`). Переезд этот набор
+ * перевозит; отмена переезда обязана перевезти его обратно, иначе «текущим» станет
+ * голова без услуг.
+ *
+ * Зовётся уже ПОСЛЕ смены статуса на CANCELLED: `loadChainSegments` отменённые
+ * продолжения из цепочки выбрасывает, поэтому последний оставшийся отрезок — и есть
+ * тот, на котором гость остаётся.
+ */
+async function returnServicesToPreviousSegment(tx, cancelled) {
+  const { segments } = await loadChainSegments(cancelled.accountBookingId, tx)
+  if (segments.length === 0) return
+  const target = segments[segments.length - 1].booking
+  if (target.id === cancelled.id) return  // отрезок ещё числится живым — переносить некуда
+  await tx.bookingService.updateMany({
+    where: { bookingId: cancelled.id },
+    data: { bookingId: target.id },
+  })
+}
+
 /** Отмена внутри транзакции: статус + обнуление автоматического счёта. */
 async function applyCancel(tx, existing, { note = null } = {}) {
   await tx.booking.update({
@@ -634,6 +758,25 @@ async function applyCancel(tx, existing, { note = null } = {}) {
       ...(note ? { notes: appendNote(existing.notes, note) } : {}),
     },
   })
+  if (existing.accountBookingId) {
+    // Отменяется ПРОДОЛЖЕНИЕ (сюда попадает только выезд день-в-день с переездом —
+    // прямую отмену не пускает cancelGuard). Своих строк у него нет: ночи этого
+    // отрезка снимаются со счёта головы пересборкой, а прожитые до переезда
+    // остаются замороженными и не переоцениваются.
+    //
+    // Сначала возвращаем услуги на предыдущий активный отрезок. `move` их не
+    // копирует, а ПЕРЕНОСИТ на продолжение, и после его отмены набор услуг счёта
+    // остался бы на отменённой записи: генератор берёт услуги у последнего живого
+    // отрезка, не нашёл бы их вовсе — и питание за уже прожитые ночи молча
+    // исчезло бы со счёта (восстановить его потом было бы нечем, «Пересчитать»
+    // вернуло бы ту же сумму без завтраков). Той же транзакцией — иначе счёт
+    // пересобрался бы по половине данных.
+    await returnServicesToPreviousSegment(tx, existing)
+    await rebuildChainCharges(existing.accountBookingId, {
+      client: tx, frozenBefore: existing.checkIn,
+    })
+    return
+  }
   await dropAutoChargesOnCancel(existing.id, tx)
 }
 
@@ -872,6 +1015,8 @@ async function move(req, res, next) {
     // exclusion-constraint booking_no_overlap (он проверяет и UPDATE тоже), а у
     // буфера и квоты окно остаётся — при READ COMMITTED транзакция его не
     // закрывает, только сокращает до одного соединения без пауз посередине.
+    const headId = existing.accountBookingId ?? existing.id
+
     if (moveDateD.getTime() === existing.checkIn.getTime()) {
       const outcome = await prisma.$transaction(async (tx) => {
         const block = await findRoomBlock({
@@ -887,34 +1032,38 @@ async function move(req, res, next) {
         })
         if (block) return { block }
 
-        return {
-          updated: await tx.booking.update({
-            where: { id },
-            data: { roomId: parseInt(newRoomId) },
-            select: BOOKING_SELECT,
-          }),
-        }
+        await tx.booking.update({
+          where: { id },
+          data: {
+            roomId: parseInt(newRoomId),
+            // Номер сменился — прежнее подтверждение поверх квоты к нему не относится
+            allotmentOverride: req.body.allowAllotmentOverride === true,
+          },
+        })
+
+        // Категория нового номера может отличаться — счёт пересобираем даже без
+        // сплита. Прожитые ночи предыдущих отрезков замораживаем по дате заезда
+        // этого; у брони без строк прежний итог сначала фиксируется строкой,
+        // иначе пересборка переоценила бы её по сегодняшнему календарю.
+        await pinLegacyTotal(headId, { client: tx, adminId: req.admin.id })
+        await rebuildChainCharges(headId, {
+          adminId: req.admin.id, client: tx, keepIfEmpty: true, frozenBefore: existing.checkIn,
+        })
+
+        return { updated: await tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT }) }
       })
       if (outcome.block) return respondMoveBlocked(res, outcome.block)
 
       emitBookingEvent('booking:updated', { booking: outcome.updated })
+      await emitChainUpdated(headId, [id])
       return res.json({ data: { original: outcome.updated, created: null } })
     }
 
-    // Деньги делим пропорционально ночам. Раньше вторая часть получала нули, а
-    // первая сохраняла полную сумму за весь исходный срок: итог по брони переставал
-    // соответствовать её датам, и оплата выглядела как несуществующая на новой части.
-    // Остаток отдаём второй части, чтобы сумма частей ТОЧНО равнялась исходной
-    // и округление не съедало тенге.
-    const DAY_MS = 86400000
-    const nightsAll = Math.max(1, Math.round((existing.checkOut - existing.checkIn) / DAY_MS))
-    const nightsFirst = Math.max(0, Math.round((moveDateD - existing.checkIn) / DAY_MS))
-    const splitFirst = (value) => Math.round((value || 0) * nightsFirst / nightsAll)
-    const money = {
-      total: splitFirst(existing.totalAmount),
-      prepaid: splitFirst(existing.prepaidAmount),
-      paid: splitFirst(existing.paidAmount),
-    }
+    // Деньги НЕ делятся. Переезд создаёт продолжение того же счёта: строки
+    // начислений и платежи остаются на голове, у продолжения нули
+    // (`docs/decisions/data-and-money.md`, решение 2026-09-08). Прежняя пропорция по
+    // ночам оставляла платежи на первой части, не делила питание и скидку и без
+    // посуточных строк удваивала начисления (аудит D3-001/002, D7-013).
 
     const result = await prisma.$transaction(async (tx) => {
       // 0. Свободен ли целевой номер на [moveDate, checkOut). Проверка внутри той же
@@ -944,9 +1093,6 @@ async function move(req, res, next) {
           // а поле про это и есть; оставить его пустым у CHECKED_OUT значило бы
           // потерять момент освобождения номера.
           actualCheckOutAt: movedAt,
-          totalAmount: money.total,
-          prepaidAmount: money.prepaid,
-          paidAmount: money.paid,
           notes: appendNote(existing.notes, `Переезд в №${targetRoom.number} (${moveDate})`),
         },
         select: BOOKING_SELECT,
@@ -978,9 +1124,16 @@ async function move(req, res, next) {
           disabledChildren: existing.disabledChildren,
           discountPercent: existing.discountPercent,
           prepaymentPercent: existing.prepaymentPercent,
-          totalAmount: (existing.totalAmount || 0) - money.total,
-          prepaidAmount: (existing.prepaidAmount || 0) - money.prepaid,
-          paidAmount: (existing.paidAmount || 0) - money.paid,
+          // Продолжение того же счёта: деньги лежат на голове цепочки, здесь нули.
+          // Второй переезд подряд ссылается на ТУ ЖЕ голову, а не на предыдущую часть —
+          // счёт у гостя один, сколько бы раз он ни переезжал.
+          accountBookingId: headId,
+          totalAmount: 0,
+          prepaidAmount: 0,
+          paidAmount: 0,
+          // Подтверждение «поверх квоты» относится к НОВОМУ номеру: если его дали
+          // при переезде — запоминаем, иначе продолжение начинает с чистого листа.
+          allotmentOverride: req.body.allowAllotmentOverride === true,
           flags: existing.flags,
           partnerId: existing.partnerId,
           // В модели Booking поле называется adminId (relation createdBy) — createdById Prisma отклонял → 500
@@ -990,48 +1143,29 @@ async function move(req, res, next) {
         select: BOOKING_SELECT,
       })
 
-      // Питание и услуги переезжают вместе с гостем: он продолжает жить и продолжает
-      // завтракать. Копируем, а не переносим — у первой части остались свои ночи,
-      // и её начисления должны пересобираться по тому же набору.
-      const links = await tx.bookingService.findMany({ where: { bookingId: id } })
-      if (links.length > 0) {
-        await tx.bookingService.createMany({
-          data: links.map(l => ({
-            bookingId: created.id,
-            serviceId: l.serviceId,
-            adults: l.adults,
-            children: l.children,
-            quantity: l.quantity,
-          })),
-          skipDuplicates: true,
-        })
+      // Питание и услуги ПЕРЕНОСЯТСЯ на продолжение, а не копируются: набор
+      // услуг у счёта один, и он всегда у текущего отрезка — именно его форму
+      // правит стойка. Копия оставила бы две правды о завтраках, и следующая
+      // пересборка выбирала бы из них наугад.
+      await tx.bookingService.updateMany({
+        where: { bookingId: id },
+        data: { bookingId: created.id },
+      })
+
+      // Счёт цепочки пересобираем целиком на голове: ночи до переезда — по цене
+      // старой категории (заморожены), ночи после — по новой, питание на все ночи.
+      // У брони без строк (107 старых, см. NOTES) прежний итог сначала фиксируется
+      // строкой, иначе переезд переоценил бы её по сегодняшнему календарю.
+      await pinLegacyTotal(headId, { client: tx, adminId: req.admin.id })
+      await rebuildChainCharges(headId, {
+        adminId: req.admin.id, client: tx, keepIfEmpty: true, frozenBefore: moveDateD,
+      })
+
+      return {
+        original: await tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT }),
+        created: await tx.booking.findUnique({ where: { id: created.id }, select: BOOKING_SELECT }),
+        updatedOriginal,
       }
-
-      // Начисления делим по датам, а не пропорцией: посуточные строки проживания
-      // сами знают, к какой ночи относятся. Услуги и скидки остаются на исходной
-      // брони — делить их «на глаз» значит выдумывать деньги.
-      // Если строк нет вообще (старая бронь до перехода на начисления), остаётся
-      // пропорциональный расчёт выше.
-      const charges = await tx.bookingCharge.findMany({ where: { bookingId: id } })
-      if (charges.length > 0) {
-        const moving = charges.filter(c => c.kind === 'stay' && c.date && c.date >= moveDateD)
-        if (moving.length > 0) {
-          await tx.bookingCharge.updateMany({
-            where: { id: { in: moving.map(c => c.id) } },
-            data: { bookingId: created.id },
-          })
-        }
-        // paidAmount не трогаем: это реально принятые деньги, их делит пропорция выше.
-        await recalcBookingTotals(id, { client: tx })
-        await recalcBookingTotals(created.id, { client: tx, keepIfEmpty: true })
-
-        return {
-          original: await tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT }),
-          created: await tx.booking.findUnique({ where: { id: created.id }, select: BOOKING_SELECT }),
-        }
-      }
-
-      return { original: updatedOriginal, created }
     })
 
     // Отказ возвращаем из транзакции, а не бросаем: бросок откатил бы и то, чего
@@ -1042,7 +1176,10 @@ async function move(req, res, next) {
     // Клиент ждёт форму { booking } (как у остальных операций) — без обёртки падал с TypeError
     emitBookingEvent('booking:updated', { booking: result.original })
     emitBookingEvent('booking:created', { booking: result.created })
-    res.json({ data: result })
+    // Деньги переехали на голову цепочки: если это второй переезд, голова —
+    // третья запись, и без события её полоса «Начислено/Долг» осталась бы старой.
+    await emitChainUpdated(headId, [id, result.created.id])
+    res.json({ data: { original: result.original, created: result.created } })
   } catch (err) {
     next(err)
   }
@@ -1137,7 +1274,8 @@ async function preview(req, res, next) {
 
     const room = await prisma.room.findUnique({
       where: { id: parseInt(roomId) },
-      select: { id: true, categoryId: true },
+      // number/category — для подписи «Проживание · №12 Стандарт · 2 взр.» у цепочки
+      select: { id: true, number: true, categoryId: true, category: { select: { name: true } } },
     })
     if (!room) return next(createError('Номер не найден', 404))
 
@@ -1170,16 +1308,59 @@ async function preview(req, res, next) {
     const serviceById = new Map(serviceRows.map(s => [s.id, s]))
     const bookingServices = links.map(l => ({ ...l, service: serviceById.get(l.serviceId) || null }))
 
-    // Ручные строки: уже сохранённые (по bookingId) + ещё не сохранённые из тела.
+    // ── Цепочка «один счёт» ──
+    // Предпросмотр показывает ВЕСЬ счёт гостя с подставленными несохранёнными
+    // входами того отрезка, который сейчас в форме: иначе стойка видела бы в
+    // продолжении «две ночи Комфорта», а в панели начислений — четыре ночи и
+    // другой итог. Строки и деньги живут на голове, поэтому и ручные строки
+    // берутся у неё, а не у отрезка.
+    const chain = bookingId ? await loadChainSegments(parseInt(bookingId), prisma) : null
+    const chainId = chain && chain.segments.length > 0 ? chain.headId : (bookingId ? parseInt(bookingId) : null)
+    const isChain = !!chain && chain.segments.length > 1
+
+    let segments = null
+    if (isChain) {
+      segments = chain.segments.map((s) => (s.booking.id === parseInt(bookingId)
+        ? {
+          booking: { ...s.booking, ...draft, id: s.booking.id },
+          categoryId: room.categoryId,
+          roomNumber: room.number,
+          categoryName: room.category?.name ?? null,
+        }
+        : s))
+      await loadSegmentRates(segments, prisma)
+    }
+
+    // Ручные строки: уже сохранённые (по счёту) + ещё не сохранённые из тела.
     // Именно они делают предпросмотр честным: база процентной скидки на сервере
     // включает ручные строки, и без них итог формы был бы больше сохранённого.
-    const saved = bookingId
+    const saved = chainId
       ? await prisma.bookingCharge.findMany({
-        where: { bookingId: parseInt(bookingId), source: 'manual' },
+        where: { bookingId: chainId, source: 'manual' },
         orderBy: { id: 'asc' },
       })
       : []
-    const manualList = [...saved, ...normalizePreviewManual(manualCharges)]
+
+    // Прожитые ночи предыдущих отрезков не переоцениваем — берём их сохранённые
+    // строки как есть (тот же приём «замороженных» ночей, что при пересборке).
+    const frozenStay = isChain
+      ? await prisma.bookingCharge.findMany({
+        where: {
+          bookingId: chainId, source: 'auto', kind: 'stay',
+          date: { lt: segments[segments.length - 1].booking.checkIn },
+        },
+        orderBy: { id: 'asc' },
+      })
+      : []
+
+    const manualList = [...saved, ...frozenStay, ...normalizePreviewManual(manualCharges)]
+
+    // То же правило, что в пересборке (`segmentsToPrice`): если счёт цепочки
+    // зафиксировал прежний итог строкой «Проживание · по прежнему расчёту»
+    // (`pinLegacyTotal`, 107 старых броней — см. NOTES), она покрывает весь срок до
+    // первого переезда, и ночи головы считать заново нельзя. Без этого предпросмотр
+    // показывал их ПОВЕРХ зафиксированной суммы: 197 200 в форме против 157 200 в базе.
+    const priced = isChain ? segmentsToPrice(segments, saved) : segments
 
     const rateCtx = await loadRateContext(
       { categoryId: room.categoryId, checkIn: draft.checkIn, checkOut: draft.checkOut },
@@ -1187,7 +1368,7 @@ async function preview(req, res, next) {
     )
 
     const detailed = buildAutoChargesDetailed({
-      booking: draft, ...rateCtx, bookingServices, manualCharges: manualList,
+      booking: draft, ...rateCtx, bookingServices, manualCharges: manualList, segments: priced,
     })
 
     const asRow = (r, source) => ({
@@ -1202,7 +1383,8 @@ async function preview(req, res, next) {
     // Порядок как в сохранённом счёте (`loadCharges`): по дате, строки без даты — в конце.
     // Ручные идут перед автоматическими: после пересборки у автоматических новые id.
     const rows = [
-      ...manualList.map(r => asRow(r, 'manual')),
+      // Замороженные ночи цепочки пришли из базы автоматическими — так их и показываем
+      ...manualList.map(r => asRow(r, r.source === 'auto' ? 'auto' : 'manual')),
       ...detailed.rows.map(r => asRow(r, 'auto')),
     ]
       .map((row, i) => ({ row, i }))
@@ -1312,13 +1494,20 @@ function loadCharges(bookingId, client = prisma) {
   })
 }
 
-/** Общий ответ всех операций со строками: строки, их сумма и свежая бронь. */
-async function respondWithCharges(bookingId, res, { emit = true } = {}) {
+/**
+ * Общий ответ всех операций со строками: строки, их сумма и свежая бронь.
+ * `accountId` — голова счёта: строки и итог всегда её, даже если операцию начали
+ * из формы продолжения. Событие уходит по ВСЕМ отрезкам цепочки.
+ */
+async function respondWithCharges(accountId, res, { emit = true } = {}) {
   const [charges, booking] = await Promise.all([
-    loadCharges(bookingId),
-    prisma.booking.findUnique({ where: { id: bookingId }, select: BOOKING_SELECT }),
+    loadCharges(accountId),
+    prisma.booking.findUnique({ where: { id: accountId }, select: BOOKING_SELECT }),
   ])
-  if (emit && booking) emitBookingEvent('booking:updated', { booking })
+  if (emit && booking) {
+    emitBookingEvent('booking:updated', { booking })
+    await emitChainUpdated(accountId, [accountId])
+  }
   res.json({
     data: charges,
     total: charges.reduce((s, c) => s + (c.amount || 0), 0),
@@ -1336,8 +1525,14 @@ async function respondWithCharges(bookingId, res, { emit = true } = {}) {
  * Только администратор: это правка денег по закрытой сделке.
  */
 async function loadBookingForCharges(id, next, { allowClosed = false, role = null } = {}) {
-  const booking = await prisma.booking.findUnique({ where: { id }, select: { id: true, status: true } })
+  const booking = await prisma.booking.findUnique({
+    where: { id }, select: { id: true, status: true, accountBookingId: true },
+  })
   if (!booking) { next(createError('Бронь не найдена', 404)); return null }
+  // Продолжение своих строк не имеет — правим счёт головы. Но и статус смотрим
+  // ЕГО: живущий гость в продолжении не должен упираться в «бронь закрыта»
+  // только потому, что голова после переезда стала CHECKED_OUT.
+  booking.accountId = booking.accountBookingId ?? booking.id
   if (booking.status === 'CANCELLED' && !allowClosed) {
     next(createError('Нельзя менять начисления отменённой брони', 400))
     return null
@@ -1362,9 +1557,10 @@ function normalizeCharge(kind, quantity, unitPrice) {
 async function listCharges(req, res, next) {
   try {
     const id = parseInt(req.params.id)
-    const exists = await prisma.booking.findUnique({ where: { id }, select: { id: true } })
-    if (!exists) return next(createError('Бронь не найдена', 404))
-    await respondWithCharges(id, res, { emit: false })
+    // Строки цепочки лежат на голове: форма продолжения показывает тот же счёт
+    const accountId = await resolveAccountId(id)
+    if (accountId === null) return next(createError('Бронь не найдена', 404))
+    await respondWithCharges(accountId, res, { emit: false })
   } catch (err) {
     next(err)
   }
@@ -1391,10 +1587,10 @@ async function addCharge(req, res, next) {
     await prisma.$transaction(async (tx) => {
       // У брони без строк итог живёт кэшем `totalAmount`: не зафиксировав его строкой,
       // пересчёт ниже приравнял бы весь счёт к этой одной ручной строке.
-      await pinLegacyTotal(id, { client: tx, adminId: req.admin.id })
+      await pinLegacyTotal(booking.accountId, { client: tx, adminId: req.admin.id })
       await tx.bookingCharge.create({
         data: {
-          bookingId: id,
+          bookingId: booking.accountId,
           kind,
           label: String(label).trim(),
           ...money,
@@ -1404,10 +1600,10 @@ async function addCharge(req, res, next) {
           createdById: req.admin.id,
         },
       })
-      await recalcBookingTotals(id, { client: tx })
+      await recalcBookingTotals(booking.accountId, { client: tx })
     })
 
-    await respondWithCharges(id, res)
+    await respondWithCharges(booking.accountId, res)
   } catch (err) {
     next(err)
   }
@@ -1424,7 +1620,8 @@ async function updateCharge(req, res, next) {
     if (!booking) return
 
     const existing = await prisma.bookingCharge.findUnique({ where: { id: chargeId } })
-    if (!existing || existing.bookingId !== id) return next(createError('Строка начисления не найдена', 404))
+    // Строка принадлежит СЧЁТУ, а не отрезку: из формы продолжения правят те же строки
+    if (!existing || existing.bookingId !== booking.accountId) return next(createError('Строка начисления не найдена', 404))
 
     const { label, quantity, unitPrice, date, reason, kind } = req.body
     if (kind !== undefined && !CHARGE_KINDS.includes(kind)) {
@@ -1455,10 +1652,10 @@ async function updateCharge(req, res, next) {
           createdById: req.admin.id,
         },
       })
-      await recalcBookingTotals(id, { client: tx })
+      await recalcBookingTotals(booking.accountId, { client: tx })
     })
 
-    await respondWithCharges(id, res)
+    await respondWithCharges(booking.accountId, res)
   } catch (err) {
     next(err)
   }
@@ -1473,14 +1670,15 @@ async function removeCharge(req, res, next) {
     if (!booking) return
 
     const existing = await prisma.bookingCharge.findUnique({ where: { id: chargeId } })
-    if (!existing || existing.bookingId !== id) return next(createError('Строка начисления не найдена', 404))
+    // Строка принадлежит СЧЁТУ, а не отрезку: из формы продолжения правят те же строки
+    if (!existing || existing.bookingId !== booking.accountId) return next(createError('Строка начисления не найдена', 404))
 
     await prisma.$transaction(async (tx) => {
       await tx.bookingCharge.delete({ where: { id: chargeId } })
-      await recalcBookingTotals(id, { client: tx })
+      await recalcBookingTotals(booking.accountId, { client: tx })
     })
 
-    await respondWithCharges(id, res)
+    await respondWithCharges(booking.accountId, res)
   } catch (err) {
     next(err)
   }
@@ -1495,11 +1693,14 @@ async function rebuildCharges(req, res, next) {
     const booking = await loadBookingForCharges(id, next)
     if (!booking) return
 
+    // «Пересчитать» на любом отрезке пересобирает ВЕСЬ счёт: посчитать половину
+    // цепочки по тарифу, а половину оставить прежней — это разные деньги на экране
+    // и в базе. Заморозки нет: администратор нажал кнопку осознанно.
     await prisma.$transaction(async (tx) => {
-      await rebuildAutoCharges(id, { adminId: req.admin.id, client: tx })
+      await rebuildChainCharges(booking.accountId, { adminId: req.admin.id, client: tx })
     })
 
-    await respondWithCharges(id, res)
+    await respondWithCharges(booking.accountId, res)
   } catch (err) {
     next(err)
   }

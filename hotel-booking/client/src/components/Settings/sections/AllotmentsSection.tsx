@@ -130,8 +130,19 @@ export const AllotmentsSection: React.FC = () => {
         </div>
         <div style={{ fontSize: '1rem', color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.5 }}>
           За каждым партнёром закрепляется конкретный номер на определённый период.
-          В этот период номер недоступен для прямой продажи — только под заявки бюро.
           Один номер не может одновременно принадлежать двум партнёрам.
+        </div>
+        {/* Что именно делает квота — словами, а не догадками стойки. Раньше она
+            выглядела запретом и спрашивала подтверждение при КАЖДОМ сохранении
+            брони (аудит D3-003, D5-001, D7-005). */}
+        <div style={{
+          marginTop: 10, padding: '10px 12px', borderRadius: 8,
+          background: 'var(--surface)', border: '1px solid var(--border-subtle)',
+          fontSize: '0.92rem', color: 'var(--text-muted)', lineHeight: 1.5,
+        }}>
+          Квота — <strong style={{ color: 'var(--text)' }}>предупреждение при продаже номера</strong>:
+          продать его можно, подтвердив один раз. Дальнейшие правки брони вопрос
+          не задают. Оптимизатор размещения квотные номера не трогает.
         </div>
       </header>
 
@@ -293,11 +304,11 @@ export const AllotmentsSection: React.FC = () => {
                         <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginTop: 2 }}>
                           {a.dateFrom.slice(0, 10)} → {a.dateTo.slice(0, 10)}
                           {a.notes && <span style={{ marginLeft: 8 }}>· {a.notes}</span>}
-                          {a.releases.length > 0 && (
-                            <span style={{ marginLeft: 8, color: '#d97706' }}>
-                              · {a.releases.length} {a.releases.length === 1 ? 'релиз' : 'релизов'}
-                            </span>
-                          )}
+                          {/* Счётчик релизов убран: интерфейса у них не было, из
+                              поставки они исключены (bookings.md, 2026-09-08).
+                              Сама модель осталась, и существующие записи проверка
+                              квоты по-прежнему учитывает — просто показывать
+                              число, которым нельзя управлять, незачем. */}
                         </div>
                       </div>
                       <button onClick={() => startEdit(a)} style={ghostBtnStyle}>Изм.</button>

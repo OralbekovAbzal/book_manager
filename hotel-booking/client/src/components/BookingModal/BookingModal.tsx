@@ -3,7 +3,6 @@ import { format } from 'date-fns'
 import { useForm, Controller } from 'react-hook-form'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore, BookingFlagItem } from '../../store/useSettingsStore'
-import { useAuthStore } from '../../store/useAuthStore'
 import { fetchRooms } from '../../api/rooms'
 import { compareRooms } from '../../utils/sortRooms'
 import {
@@ -27,6 +26,10 @@ import type {
 } from '../../types'
 import type { BookingMoney } from '../../api/payments'
 import { fetchRoomAvailability } from '../../api/occupancy'
+import type { RoomAvailability, RoomBlockReason } from '../../api/occupancy'
+import {
+  accountIdOf, chainRoomsLabel, hasContinuations, isContinuation, lastSegment,
+} from '../../utils/bookingAccount'
 import { fetchServices, fetchMealPlans } from '../../api/services'
 import { nightsBetween } from '../../utils/calculator'
 import { formatApiError } from '../Setup/accountRules'
@@ -358,20 +361,20 @@ const fmtDateTime = (value?: string | null) => {
 
 /**
  * Время проставляется само кнопками «Заезд»/«Выезд». Правка руками нужна на тот
- * случай, когда кнопку нажали не вовремя, и разрешена только ADMIN/SUPER_ADMIN —
- * ровно как на сервере (STAFF получил бы 403). Поэтому у стойки это текст.
+ * случай, когда кнопку нажали не вовремя. Права на неё есть у любого вошедшего:
+ * ролей осталось две, и обе — администраторы (interface.md, 2026-09-08).
+ * Текстом поле показывается только пока грузится полная бронь.
  */
 const ActualTimeField: React.FC<{
   label: string
   /** 'YYYY-MM-DDTHH:mm' или '' */
   value: string
-  canEdit: boolean
   /** Пока не загрузилась полная бронь — сравнивать изменения не с чем */
   readOnly?: boolean
   onChange: (v: string) => void
-}> = ({ label, value, canEdit, readOnly, onChange }) => (
+}> = ({ label, value, readOnly, onChange }) => (
   <Field label={label}>
-    {canEdit && !readOnly ? (
+    {!readOnly ? (
       <input
         type="datetime-local"
         value={value}
@@ -777,11 +780,26 @@ const PreviewCard: React.FC<PreviewCardProps> = ({
     )
   }
 
-  // Проживание — одной строкой: ночей может быть тридцать, и список ночей здесь
-  // не нужен. Подробности по ночам разворачиваются в панели начислений.
-  const stayRows = preview.rows.filter(r => r.kind === 'stay')
+  // Проживание — по ОТРЕЗКАМ, а не по ночам: ночей может быть тридцать, и
+  // список ночей здесь не нужен (он разворачивается в панели начислений).
+  // Отрезок = одинаковая подпись строки: сервер пишет в неё номер, категорию и
+  // состав («Проживание · №12 Стандарт · 2 взр.»). У обычной брони группа одна,
+  // и строка выглядит как раньше; у цепочки после переезда их две и больше —
+  // «Стандарт 2 ночи» и «Комфорт 2 ночи» видно по отдельности при одном итоге.
   const otherRows = preview.rows.filter(r => r.kind !== 'stay')
-  const stayTotal = stayRows.reduce((s, r) => s + r.amount, 0)
+  const staySegments: { label: string; nights: number; amount: number }[] = []
+  const stayIndex = new Map<string, number>()
+  for (const r of preview.rows) {
+    if (r.kind !== 'stay') continue
+    const at = stayIndex.get(r.label)
+    if (at === undefined) {
+      stayIndex.set(r.label, staySegments.length)
+      staySegments.push({ label: r.label, nights: 1, amount: r.amount })
+    } else {
+      staySegments[at].nights += 1
+      staySegments[at].amount += r.amount
+    }
+  }
   const remaining = preview.total - paid
 
   if (preview.rows.length === 0) {
@@ -824,14 +842,18 @@ const PreviewCard: React.FC<PreviewCardProps> = ({
     <div>
       <MissingPricesNote items={preview.missingPrices} />
 
-      {stayRows.length > 0 && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: 'var(--text)', marginBottom: 4 }}>
-          {/* Ночей ровно столько, сколько строк проживания: ночь без цены
-              строки не порождает, и писать за неё «н.» значило бы соврать. */}
-          <span>Проживание ({stayRows.length} н.)</span>
-          <span style={{ whiteSpace: 'nowrap' }}>{fmt(stayTotal)}</span>
+      {/* Ночей ровно столько, сколько строк проживания: ночь без цены строки
+          не порождает, и писать за неё «н.» значило бы соврать. */}
+      {staySegments.map((g, i) => (
+        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: 'var(--text)', marginBottom: 4 }}>
+          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={g.label}>
+            {/* Одна группа — привычное «Проживание (4 н.)»; несколько — подпись
+                сервера с номером и категорией, иначе отрезки не различить. */}
+            {staySegments.length === 1 ? 'Проживание' : g.label} ({g.nights} н.)
+          </span>
+          <span style={{ whiteSpace: 'nowrap' }}>{fmt(g.amount)}</span>
         </div>
-      )}
+      ))}
       {otherRows.map(rowLine)}
 
       <div style={{ borderTop: '1px solid var(--border-subtle)', marginTop: 8, paddingTop: 8 }}>
@@ -860,11 +882,13 @@ const PreviewCard: React.FC<PreviewCardProps> = ({
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export const BookingModal: React.FC = () => {
-  const { modal, closeModal, fetchGrid, fetchToday, shiftDate } = useGridStore()
+  const {
+    modal, closeModal, fetchGrid, fetchToday, shiftDate,
+    openViewModal, openEditModal, findBooking, currentSegment,
+  } = useGridStore()
   const { roomFund, hiddenFlagCodes } = useSettingsStore()
-  const admin = useAuthStore(s => s.admin)
-  // Фактическое время правят только администраторы — то же правило, что на сервере
-  const canEditActualTimes = admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN'
+  // Проверки роли в форме больше нет: фактическое время правит любой вошедший —
+  // ролей осталось две, и обе администраторские (interface.md, 2026-09-08).
   const [rooms, setRooms] = useState<Room[]>([])
   const [conflict, setConflict] = useState<GridBooking | null>(null)
   const [checking, setChecking] = useState(false)
@@ -874,8 +898,15 @@ export const BookingModal: React.FC = () => {
   // Расчёт с гостем (отмена или ранний выезд по брони, где уже есть деньги).
   // Состояние эфемерное — как у остальных диалогов формы, в стор ему не место.
   const [settlement, setSettlement] = useState<SettlementAction | null>(null)
-  const [roomOccupied, setRoomOccupied] = useState(false)
-  // Квота партнёра: сервер вернул 409 ALLOTMENT_CONFLICT, ждём осознанного подтверждения
+  // Почему выбранный номер недоступен — с ПРИЧИНОЙ, а не флагом «занят».
+  // Два источника, оба про один и тот же номер и одни и те же даты:
+  //   - подбор номеров (`/occupancy/availability`) — знает все номера сразу;
+  //   - точечная проверка (`/bookings/check-availability`) — знает соседа по имени.
+  // Берём первый непустой: гаснут они тоже вместе, на следующей правке дат.
+  const [pickerBlock, setPickerBlock] = useState<RoomBlockReason | null>(null)
+  const [checkBlock, setCheckBlock] = useState<RoomBlockReason | null>(null)
+  // Квота партнёра: сервер вернул 409 ALLOTMENT_CONFLICT (или администратор сам
+  // нажал «Продать всё равно») — ждём осознанного подтверждения.
   const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
   const pendingValues = useRef<FormValues | null>(null)
   // Деньги брони по журналу платежей: «принято» и «долг». Приходят из
@@ -935,6 +966,10 @@ export const BookingModal: React.FC = () => {
   // Edit: полная бронь с сервера (объект из сетки может быть частичным) и её загрузка
   const [serverBooking, setServerBooking] = useState<Booking | null>(null)
   const [loadingBooking, setLoadingBooking] = useState(false)
+  // Голова счёта — только когда открыто ПРОДОЛЖЕНИЕ. Свой список отрезков есть
+  // лишь у головы, а плашке нужно «номера 12 → 15», а не «12 → эта».
+  // Ради неё же и грузим: суммы приходят из полосы денег, тут только подпись.
+  const [accountBooking, setAccountBooking] = useState<Booking | null>(null)
 
   // Закрытая бронь — общий признак для предпросмотра и для блокировки правок.
   // Объявлен здесь, а не ниже, потому что от него зависит эффект предпросмотра.
@@ -1027,6 +1062,7 @@ export const BookingModal: React.FC = () => {
       // Гостей и деньги ВСЕГДА берём с сервера: объект из сетки может быть частичным,
       // и раньше `?? 0` обнулял их при сохранении. Пока грузится — «Сохранить» заблокирована.
       setServerBooking(null)
+      setAccountBooking(null)
       setServiceLinks([])
       // Документ, как и услуги, приходит только из GET /bookings/:id: объект
       // сетки его не несёт. До ответа сервера поля пустые, а «Сохранить»
@@ -1038,6 +1074,14 @@ export const BookingModal: React.FC = () => {
           if (cancelled) return
           setServerBooking(full)
           applyCalcFields(full)
+          // Открыто продолжение — подтягиваем голову ради подписи «номера 12 → 15».
+          // Ошибку глотаем: плашка без списка номеров хуже, чем красная ошибка
+          // на брони, с которой всё в порядке.
+          if (full.accountBookingId != null) {
+            fetchBooking(full.accountBookingId)
+              .then(head => { if (!cancelled) setAccountBooking(head) })
+              .catch(() => {})
+          }
           // Питание и услуги приходят только из GET /bookings/:id — в объекте сетки их нет
           setServiceLinks(linksFromBooking(full.services))
           setDoc(docFromBooking(full))
@@ -1065,6 +1109,7 @@ export const BookingModal: React.FC = () => {
       setSelectedFlags([])
       setCustomFlag('')
       setServerBooking(null)
+      setAccountBooking(null)
       setLoadingBooking(false)
       // Новая бронь получает услуги «включено в тариф». Справочник мог ещё не
       // загрузиться — тогда набор подставит эффект ниже, поэтому снимаем отметку.
@@ -1074,7 +1119,8 @@ export const BookingModal: React.FC = () => {
     }
     setConflict(null)
     setApiError('')
-    setRoomOccupied(false)
+    setPickerBlock(null)
+    setCheckBlock(null)
     // Диалог «Ранний выезд» не должен переживать закрытие формы и всплывать на другой брони
     setEarlyCheckoutConfirm(false)
     setAllotmentWarning(null)
@@ -1214,10 +1260,81 @@ export const BookingModal: React.FC = () => {
   // подстраховываемся серверной версией брони — деньги нельзя принять «непонятно куда».
   const roomNumberLabel = selectedRoom?.number ?? serverBooking?.room?.number ?? ''
 
+  // ─── Счёт брони (цепочка после переезда) ───────────────────────────────────
+  // У продолжения свои суммы нулевые: начисления и платежи лежат на голове.
+  // Панель начислений, полоса денег и «Оплачено» ведём по счёту — иначе форма
+  // второй части переезда показывала бы «начислено 0, не оплачено» живому гостю.
+  const accountSource = serverBooking ?? booking ?? null
+  const accountId = accountSource ? accountIdOf(accountSource) : 0
+  const continuation = !!accountSource && isContinuation(accountSource)
+  // Номер головы: у продолжения он в `account`, у самой головы — свой.
+  const accountRoomLabel = serverBooking?.account?.room?.number ?? ''
+
   // «Оплачено» — только из журнала платежей. Пока полоса денег не ответила,
   // показываем кэш брони: это то же число, снятое чуть раньше. Ввода нет —
-  // менять его может лишь операция по кассе.
-  const paidAmount = moneySummary?.paid ?? (serverBooking ?? booking)?.paidAmount ?? 0
+  // менять его может лишь операция по кассе. У ПРОДОЛЖЕНИЯ кэш всегда нулевой
+  // (деньги на голове) — показывать его нельзя, ждём ответа полосы денег.
+  const paidAmount = moneySummary?.paid ?? (continuation ? 0 : (serverBooking ?? booking)?.paidAmount ?? 0)
+
+  // ─── Почему номер недоступен ───────────────────────────────────────────────
+  // Квота партнёра — предупреждение: продать можно, подтвердив один раз.
+  // Пересечение и буфер метки — запрет: кнопка сохранения гаснет.
+  const roomBlock = pickerBlock ?? checkBlock
+  // Номер и даты не менялись, а бронь уже продана поверх квоты — вопрос задан
+  // однажды и повторяться не должен (сервер 409 по ней тоже не пришлёт).
+  const soldOverAllotment = !!serverBooking?.allotmentOverride
+    && Number(watchedRoomId) === serverBooking.roomId
+    && watchedCheckIn === serverBooking.checkIn.slice(0, 10)
+    && watchedCheckOut === serverBooking.checkOut.slice(0, 10)
+  const allotmentBlock = roomBlock?.reason === 'allotment' && !soldOverAllotment ? roomBlock : null
+  const hardBlock = roomBlock && roomBlock.reason !== 'allotment' ? roomBlock : null
+
+  // ─── Переходы по цепочке ───────────────────────────────────────────────────
+  /** Открыть голову счёта в просмотре: там видно, из чего сложился общий счёт. */
+  const openAccountBooking = () => {
+    const local = accountBooking ?? findBooking(accountId)
+    if (local) { openViewModal(local); return }
+    fetchBooking(accountId)
+      .then(openViewModal)
+      .catch(() => setApiError('Не удалось открыть бронь счёта'))
+  }
+
+  /**
+   * Открыть текущий отрезок цепочки. Голова после переезда закрыта, и править
+   * в ней нечего — сервер ответит 400 «Нельзя редактировать закрытую бронь».
+   */
+  const openCurrentSegment = () => {
+    const local = booking ? currentSegment(booking) : null
+    if (local && booking && local.id !== booking.id) { openEditModal(local); return }
+    const last = serverBooking ? lastSegment(serverBooking) : null
+    if (!last) return
+    fetchBooking(last.id)
+      .then(openEditModal)
+      .catch(() => setApiError('Не удалось открыть текущую часть брони'))
+  }
+
+  /** Плашка «этот отрезок — часть общего счёта» и переход к другой его части. */
+  const chainNotice: { text: string; action: string; onOpen: () => void } | null = (() => {
+    if (!isEdit || !serverBooking) return null
+    if (continuation) {
+      const rooms = accountBooking
+        ? chainRoomsLabel(accountBooking)
+        : [accountRoomLabel, serverBooking.room?.number].filter(Boolean).join(' → ')
+      return {
+        text: `Счёт брони №${accountId}${rooms ? ` · номера ${rooms}` : ''} — начисления и платежи общие`,
+        action: 'Открыть бронь счёта',
+        onOpen: openAccountBooking,
+      }
+    }
+    if (hasContinuations(serverBooking)) {
+      return {
+        text: `Гость переехал: счёт включает номера ${chainRoomsLabel(serverBooking)}. Эта часть закрыта.`,
+        action: 'Открыть текущую часть',
+        onOpen: openCurrentSegment,
+      }
+    }
+    return null
+  })()
 
   // ─── Предпросмотр начислений: считает СЕРВЕР ───────────────────────────────
   // Ключ входов. Меняется он — уходит новый запрос; не меняется (правка заметки,
@@ -1334,6 +1451,14 @@ export const BookingModal: React.FC = () => {
           excludeBookingId: isEdit ? booking?.id : undefined,
         })
         setConflict(result.conflict)
+        // Причина отказа приходит и сюда — с текстом сервера («номер выделен
+        // партнёру X до …», «между бронями нужен день»). Раньше клиент её
+        // выбрасывал, и квота выглядела как «номер занят» (D5-001, D7-005).
+        setCheckBlock(
+          result.available || !result.reason || result.reason === 'range'
+            ? null
+            : { reason: result.reason, text: result.message ?? 'Номер недоступен на выбранные даты' },
+        )
       } finally {
         setChecking(false)
       }
@@ -1360,7 +1485,9 @@ export const BookingModal: React.FC = () => {
   const effectiveToday = shiftDate ?? todayStr
 
   const submitValues = async (values: FormValues, allowAllotmentOverride = false) => {
-    if (conflict) return
+    // Enter в поле формы обходит погашенную кнопку — жёсткие причины проверяем и здесь.
+    // Квоты в этом списке нет намеренно: её обходят подтверждением, а не запретом.
+    if (conflict || hardBlock) return
     // Enter в поле формы обходит disabled-кнопку — не отправляем нули, пока бронь не загружена
     if (isEdit && loadingBooking) return
 
@@ -1422,10 +1549,10 @@ export const BookingModal: React.FC = () => {
         // «Заезд»/«Выезд», и слать своё на каждое сохранение брони — значит
         // затирать то, что минуту назад отметило соседнее рабочее место.
         // Сравниваем с серверной версией; пока она не загружена, сравнивать не с чем.
-        ...(canEditActualTimes && serverBooking && actualCheckInAt !== isoToLocalInput(serverBooking.actualCheckInAt)
+        ...(serverBooking && actualCheckInAt !== isoToLocalInput(serverBooking.actualCheckInAt)
           ? { actualCheckInAt: localInputToIso(actualCheckInAt) }
           : {}),
-        ...(canEditActualTimes && serverBooking && actualCheckOutAt !== isoToLocalInput(serverBooking.actualCheckOutAt)
+        ...(serverBooking && actualCheckOutAt !== isoToLocalInput(serverBooking.actualCheckOutAt)
           ? { actualCheckOutAt: localInputToIso(actualCheckOutAt) }
           : {}),
         flags: [...selectedFlags, ...(customFlag.trim() ? [customFlag.trim()] : [])],
@@ -1467,6 +1594,17 @@ export const BookingModal: React.FC = () => {
     setAllotmentWarning(null)
     if (values) submitValues(values, true)
   }
+
+  /**
+   * «Продать всё равно» из плашки о квоте: сначала проверяем форму (иначе
+   * подтвердим продажу брони без имени и дат), потом задаём ТОТ ЖЕ вопрос, что
+   * приходит от сервера 409-м. Вопрос один и тот же, значит и окно одно —
+   * `AllotmentConfirm`, а не второй диалог со своими словами.
+   */
+  const askAllotmentOverride = handleSubmit((values) => {
+    pendingValues.current = values
+    setAllotmentWarning(allotmentBlock?.text ?? 'Номер выделен партнёру по квоте')
+  })
 
   /**
    * Отмена брони. Сервер ставит `CANCELLED` и снимает автоматические начисления;
@@ -1699,6 +1837,28 @@ export const BookingModal: React.FC = () => {
             </button>
           </div>
 
+          {/* ── Счёт цепочки ── у второй части переезда деньги лежат на первой:
+              без этой плашки стойка видит форму с чужими (по её мнению) суммами
+              и не понимает, почему «Начислено» больше, чем этот отрезок. */}
+          {chainNotice && (
+            <div style={{
+              padding: '10px 28px',
+              borderBottom: '1px solid var(--border-subtle)',
+              background: 'var(--surface)',
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              // Как и шапка, полоса не сжимается: она объясняет суммы формы,
+              // и на невысоком экране схлопнуться в ничто не должна.
+              flexShrink: 0,
+              fontSize: '0.88rem', color: 'var(--text-muted)',
+            }}>
+              <span aria-hidden style={{ fontSize: '1rem' }}>⛓</span>
+              <span style={{ minWidth: 0 }}>{chainNotice.text}</span>
+              <button type="button" onClick={chainNotice.onOpen} style={{ ...linkBtnStyle, marginLeft: 'auto' }}>
+                {chainNotice.action}
+              </button>
+            </div>
+          )}
+
           {/* Form (scrollable) */}
           <form
             id="booking-form"
@@ -1775,7 +1935,7 @@ export const BookingModal: React.FC = () => {
                     checkOut={watchedCheckOut}
                     excludeBookingId={isEdit ? booking?.id : undefined}
                     disabled={isClosed}
-                    onOccupied={setRoomOccupied}
+                    onBlock={setPickerBlock}
                   />
                 )}
               />
@@ -1819,7 +1979,6 @@ export const BookingModal: React.FC = () => {
                   <ActualTimeField
                     label="Факт. заезд"
                     value={actualCheckInAt}
-                    canEdit={canEditActualTimes}
                     readOnly={loadingBooking}
                     onChange={setActualCheckInAt}
                   />
@@ -1828,7 +1987,6 @@ export const BookingModal: React.FC = () => {
                   <ActualTimeField
                     label="Факт. выезд"
                     value={actualCheckOutAt}
-                    canEdit={canEditActualTimes}
                     readOnly={loadingBooking}
                     onChange={setActualCheckOutAt}
                   />
@@ -1850,17 +2008,58 @@ export const BookingModal: React.FC = () => {
                   <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>Сохранение заблокировано — выберите другой номер или измените даты.</span>
                 </div>
               )}
-              {!conflict && !checking && roomOccupied && watchedCheckIn && watchedCheckOut && (
+              {/* Жёсткий отказ: пересечение или буфер метки. Текст — от сервера:
+                  он называет соседа и правило, а «номер занят» не объясняло ничего. */}
+              {!conflict && !checking && hardBlock && watchedCheckIn && watchedCheckOut && (
                 <div style={{
                   ...infoBoxStyle('#fef2f2', '#dc2626'),
                   fontWeight: 600,
                   border: '1px solid #fca5a5',
                 }}>
-                  🚫 Выбранный номер занят на эти даты.<br />
-                  <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>Сохранение заблокировано — выберите другой номер или измените даты.</span>
+                  🚫 {hardBlock.text}<br />
+                  <span style={{ fontWeight: 400, fontSize: '0.88rem' }}>
+                    {hardBlock.reason === 'buffer'
+                      // Буфер — жёсткое правило метки, обойти его из формы нечем:
+                      // его снимают, убрав метку или сдвинув даты.
+                      ? 'Сохранение заблокировано — сдвиньте даты или снимите метку, которая требует перерыв.'
+                      : 'Сохранение заблокировано — выберите другой номер или измените даты.'}
+                  </span>
                 </div>
               )}
-              {!conflict && !checking && !roomOccupied && watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn && (
+              {/* Квота партнёра — НЕ запрет. Отель вправе продать выделенный номер,
+                  но осознанно: показываем причину и даём кнопку (D5-001, D7-005).
+                  Кнопка «Сохранить» по этой причине НЕ гаснет. */}
+              {!conflict && !checking && allotmentBlock && watchedCheckIn && watchedCheckOut && (
+                <div style={{
+                  ...infoBoxStyle('#fffbeb', '#b45309'),
+                  border: '1px solid #fcd34d',
+                }}>
+                  <div style={{ fontWeight: 600 }}>🤝 {allotmentBlock.text}</div>
+                  <div style={{ fontSize: '0.88rem', marginTop: 2 }}>
+                    Это предупреждение, а не запрет: номер можно продать, подтвердив один раз.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={askAllotmentOverride}
+                    disabled={submitting || loadingBooking}
+                    style={{
+                      marginTop: 8, padding: '6px 14px', borderRadius: 8, cursor: 'pointer',
+                      background: '#d97706', color: '#fff', border: 'none',
+                      fontFamily: 'inherit', fontSize: '0.88rem', fontWeight: 600,
+                    }}
+                  >
+                    Продать всё равно
+                  </button>
+                </div>
+              )}
+              {soldOverAllotment && !conflict && !checking && (
+                <div style={infoBoxStyle('#f5f3ff', '#6d28d9')}>
+                  🤝 Продано поверх квоты партнёра — подтверждение уже дано, вопрос не повторяется.
+                </div>
+              )}
+              {/* «Свободен» и «продано поверх квоты» вместе не показываем: про
+                  этот номер уже всё сказано плашкой выше. */}
+              {!conflict && !checking && !roomBlock && !soldOverAllotment && watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn && (
                 <div style={infoBoxStyle('#f0fdf4', '#15803d')}>
                   ✓ Номер свободен на выбранные даты
                 </div>
@@ -1937,7 +2136,11 @@ export const BookingModal: React.FC = () => {
                   ✓ Выезд
                 </button>
               )}
-              {isEdit && !isClosed && !isCheckedIn && (
+              {/* Продолжение переезда отменить нельзя (сервер отвечает 400
+                  «оформите выезд»): «гость не жил» — ложь для второй части, а
+                  снятие её начислений оставило бы голову начислять непрожитые
+                  ночи. Живому гостю оформляют ВЫЕЗД — кнопка выше. */}
+              {isEdit && !isClosed && !isCheckedIn && !continuation && (
                 <button type="button" onClick={handleCancel} disabled={submitting} style={actionBtn('#dc2626')}>
                   Отменить бронь
                 </button>
@@ -1947,7 +2150,7 @@ export const BookingModal: React.FC = () => {
               <button type="button" onClick={closeModal} style={cancelBtnStyle}>
                 Закрыть
               </button>
-              {isClosed && canEditActualTimes && (showActualIn || showActualOut) && (
+              {isClosed && (showActualIn || showActualOut) && (
                 <button
                   type="button"
                   onClick={handleSaveActualTimes}
@@ -1961,9 +2164,11 @@ export const BookingModal: React.FC = () => {
                 <button
                   form="booking-form"
                   type="submit"
-                  disabled={submitting || loadingBooking || !!conflict || roomOccupied}
-                  title={conflict || roomOccupied ? 'Номер занят на выбранные даты' : undefined}
-                  style={submitBtnStyle(!!conflict || roomOccupied || submitting || loadingBooking)}
+                  // Гасим только по ЖЁСТКИМ причинам (пересечение, буфер).
+                  // Квота кнопку не гасит: продажу подтверждают диалогом.
+                  disabled={submitting || loadingBooking || !!conflict || !!hardBlock}
+                  title={conflict || hardBlock ? (hardBlock?.text ?? 'Номер занят на выбранные даты') : undefined}
+                  style={submitBtnStyle(!!conflict || !!hardBlock || submitting || loadingBooking)}
                 >
                   {submitting ? 'Сохранение...' : loadingBooking ? 'Загрузка…' : isEdit ? 'Сохранить' : 'Создать бронь'}
                 </button>
@@ -2126,6 +2331,9 @@ export const BookingModal: React.FC = () => {
             разницу надо вернуть здесь же, не уходя в «Кассу». */}
         {settlement && booking && (
           <SettlementDialog
+            // id ОТРЕЗКА, а не счёта: отменяем и выселяем именно эту часть
+            // цепочки. Деньги сервер всё равно сводит к голове — расчёт по
+            // сегменту и по счёту даёт одни и те же цифры (data-and-money.md).
             bookingId={booking.id}
             action={settlement}
             guestName={(serverBooking ?? booking).guestName}
@@ -2183,7 +2391,9 @@ export const BookingModal: React.FC = () => {
                   Для новой брони справа виден предпросмотр по тарифу, а строки создаст сервер. */}
               {isEdit && booking && (
                 <ChargesPanel
-                  bookingId={booking.id}
+                  // Строки — ВСЕГДА по счёту: у продолжения переезда своих нет,
+                  // они лежат на голове цепочки (data-and-money.md).
+                  bookingId={accountId}
                   readOnly={isClosed}
                   onChanged={(b) => {
                     if (b) setServerBooking(b)
@@ -2201,7 +2411,9 @@ export const BookingModal: React.FC = () => {
               {isEdit && booking && (
                 <BookingMoneyBar
                   ref={moneyBarRef}
-                  bookingId={booking.id}
+                  // Деньги — по счёту цепочки: приём оплаты из формы продолжения
+                  // уходит на голову, туда же смотрит «начислено / принято / долг».
+                  bookingId={accountId}
                   title="Оплата"
                   guestName={(serverBooking ?? booking).guestName}
                   subtitle={`${roomNumberLabel ? `Номер ${roomNumberLabel} · ` : ''}${fmtDay(watchedCheckIn)} — ${fmtDay(watchedCheckOut)}`}
@@ -2409,29 +2621,35 @@ interface RoomPickerProps {
   checkOut: string
   excludeBookingId?: number
   disabled: boolean
-  onOccupied?: (occupied: boolean) => void
+  /**
+   * Почему выбранный номер недоступен (null — доступен). Причину отдаём наружу
+   * целиком, а не флагом «занят»: квота партнёра — это предупреждение, с ним
+   * форма сохраняется по подтверждению, а буфер и пересечение — запрет
+   * (docs/decisions/bookings.md).
+   */
+  onBlock?: (block: RoomBlockReason | null) => void
 }
 
 const RoomPicker: React.FC<RoomPickerProps> = ({
-  rooms, value, onChange, checkIn, checkOut, excludeBookingId, disabled, onOccupied,
+  rooms, value, onChange, checkIn, checkOut, excludeBookingId, disabled, onBlock,
 }) => {
-  const [availability, setAvailability] = useState<Record<number, 'free' | 'occupied'>>({})
+  const [avail, setAvail] = useState<RoomAvailability>({ availability: {}, reasons: {} })
   const [loadingAvail, setLoadingAvail] = useState(false)
+  const availability = avail.availability
 
   useEffect(() => {
     if (!checkIn || !checkOut || checkOut <= checkIn) {
-      setAvailability({})
+      setAvail({ availability: {}, reasons: {} })
       setLoadingAvail(false)
-      onOccupied?.(false)
+      onBlock?.(null)
       return
     }
     // Сразу показываем "Проверяем..." и сбрасываем старые данные
     setLoadingAvail(true)
-    setAvailability({})
+    setAvail({ availability: {}, reasons: {} })
     const timer = setTimeout(async () => {
       try {
-        const result = await fetchRoomAvailability(checkIn, checkOut, excludeBookingId)
-        setAvailability(result)
+        setAvail(await fetchRoomAvailability(checkIn, checkOut, excludeBookingId))
       } catch (e) {
         console.error('Availability fetch error:', e)
       } finally {
@@ -2441,12 +2659,14 @@ const RoomPicker: React.FC<RoomPickerProps> = ({
     return () => { clearTimeout(timer) }
   }, [checkIn, checkOut, excludeBookingId])
 
-  // Сообщаем родителю об изменении доступности выбранного номера
+  // Сообщаем родителю о доступности выбранного номера и о причине отказа.
   useEffect(() => {
-    if (!value || loadingAvail) { onOccupied?.(false); return }
-    const status = availability[value]
-    onOccupied?.(status === 'occupied')
-  }, [availability, value, loadingAvail])
+    if (!value || loadingAvail) { onBlock?.(null); return }
+    if (avail.availability[value] !== 'occupied') { onBlock?.(null); return }
+    // Причина у сервера есть всегда, но подстраховываемся: без текста форма
+    // показала бы пустую плашку вместо объяснения.
+    onBlock?.(avail.reasons[value] ?? { reason: 'overlap', text: 'Номер занят на выбранные даты' })
+  }, [avail, value, loadingAvail])
 
   // Категории из списка комнат
   const categories = useMemo(() => {

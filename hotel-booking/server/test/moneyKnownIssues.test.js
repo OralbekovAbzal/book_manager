@@ -10,6 +10,11 @@ import {
  * («ожидали провал, а тест прошёл») — это и есть сигнал снять пометку.
  *
  * Подробности каждой находки — в комментарии перед тестом: файл, строка, вход.
+ *
+ * Состояние на 2026-09-08: находки 1, 3 и 4 починены в волне 5a, и пометка с них
+ * снята — теперь это обычные тесты-сторожа на уже исправленное поведение. Находка 2
+ * (права STAFF) закрыта вместе с ролью в волне 5b, её тест снят совсем — почему
+ * именно снят, а не переписан, сказано на её месте ниже.
  */
 
 const BREAKFAST = service({ id: 1, name: 'Завтрак', price: 3500, unit: 'per_person_night' })
@@ -80,46 +85,29 @@ it('ранний выезд не должен добавлять вторую с
 })
 
 /**
- * НАХОДКА 2 (права, средняя). `server/src/controllers/bookingController.js:1401-1414`
- * — `loadBookingForCharges` проверяет роль ТОЛЬКО при `allowClosed: true`, а этот
- * флаг ставит один `addCharge` (:1441). `updateCharge` (:1477) и `removeCharge`
- * (:1524) зовут её без флага, поэтому на закрытой (`CHECKED_OUT`) брони роль не
- * проверяется вовсе.
+ * НАХОДКА 2 (права, средняя) — ЗАКРЫТА 2026-09-08 вместе с ролью, тест снят.
  *
- * Вход: бронь 7 в статусе CHECKED_OUT с ручной строкой «Удержание» 15 000.
- * STAFF не может её ДОБАВИТЬ (403), но может обнулить `PUT /bookings/7/charges/1`
- * и удалить `DELETE /bookings/7/charges/1` — оба 200. Граница «правка денег по
- * закрытой сделке — только администратор» держится с одной стороны.
+ * Было: `loadBookingForCharges` проверяет роль только при `allowClosed: true`, и
+ * этот флаг ставит один `addCharge`. `updateCharge` и `removeCharge` зовут её без
+ * флага — значит STAFF не мог ДОБАВИТЬ ручную строку на закрытую бронь (403), но
+ * мог обнулить и удалить уже существующую (200). Граница «правка денег по закрытой
+ * сделке — только администратор» держалась с одной стороны.
  *
- * Практический вес зависит от судьбы роли STAFF (пункт 1 волны 5): если её уберут,
- * находка станет теоретической.
+ * Почему теста больше нет, а не почему он «починен». Сам перекос в
+ * `loadBookingForCharges` на месте — исчез вход, который его использовал: волна 5b
+ * убрала роль STAFF (`docs/decisions/interface.md`, тесты — `roles.test.js`).
+ * Остались SUPER_ADMIN и ADMIN, а `['SUPER_ADMIN','ADMIN'].includes(role)` для них
+ * истинно всегда: асимметричная проверка теперь никого не различает, и назначить
+ * `STAFF` через API нельзя — валидация роутов его не пропускает.
+ *
+ * Оставить `it.fails` было нельзя: с недостижимой ролью он начал бы ПРОХОДИТЬ, а
+ * «ожидали провал, а тест прошёл» красит прогон и выглядит как поломка. Написать
+ * его же на ADMIN бессмысленно — администратору править закрытый счёт как раз
+ * можно (решение волны 5a про штраф на `CHECKED_OUT`).
+ *
+ * Если роли когда-нибудь снова разойдутся по правам — начинать надо отсюда:
+ * `bookingController.loadBookingForCharges`, флаг `allowClosed`.
  */
-it.fails('STAFF не должен править и удалять строки закрытой брони', async () => {
-  const closed = () => makeStack({
-    rooms: [room({ id: 101 })],
-    bookings: [booking({ id: 7, status: 'CHECKED_OUT', totalAmount: 15000 })],
-    charges: [charge({
-      id: 1, bookingId: 7, kind: 'extra', label: 'Удержание', amount: 15000,
-      unitPrice: 15000, source: 'manual', reason: 'политика отмены',
-    })],
-  })
-  const staff = { id: 2, name: 'Стойка', role: 'STAFF' }
-
-  const edited = closed()
-  const up = await run(edited.ctrl.updateCharge, {
-    params: { id: '7', chargeId: '1' },
-    body: { quantity: 1, unitPrice: 0, reason: 'обнуляю' },
-    admin: staff,
-  })
-  expect(up.status).toBe(403)
-
-  const removed = closed()
-  const del = await run(removed.ctrl.removeCharge, {
-    params: { id: '7', chargeId: '1' }, admin: staff,
-  })
-  expect(del.status).toBe(403)
-  expect(chargesOf(removed.prisma, 7)).toHaveLength(1)
-})
 
 /**
  * НАХОДКА 3 (деньги, лёгкая). `server/src/controllers/bookingController.js:569-577`

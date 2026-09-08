@@ -25,10 +25,11 @@ export const UsersSection: React.FC = () => {
   return <UsersManager currentId={admin.id} />
 }
 
-const ROLE_OPTIONS: AdminRole[] = ['SUPER_ADMIN', 'ADMIN', 'STAFF']
+// Ролей две: «сотрудник» убран, вся работа стойки и администратора — это ADMIN.
+const ROLE_OPTIONS: AdminRole[] = ['SUPER_ADMIN', 'ADMIN']
 
 interface NewUserForm { name: string; username: string; password: string; role: AdminRole }
-const emptyNewUser = (): NewUserForm => ({ name: '', username: '', password: '', role: 'STAFF' })
+const emptyNewUser = (): NewUserForm => ({ name: '', username: '', password: '', role: 'ADMIN' })
 
 const UsersManager: React.FC<{ currentId: number }> = ({ currentId }) => {
   const [users, setUsers] = useState<User[]>([])

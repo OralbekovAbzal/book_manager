@@ -4,6 +4,7 @@ import { cancelBooking } from '../../api/bookings'
 import { fetchBookingPayments } from '../../api/payments'
 import { formatApiError } from '../Setup/accountRules'
 import { SettlementDialog } from './SettlementDialog'
+import { accountIdOf } from '../../utils/bookingAccount'
 
 /**
  * Отмена брони.
@@ -54,7 +55,9 @@ export const DeleteBookingDialog: React.FC = () => {
     let cancelled = false
     setPaid(null)
     setMoneyFailed(false)
-    fetchBookingPayments(deleteTarget.id)
+    // По СЧЁТУ: у продолжения переезда свои платежи всегда нулевые, и короткое
+    // подтверждение «денег нет» соврало бы про гостя, который заплатил вперёд.
+    fetchBookingPayments(accountIdOf(deleteTarget))
       .then(d => { if (!cancelled) setPaid(d.summary.paid) })
       // Не ответил — просто не называем сумму. Ради неё запрещать отмену незачем.
       .catch(() => { if (!cancelled) setMoneyFailed(true) })

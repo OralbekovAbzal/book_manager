@@ -157,10 +157,9 @@ const PeriodSummary: React.FC<{ period: 'today' | 'week' | 'month'; shiftId?: nu
 // ─── Shifts Panel ─────────────────────────────────────────────────────────────
 
 const ShiftsPanel: React.FC = () => {
-  // Переход дня сдвигает рабочую дату всего отеля — только администраторам
-  // (сервер проверяет роль тоже: POST /shifts/next-day → 403 для STAFF).
-  const role = useAuthStore(s => s.admin?.role)
-  const canAdvance = role === 'SUPER_ADMIN' || role === 'ADMIN'
+  // Переход дня доступен любому вошедшему: ролей осталось две, и обе —
+  // администраторы (interface.md, 2026-09-08). Проверка «SUPER_ADMIN или ADMIN»
+  // была написана ради STAFF и стала тождественно истинной.
   const [currentShift, setCurrentShift] = useState<Shift | null>(null)
   const [shifts, setShifts] = useState<Shift[]>([])
   const [loading, setLoading] = useState(true)
@@ -346,42 +345,34 @@ const ShiftsPanel: React.FC = () => {
           </div>
         )}
 
-        {/* Next day button — только администраторам */}
+        {/* Переход дня */}
         <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border-subtle)' }}>
-          {canAdvance ? (
-            <>
-              <button
-                onClick={handleNextDay}
-                disabled={blocked}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '10px 20px',
-                  background: blocked ? 'var(--surface-2)' : 'var(--accent)',
-                  color: blocked ? 'var(--text-faint)' : '#fff',
-                  border: blocked ? '1px solid var(--border-subtle)' : '1px solid transparent',
-                  borderRadius: 8,
-                  fontSize: '1.08rem',
-                  fontWeight: 700,
-                  cursor: blocked ? 'not-allowed' : 'pointer',
-                  transition: 'background 0.15s',
-                }}
-              >
-                <span style={{ fontSize: '1.23rem' }}>→</span>
-                {advancing ? 'Переход...' : 'Следующий день'}
-              </button>
-              <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginTop: 6 }}>
-                {overdueCheckouts.length > 0
-                  ? 'Сначала оформите выезд отмеченных гостей'
-                  : 'Зафиксирует текущий день и откроет новый'}
-              </div>
-            </>
-          ) : (
-            <div style={{ fontSize: '0.92rem', color: 'var(--text-faint)' }}>
-              Переход дня выполняет администратор
-            </div>
-          )}
+          <button
+            onClick={handleNextDay}
+            disabled={blocked}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '10px 20px',
+              background: blocked ? 'var(--surface-2)' : 'var(--accent)',
+              color: blocked ? 'var(--text-faint)' : '#fff',
+              border: blocked ? '1px solid var(--border-subtle)' : '1px solid transparent',
+              borderRadius: 8,
+              fontSize: '1.08rem',
+              fontWeight: 700,
+              cursor: blocked ? 'not-allowed' : 'pointer',
+              transition: 'background 0.15s',
+            }}
+          >
+            <span style={{ fontSize: '1.23rem' }}>→</span>
+            {advancing ? 'Переход...' : 'Следующий день'}
+          </button>
+          <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginTop: 6 }}>
+            {overdueCheckouts.length > 0
+              ? 'Сначала оформите выезд отмеченных гостей'
+              : 'Зафиксирует текущий день и откроет новый'}
+          </div>
         </div>
       </div>
 
@@ -442,9 +433,7 @@ const ShiftsPanel: React.FC = () => {
 
       {history.length === 0 && !loading && (
         <div style={{ fontSize: '1rem', color: 'var(--text-faint)', textAlign: 'center', paddingTop: 16 }}>
-          {canAdvance
-            ? 'История пока пуста — нажмите «Следующий день», чтобы начать вести учёт'
-            : 'История пока пуста'}
+          История пока пуста — нажмите «Следующий день», чтобы начать вести учёт
         </div>
       )}
     </div>
@@ -543,9 +532,10 @@ const filterInput: React.CSSProperties = {
 }
 
 const ActionsPanel: React.FC = () => {
-  const role = useAuthStore(s => s.admin?.role)
-  const canView = role === 'SUPER_ADMIN' || role === 'ADMIN'
-  const isSuper = role === 'SUPER_ADMIN'
+  // Журнал читает любой вошедший (ролей две, обе — администраторы). Отдельно
+  // осталась только ветка SUPER_ADMIN: список сотрудников для фильтра отдаёт
+  // /api/users, а он доступен лишь главному администратору.
+  const isSuper = useAuthStore(s => s.admin?.role) === 'SUPER_ADMIN'
 
   const [entries, setEntries] = useState<AuditLogEntry[]>([])
   const [users, setUsers] = useState<User[]>([])
@@ -556,7 +546,6 @@ const ActionsPanel: React.FC = () => {
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
-    if (!canView) { setLoading(false); return }
     setLoading(true)
     setError('')
     try {
@@ -571,7 +560,7 @@ const ActionsPanel: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [canView, adminId, dateFrom, dateTo])
+  }, [adminId, dateFrom, dateTo])
 
   useEffect(() => { load() }, [load])
 
@@ -579,10 +568,6 @@ const ActionsPanel: React.FC = () => {
   useEffect(() => {
     if (isSuper) fetchUsers().then(setUsers).catch(() => setUsers([]))
   }, [isSuper])
-
-  if (!canView) {
-    return <div style={mutedText}>Журнал действий доступен администраторам</div>
-  }
 
   const th: React.CSSProperties = {
     textAlign: 'left', padding: '8px 8px', fontSize: '0.82rem', color: 'var(--text-faint)',

@@ -45,6 +45,11 @@ function room(id) {
 const CREATE_DEFAULTS = {
   partnerId: null,
   partner: null,
+  // Волна 5b: счёт цепочки и «продана поверх квоты» — тоже в BOOKING_SELECT.
+  // Связи `account`/`continuations` фикстура не хранит: их считает `fakePrisma`
+  // по `accountBookingId` (голова и продолжения лежат в той же таблице).
+  accountBookingId: null,
+  allotmentOverride: false,
   // Фактические заезд/выезд: у брони их проставляют кнопки «Заезд»/«Выезд», create
   // их не пишет — но BOOKING_SELECT спрашивает, и фейк падает на отсутствующем поле.
   actualCheckInAt: null,
@@ -160,6 +165,11 @@ function loadStack({ bookings = [], allotments = [], rooms } = {}) {
       },
       '../utils/charges': {
         rebuildAutoCharges: async () => {},
+        // Волна 5b: переезд фиксирует прежний итог и пересобирает счёт цепочки.
+        // Деньги — не область этого файла (он про «свободно ли номер»), поэтому
+        // обе функции здесь пустые: их поведение проверяют денежные тесты.
+        pinLegacyTotal: async () => null,
+        rebuildChainCharges: async () => ({ created: 0, total: null }),
         recalcBookingTotals: async () => {},
         chargeInputsChanged: () => false,
         toUTCDate: (v) => v,

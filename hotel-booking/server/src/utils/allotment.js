@@ -34,6 +34,14 @@ function releasedDays(allotment) {
 /** Мешает ли конкретная квота брони в этот период (с учётом релизов). */
 function quotaBlocks(a, from, to, partnerId) {
   // Бронь самого партнёра в его же квоту — это и есть её назначение.
+  //
+  // НЕДОСТИЖИМАЯ ВЕТКА (2026-09-08). Поля «Партнёр» в брони нет и не будет
+  // (`docs/decisions/bookings.md`): квота — предупреждение при продаже, а не
+  // назначение брони партнёру. `partnerId` сюда приходит только от существующей
+  // брони, а `Booking.partnerId` нигде не записывается (аудит D3-003), то есть
+  // всегда null. Параметр не удаляем: он в сигнатурах `availability.js` и
+  // `findRoomBlock`, на нём завязаны тесты, и он же — точка входа, если модель
+  // «бронь партнёра» когда-нибудь понадобится.
   if (partnerId && a.partnerId === parseInt(partnerId)) return false
 
   const overlapFrom = Math.max(toUTC(a.dateFrom).getTime(), from.getTime())

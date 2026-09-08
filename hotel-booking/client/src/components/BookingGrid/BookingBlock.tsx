@@ -97,6 +97,12 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
 
   const hasFlags = flagLabels.length > 0
 
+  // Продолжение переезда: деньги этой полоски лежат на брони №N, а не на ней.
+  // Без пометки вторая часть выглядит как отдельная бронь «без начислений»,
+  // и стойка идёт принимать оплату второй раз (data-and-money.md, 2026-09-08).
+  const accountId = booking.accountBookingId ?? null
+  const chainHint = accountId ? `\nПродолжение брони №${accountId} — счёт общий` : ''
+
   // ─── Правила drag по статусу ──────────────────────────────────────────
   // CONFIRMED        — полный drag (дата и комната)
   // CHECKED_IN       — drag разрешён → открывает модал «Переезд» (комната + дата переезда)
@@ -348,7 +354,7 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
         onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(booking, e.clientX, e.clientY) }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        title={`${booking.guestName}\nЗаезд и выезд: ${booking.checkIn.slice(0, 10)}`}
+        title={`${booking.guestName}\nЗаезд и выезд: ${booking.checkIn.slice(0, 10)}${chainHint}`}
         style={{
           position: 'absolute',
           left: leftOffset,
@@ -389,7 +395,7 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
         onKeyDown={(e) => e.key === 'Enter' && onView(booking)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        title={`${booking.guestName}\n${booking.checkIn.slice(0, 10)} → ${booking.checkOut.slice(0, 10)}\n\nДвойной клик — просмотр · Правый клик — меню · Перетащите чтобы перенести`}
+        title={`${booking.guestName}\n${booking.checkIn.slice(0, 10)} → ${booking.checkOut.slice(0, 10)}${chainHint}\n\nДвойной клик — просмотр · Правый клик — меню · Перетащите чтобы перенести`}
         style={{
           position: 'absolute',
           left: left + BLOCK_PADDING,
@@ -442,6 +448,18 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
           alignItems: 'center',
           gap: 5,
         }}>
+          {/* Значок цепочки — перед именем: он объясняет, почему у этой полоски
+              «нет денег». Подробности — в подсказке блока (title). */}
+          {accountId && (
+            <span
+              aria-hidden
+              style={{
+                flexShrink: 0,
+                fontSize: Math.max(9, FONT_SIZE - 2),
+                opacity: 0.9,
+              }}
+            >⛓</span>
+          )}
           {booking.partner && (
             <span style={{
               display: 'inline-flex',

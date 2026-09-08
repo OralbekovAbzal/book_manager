@@ -2,6 +2,7 @@ import React from 'react'
 import type { Booking } from '../../types'
 import type { BookingCharge } from '../../api/charges'
 import type { BookingMoney } from '../../api/payments'
+import { chainCheckOut, chainRoomsLabel } from '../../utils/bookingAccount'
 import {
   DocBlock, DocHeader, DocPrintedAt, DocRow, DocSigner,
   INK, INK_SOFT, docDate, docDateLong, docMoney, docTable, docTd, docTfootTd,
@@ -84,10 +85,14 @@ export const BookingInvoice: React.FC<Props> = ({ booking, hotel, charges, money
     { label: 'Эл. почта', value: hotel.email },
   ])
 
+  // Переезд: счёт один на всю цепочку, поэтому и основание — по цепочке.
+  // Номера через стрелку («12 → 15»), выезд — последнего отрезка, а не тот, что
+  // записан в самой брони (там дата переезда).
+  const rooms = chainRoomsLabel(booking)
   const basis = [
     `бронирование № ${booking.id}`,
-    booking.room?.number ? `номер ${booking.room.number}` : '',
-    `${docDate(booking.checkIn)} — ${docDate(booking.checkOut)}`,
+    rooms ? `номер ${rooms}` : '',
+    `${docDate(booking.checkIn)} — ${docDate(chainCheckOut(booking))}`,
     booking.guestName ? `гость ${booking.guestName}` : '',
   ].filter(Boolean).join(', ')
 

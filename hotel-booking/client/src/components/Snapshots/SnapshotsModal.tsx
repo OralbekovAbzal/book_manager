@@ -6,7 +6,6 @@ import {
   type RestoreAssessment, type RestoreResult,
 } from '../../api/snapshots'
 import { useGridStore } from '../../store/useGridStore'
-import { useAuthStore } from '../../store/useAuthStore'
 // Диалог «восстановление сотрёт деньги» общий с окном резервных копий
 // (Settings/sections/BackupSection.tsx): вопрос к пользователю один и тот же,
 // и выглядеть он обязан одинаково — иначе второй раз его читают заново.
@@ -93,10 +92,10 @@ const legacyChipStyle: React.CSSProperties = {
 }
 export const SnapshotsModal: React.FC<Props> = ({ open, onClose }) => {
   const { fetchGrid, fetchToday } = useGridStore()
-  const admin = useAuthStore(s => s.admin)
-  // Откат, удаление и сводка последствий — только ADMIN/SUPER_ADMIN. У STAFF кнопки
-  // не показываем вовсе: иначе клик уводил бы в 403 без объяснений.
-  const canRestore = admin?.role === 'ADMIN' || admin?.role === 'SUPER_ADMIN'
+  // Откат, удаление и сводка последствий доступны любому вошедшему: ролей
+  // осталось две, и обе — администраторы (interface.md, 2026-09-08). Проверка
+  // «ADMIN или SUPER_ADMIN» стала тождественно истинной и убрана, чтобы никто
+  // не принял её за настоящее ограничение.
 
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [loading, setLoading] = useState(true)
@@ -260,12 +259,6 @@ export const SnapshotsModal: React.FC<Props> = ({ open, onClose }) => {
 
         {error && <div style={{ ...errorBoxStyle, margin: '12px 22px 0' }}>{error}</div>}
 
-        {!canRestore && (
-          <div style={{ padding: '10px 22px 0', fontSize: '0.85rem', color: 'var(--text-faint)' }}>
-            Откат и удаление снимков доступны только администратору.
-          </div>
-        )}
-
         {hasLegacy && (
           <div style={{ padding: '10px 22px 0', fontSize: '0.85rem', color: 'var(--text-faint)', lineHeight: 1.45 }}>
             Снимки с меткой <strong style={{ color: 'var(--s-overdue)' }}>старый формат</strong> хранят
@@ -318,16 +311,12 @@ export const SnapshotsModal: React.FC<Props> = ({ open, onClose }) => {
                       </div>
                     </div>
 
-                    {canRestore && (
-                      <>
-                        <button onClick={() => setConfirmTarget(s)} disabled={busy} style={restoreBtnStyle}>
-                          Восстановить
-                        </button>
-                        <button onClick={() => handleDelete(s)} disabled={busy} title="Удалить снимок" style={trashBtnStyle}>
-                          🗑
-                        </button>
-                      </>
-                    )}
+                    <button onClick={() => setConfirmTarget(s)} disabled={busy} style={restoreBtnStyle}>
+                      Восстановить
+                    </button>
+                    <button onClick={() => handleDelete(s)} disabled={busy} title="Удалить снимок" style={trashBtnStyle}>
+                      🗑
+                    </button>
                   </div>
                 )
               })}

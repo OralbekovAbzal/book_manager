@@ -83,20 +83,80 @@ function applyOrder(rows, orderBy) {
   })
 }
 
-function project(rec, args) {
+/**
+ * Самоссылки внутри одной таблицы — их фикстура хранить не может: голова цепочки
+ * и её продолжения лежат в тех же `rows`, и класть их друг в друга руками значит
+ * получить две правды об одной брони. Поэтому такие связи ВЫЧИСЛЯЮТСЯ по данным:
+ *
+ *   `account`       — голова счёта: строка с `id === rec.accountBookingId`;
+ *   `continuations` — все строки, у которых `accountBookingId === rec.id`.
+ *
+ * Правило разрешения: поле, которое ЕСТЬ в записи, всегда важнее вычислителя
+ * (тест по-прежнему может подсунуть свою заглушку). Вычисляется только то, что
+ * реально запросили в `select`/`include` — иначе появилась бы бесконечная
+ * рекурсия «голова → продолжение → голова».
+ */
+const VIRTUAL_RELATIONS = {
+  booking: {
+    account(rec, rows) {
+      if (!('accountBookingId' in rec)) {
+        throw new Error('fakePrisma: select запрашивает связь «account», но в фикстуре брони нет поля accountBookingId')
+      }
+      if (rec.accountBookingId == null) return null
+      return rows.find((r) => r.id === rec.accountBookingId) ?? null
+    },
+    continuations(rec, rows) {
+      return rows.filter((r) => r.accountBookingId != null && r.accountBookingId === rec.id)
+    },
+  },
+}
+
+/**
+ * Значение связи под её вложенный `select`/`orderBy`.
+ *
+ * Применяется ТОЛЬКО внутри вычисленной самоссылки: голову и продолжения фейк
+ * собрал сам, и отдать их целиком значило бы вернуть больше, чем просил запрос
+ * (`continuations: { select: { id } }` привёз бы всю бронь). Связи, которые
+ * лежат в фикстуре готовым объектом на верхнем уровне (`room`, `createdBy`),
+ * как и раньше отдаются целиком — их состав задаёт фикстура, и урезать его
+ * задним числом значит менять поведение тестов, написанных до цепочек.
+ *
+ * `virtual` передаётся вглубь только для самой самоссылки (та же таблица),
+ * поэтому `continuations[].account` разрешается, а `room.account` — нет.
+ */
+function projectRelation(value, on, virtual, rows) {
+  if (value == null || on === true || !isPlainCondition(on) || !on.select) return value
+  const one = (v) => project(v, { select: on.select }, virtual, rows, true)
+  return Array.isArray(value) ? applyOrder(value, on.orderBy).map(one) : one(value)
+}
+
+/**
+ * @param {object} rec       строка фикстуры
+ * @param {object} args      аргументы запроса (`select` / `include`)
+ * @param {object|null} virtual вычислители самоссылок этой модели
+ * @param {object[]|null} rows  все строки модели — для тех же вычислителей
+ * @param {boolean} deep     разворачивать ли вложенные `select` у связей,
+ *                           лежащих в записи (включается внутри самоссылки)
+ */
+function project(rec, args, virtual = null, rows = null, deep = false) {
   if (args.select) {
     const out = {}
     for (const [k, on] of Object.entries(args.select)) {
       if (!on) continue
-      if (!(k in rec)) throw new Error(`fakePrisma: select запрашивает поле «${k}», которого нет в фикстуре`)
-      out[k] = rec[k]
+      if (k in rec) { out[k] = deep ? projectRelation(rec[k], on, null, null) : rec[k]; continue }
+      if (virtual && virtual[k]) { out[k] = projectRelation(virtual[k](rec, rows), on, virtual, rows); continue }
+      throw new Error(`fakePrisma: select запрашивает поле «${k}», которого нет в фикстуре`)
     }
     return out
   }
   if (args.include) {
-    for (const k of Object.keys(args.include)) {
-      if (!(k in rec)) throw new Error(`fakePrisma: include запрашивает связь «${k}», которой нет в фикстуре`)
+    const extra = {}
+    for (const [k, on] of Object.entries(args.include)) {
+      if (!on || k in rec) continue
+      if (virtual && virtual[k]) { extra[k] = projectRelation(virtual[k](rec, rows), on, virtual, rows); continue }
+      throw new Error(`fakePrisma: include запрашивает связь «${k}», которой нет в фикстуре`)
     }
+    return { ...rec, ...extra }
   }
   return { ...rec }
 }
@@ -136,21 +196,25 @@ function aggregateOf(items, args, { nullWhenEmpty = false } = {}) {
 function makeModel(name, rows, calls) {
   let seq = rows.reduce((m, r) => Math.max(m, Number(r.id) || 0), 0)
   const select = (args = {}) => applyOrder(rows.filter((r) => matchWhere(r, args.where)), args.orderBy)
+  // Вычислители самоссылок этой таблицы (см. VIRTUAL_RELATIONS): им нужны все
+  // строки модели, поэтому они берутся здесь, где эти строки под рукой.
+  const virtual = VIRTUAL_RELATIONS[name] || null
+  const out = (rec, args) => project(rec, args, virtual, rows)
 
   return {
     async findMany(args = {}) {
       calls.push({ model: name, op: 'findMany', args })
-      return select(args).map((r) => project(r, args))
+      return select(args).map((r) => out(r, args))
     },
     async findFirst(args = {}) {
       calls.push({ model: name, op: 'findFirst', args })
       const hit = select(args)[0]
-      return hit ? project(hit, args) : null
+      return hit ? out(hit, args) : null
     },
     async findUnique(args = {}) {
       calls.push({ model: name, op: 'findUnique', args })
       const hit = rows.find((r) => matchWhere(r, args.where))
-      return hit ? project(hit, args) : null
+      return hit ? out(hit, args) : null
     },
     async count(args = {}) {
       calls.push({ model: name, op: 'count', args })
@@ -160,7 +224,7 @@ function makeModel(name, rows, calls) {
       calls.push({ model: name, op: 'create', args })
       const rec = { id: ++seq, ...args.data }
       rows.push(rec)
-      return project(rec, args)
+      return out(rec, args)
     },
     async createMany(args) {
       calls.push({ model: name, op: 'createMany', args })
@@ -232,7 +296,7 @@ function makeModel(name, rows, calls) {
       const i = rows.findIndex((r) => matchWhere(r, args.where))
       if (i === -1) { const e = new Error('Record to delete does not exist'); e.code = 'P2025'; throw e }
       const [rec] = rows.splice(i, 1)
-      return project(rec, args)
+      return out(rec, args)
     },
     async update(args) {
       calls.push({ model: name, op: 'update', args })
@@ -240,7 +304,7 @@ function makeModel(name, rows, calls) {
       // Prisma на update несуществующей записи бросает P2025 — тест должен видеть то же
       if (!rec) { const e = new Error('Record to update not found'); e.code = 'P2025'; throw e }
       applyData(rec, args.data)
-      return project(rec, args)
+      return out(rec, args)
     },
     get rows() { return rows },
   }

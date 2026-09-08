@@ -252,8 +252,15 @@ export const MoveBookingModal: React.FC = () => {
                       marginRight: 8, verticalAlign: 'middle',
                     }} />
                     <strong>№{targetRoom.number}</strong>
-                    {' '}— новая бронь с <strong>{moveDate}</strong> по <strong>{origCheckOut}</strong>{' '}
+                    {' '}— продолжение брони с <strong>{moveDate}</strong> по <strong>{origCheckOut}</strong>{' '}
                     ({remainingNights} {pluralNights(remainingNights)})
+                  </div>
+                  {/* Главный вопрос стойки при переезде — «а деньги?». Раньше
+                      сервер делил `paidAmount` пропорцией и платежи оставались
+                      на первой части (D3-001/002, D7-013); теперь счёт один. */}
+                  <div style={{ fontSize: '0.88rem', color: 'var(--text-muted)', lineHeight: 1.45 }}>
+                    Деньги остаются на одном счёте: новая часть — продолжение брони,
+                    платежи и начисления не делятся.
                   </div>
                 </div>
               )}

@@ -62,6 +62,22 @@ function guestLabel({ adults, children, extraBeds }) {
 }
 
 /**
+ * Подпись строки проживания.
+ *
+ * У ЦЕПОЧКИ (переезд) в подпись входят номер и категория — «Проживание · №12
+ * Стандарт · 2 взр.»: в одном счёте оказываются ночи двух комнат по разной цене,
+ * и без этого счёт выглядит как ошибка в тарифе. У одиночной брони подпись
+ * прежняя, из волны 5a: номер там ровно один и повторять его в каждой ночи незачем.
+ */
+function stayLabel({ pricingBase, counts, roomNumber = null, categoryName = null, qualified = false }) {
+  const where = qualified ? `№${roomNumber ?? '?'}${categoryName ? ` ${categoryName}` : ''}` : null
+  const who = pricingBase === 'room'
+    ? (where ? null : 'номер')
+    : (guestLabel(counts) || 'без гостей')
+  return ['Проживание', where, who].filter(Boolean).join(' · ')
+}
+
+/**
  * Цена одной ночи проживания.
  *
  * `parts` — какие именно составляющие цены не заданы ('room' | 'adult' | 'child' |
@@ -130,10 +146,26 @@ function isPercentDiscountLabel(label) {
  * пересоздать, а чтобы НЕ создать дубль: если администратор поправил ночь «полсуток»,
  * автоматическая строка на ту же дату не нужна — иначе ночь начислится дважды.
  */
-function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingServices, manualCharges = [] }) {
+function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingServices, manualCharges = [], segments = null }) {
   const missingPrices = []
-  const nights = nightsOf(booking.checkIn, booking.checkOut)
-  if (nights.length === 0) return { rows: [], missingPrices, nights: 0 }
+
+  // Отрезки цепочки (переезд = один счёт, `docs/decisions/data-and-money.md`).
+  // Одиночная бронь — ОДИН отрезок из тех же аргументов, что и раньше: поведение
+  // и подписи строк у неё не меняются вовсе, иначе волна 5a переписалась бы задним
+  // числом. Номер и категория попадают в подпись только у цепочки — там без них
+  // не понять, за какую комнату ночь.
+  const segs = (Array.isArray(segments) && segments.length > 0)
+    ? segments
+    : [{ booking, ratesByDate, roomNumber: null, categoryName: null }]
+  const multi = segs.length > 1
+
+  const nightsBySeg = segs.map((s) => nightsOf(s.booking.checkIn, s.booking.checkOut))
+  const nightCount = nightsBySeg.reduce((sum, n) => sum + n.length, 0)
+  if (nightCount === 0) return { rows: [], missingPrices, nights: 0 }
+
+  // Скидка %, предоплата и услуги — у ПОСЛЕДНЕГО отрезка: он и есть «текущее
+  // состояние брони», в его форме стойка их правит (решение 2026-09-08).
+  const inputs = segs[segs.length - 1].booking
 
   // Проживание сопоставляем по дате (на дату ровно одна строка), услуги — по названию.
   const manualStayDates = new Set(
@@ -143,27 +175,35 @@ function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingSe
     manualCharges.filter(c => c.kind !== 'stay').map(c => normLabel(c.label)),
   )
 
-  const counts = guestCounts(booking)
   const rows = []
-  const label = guestLabel(counts)
 
   // ── Проживание ──
-  for (const night of nights) {
-    const key = dateKey(night)
-    if (manualStayDates.has(key)) continue  // ночь уже посчитана вручную
-    const { amount, parts } = priceNight(ratesByDate[key], pricingBase, counts)
-    if (parts.length > 0) missingPrices.push({ date: key, parts })
-    const value = Math.round(amount)
-    if (value === 0) continue  // нет цены на эту ночь — строку не выдумываем, ноль это не цена
-    rows.push({
-      kind: 'stay',
-      label: pricingBase === 'room' ? 'Проживание · номер' : `Проживание · ${label || 'без гостей'}`,
-      quantity: 1,
-      unitPrice: value,
-      amount: value,
-      date: night,
+  // Ночи каждого отрезка — по календарю ЕГО категории и с ЕГО счётчиками гостей:
+  // после переезда в другую категорию цена меняется с даты переезда, а не задним числом.
+  segs.forEach((seg, i) => {
+    const counts = guestCounts(seg.booking)
+    const rates = seg.ratesByDate || {}
+    const label = stayLabel({
+      pricingBase, counts, roomNumber: seg.roomNumber, categoryName: seg.categoryName, qualified: multi,
     })
-  }
+
+    for (const night of nightsBySeg[i]) {
+      const key = dateKey(night)
+      if (manualStayDates.has(key)) continue  // ночь уже посчитана вручную
+      const { amount, parts } = priceNight(rates[key], pricingBase, counts)
+      if (parts.length > 0) missingPrices.push({ date: key, parts })
+      const value = Math.round(amount)
+      if (value === 0) continue  // нет цены на эту ночь — строку не выдумываем, ноль это не цена
+      rows.push({
+        kind: 'stay',
+        label,
+        quantity: 1,
+        unitPrice: value,
+        amount: value,
+        date: night,
+      })
+    }
+  })
 
   // ── Питание и услуги ──
   // Источник — подключённые к брони строки BookingService, а не флаг
@@ -174,7 +214,9 @@ function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingSe
   // Названия держим короткими и стабильными («Завтрак», «Завтрак (дети)»): количество
   // видно в самой строке (кол-во × цена), а стабильное название позволяет узнать
   // услугу после пересборки и не задвоить её ручную правку.
-  const nightCount = nights.length
+  // Питание и услуги считаются на ВСЕ ночи цепочки набором последнего отрезка:
+  // при переезде `BookingService` переносятся на продолжение, а гость завтракал
+  // все ночи подряд — делить завтраки по комнатам значит выдумывать деньги.
   for (const link of bookingServices || []) {
     const s = link.service
     if (!s || !s.isActive) continue
@@ -228,7 +270,7 @@ function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingSe
   // Без этой сверки правленная администратором «Скидка 10%» (уступка 8 000 вместо
   // расчётных 11 100) при любой пересборке получала соседку на 11 100, и гость
   // получал скидку дважды.
-  const pct = booking.discountPercent || 0
+  const pct = inputs.discountPercent || 0
   const manualPercentDiscount = manualCharges.some(
     c => c.kind === 'discount' && isPercentDiscountLabel(c.label),
   )
@@ -250,7 +292,7 @@ function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingSe
     }
   }
 
-  return { rows, missingPrices, nights: nights.length }
+  return { rows, missingPrices, nights: nightCount }
 }
 
 /**
@@ -334,7 +376,8 @@ async function recalcBookingTotals(bookingId, { client = prisma, keepIfEmpty = f
   // Итог без строк — прежний кэш `totalAmount`: считать его нечем, но и терять нельзя
   const keepTotal = charges.length === 0 && keepIfEmpty
   const total = keepTotal ? Math.round(booking.totalAmount || 0) : sumCharges(charges)
-  const prepaid = Math.round(total * ((booking.prepaymentPercent || 0) / 100))
+  const percent = await currentPrepaymentPercent(bookingId, booking, client)
+  const prepaid = Math.round(total * (percent / 100))
 
   if (keepTotal) {
     // Итог не трогаем СОВСЕМ (даже равной записью — это чужое, посчитанное вручную
@@ -349,6 +392,24 @@ async function recalcBookingTotals(bookingId, { client = prisma, keepIfEmpty = f
     })
   }
   return { total, prepaidAmount: prepaid, count: charges.length }
+}
+
+/**
+ * Процент предоплаты СЧЁТА — у текущего (последнего живого) отрезка цепочки.
+ *
+ * То же правило, что у скидки и услуг (`buildAutoChargesDetailed`: `inputs` берутся
+ * у последнего отрезка): текущий отрезок и есть «состояние брони», его форму правит
+ * стойка. Деньги при этом лежат на голове, поэтому пересчёт всегда зовут для неё —
+ * и без этого поиска процент читался бы у головы, а записанный в продолжение
+ * не влиял бы ни на что: форма показывала бы «Предоплата 30 %» рядом с суммой от 50 %.
+ *
+ * У одиночной брони цепочки нет — берём её собственный процент, поведение прежнее.
+ */
+async function currentPrepaymentPercent(bookingId, booking, client = prisma) {
+  const own = booking.prepaymentPercent || 0
+  const { segments } = await loadChainSegments(bookingId, client)
+  if (segments.length < 2) return own
+  return segments[segments.length - 1].booking.prepaymentPercent || 0
 }
 
 const LEGACY_TOTAL_LABEL = 'Проживание · по прежнему расчёту'
@@ -428,6 +489,189 @@ async function rebuildAutoCharges(bookingId, { adminId = null, client = prisma, 
   return { created: rows.length, total: totals ? totals.total : null }
 }
 
+// ─── Цепочка «один счёт» ─────────────────────────────────────────────────────
+//
+// Переезд физически делит бронь на две записи (иначе не нарисовать два блока в
+// шахматке и не проверить пересечения), но для гостя это ОДИН счёт: все
+// `BookingCharge` и `Payment` лежат на голове, у продолжений деньги нулевые.
+// Отсюда правило: любая денежная операция работает не по `:id`, а по счёту.
+
+/**
+ * Отрезки счёта, к которому относится бронь `anyBookingId` — по её голове.
+ *
+ * `segments` идут по `checkIn`: голова первой, продолжения дальше. Каждому нужен
+ * свой `categoryId` (цена ночи считается по календарю ЕГО категории) и номер
+ * (он попадает в подпись строки проживания).
+ *
+ * @returns {Promise<{ headId:number, segments: Array<{booking:object, categoryId:number|null, roomNumber:string|null, categoryName:string|null}> }>}
+ */
+async function loadChainSegments(anyBookingId, client = prisma) {
+  const id = parseInt(anyBookingId)
+  const self = await client.booking.findUnique({
+    where: { id },
+    select: { id: true, accountBookingId: true },
+  })
+  if (!self) return { headId: id, segments: [] }
+
+  const headId = self.accountBookingId ?? self.id
+  const roomInclude = {
+    room: { select: { id: true, number: true, categoryId: true, category: { select: { name: true } } } },
+  }
+  const [head, continuations] = await Promise.all([
+    client.booking.findUnique({ where: { id: headId }, include: roomInclude }),
+    client.booking.findMany({
+      where: { accountBookingId: headId },
+      include: roomInclude,
+      orderBy: { checkIn: 'asc' },
+    }),
+  ])
+  if (!head) return { headId, segments: [] }
+
+  const toSegment = (b) => ({
+    booking: b,
+    categoryId: b.room?.categoryId ?? null,
+    roomNumber: b.room?.number ?? null,
+    categoryName: b.room?.category?.name ?? null,
+  })
+  // Отменённое продолжение (переезд «отыграли назад») ночей счёту не приносит.
+  const live = continuations.filter((b) => b.status !== 'CANCELLED')
+  return { headId, segments: [head, ...live].map(toSegment) }
+}
+
+/** Календарь цен каждому отрезку — свой: категории у номеров цепочки разные. */
+async function loadSegmentRates(segments, client = prisma) {
+  for (const seg of segments) {
+    const { ratesByDate } = await loadRateContext({
+      categoryId: seg.categoryId,
+      checkIn: seg.booking.checkIn,
+      checkOut: seg.booking.checkOut,
+    }, client)
+    seg.ratesByDate = ratesByDate
+  }
+  return segments
+}
+
+/**
+ * Отрезки, за которые генератор действительно считает ночи.
+ *
+ * У брони, зафиксировавшей прежний итог строкой `pinLegacyTotal`, эта строка
+ * покрывает ВЕСЬ срок до первого переезда — и проживание, и питание: за какие
+ * именно ночи была та сумма, уже неизвестно. Начислить поверх неё ночи головы
+ * значило бы посчитать их дважды, поэтому голова из расчёта выпадает и остаются
+ * только продолжения.
+ */
+function segmentsToPrice(segments, charges) {
+  // Только у ЦЕПОЧКИ: у одиночной брони «ночей продолжений» не существует, и
+  // выбрасывать единственный отрезок значило бы менять поведение волны 5a.
+  if (segments.length < 2) return segments
+  const hasLegacy = (charges || []).some((c) => c.label === LEGACY_TOTAL_LABEL)
+  return hasLegacy ? segments.slice(1) : segments
+}
+
+/**
+ * Пересобирает автоматические строки ВСЕГО счёта на голове цепочки.
+ * Ручные строки не трогает — как и `rebuildAutoCharges`, чьё место она занимает
+ * везде, где бронь может оказаться частью цепочки.
+ *
+ * `frozenBefore` — дата, до которой ночи уже прожиты (обычно дата переезда).
+ * Их строки остаются со своими суммами, а не переоцениваются по сегодняшнему
+ * календарю: тот же приём «замороженных» ночей, что в `planEarlyCheckout`.
+ *
+ * @returns {{ created:number, total:number|null }}
+ */
+async function rebuildChainCharges(headId, { adminId = null, client = prisma, frozenBefore = null, keepIfEmpty = false } = {}) {
+  const { headId: id, segments } = await loadChainSegments(headId, client)
+  if (segments.length === 0) return { created: 0, total: null }
+  await loadSegmentRates(segments, client)
+
+  const hotel = await client.hotelSettings.findUnique({ where: { id: 1 } })
+  const pricingBase = hotel?.pricingBase || 'person'
+
+  // Услуги — текущего (последнего) отрезка: при переезде они ПЕРЕЕЗЖАЮТ на
+  // продолжение, поэтому набор ровно один на всю цепочку.
+  const last = segments[segments.length - 1]
+  const bookingServices = await client.bookingService.findMany({
+    where: { bookingId: last.booking.id },
+    include: { service: true },
+    orderBy: { id: 'asc' },
+  })
+
+  const all = await client.bookingCharge.findMany({ where: { bookingId: id } })
+  const manual = all.filter((c) => c.source === 'manual')
+  const priced = segmentsToPrice(segments, manual)
+
+  const cut = frozenBefore ? toUTCDate(frozenBefore).getTime() : null
+  const keptAuto = cut === null ? [] : all.filter((c) => (
+    c.source === 'auto' && c.kind === 'stay' && c.date && toUTCDate(c.date).getTime() < cut
+  ))
+  const keptIds = new Set(keptAuto.map((c) => c.id))
+  const dropIds = all.filter((c) => c.source === 'auto' && !keptIds.has(c.id)).map((c) => c.id)
+
+  // «Уже посчитанные» строки для генератора: ручные + сохранённые прожитые ночи.
+  // Ночь без строки (цены на неё не было) закрываем заглушкой на 0 — иначе
+  // генератор выдумает ей сегодняшнюю цену.
+  const frozen = [...manual, ...keptAuto]
+  if (cut !== null) {
+    const covered = new Set(frozen.filter((c) => c.kind === 'stay' && c.date).map((c) => dateKey(c.date)))
+    for (const seg of priced) {
+      for (const night of nightsOf(seg.booking.checkIn, seg.booking.checkOut)) {
+        if (night.getTime() >= cut) continue
+        const key = dateKey(night)
+        if (covered.has(key)) continue
+        frozen.push({ kind: 'stay', date: night, amount: 0 })
+        covered.add(key)
+      }
+    }
+  }
+
+  const built = buildAutoChargesDetailed({
+    booking: last.booking,
+    pricingBase,
+    bookingServices,
+    manualCharges: frozen,
+    segments: priced,
+  })
+  // Подстраховка: прожитые ночи не переоцениваем даже если генератор их выдал
+  const rows = cut === null
+    ? built.rows
+    : built.rows.filter((r) => !(r.kind === 'stay' && r.date && r.date.getTime() < cut))
+
+  if (dropIds.length > 0) {
+    await client.bookingCharge.deleteMany({ where: { id: { in: dropIds } } })
+  }
+  if (rows.length > 0) {
+    await client.bookingCharge.createMany({
+      data: rows.map((r) => ({ ...r, bookingId: id, source: 'auto', createdById: adminId })),
+    })
+  }
+
+  // Замороженным ночам обновляем ТОЛЬКО подпись: они были посчитаны, когда бронь
+  // ещё была одиночной («Проживание · 2 взр.»), а в счёте цепочки без номера уже
+  // не видно, за какую комнату ночь. Суммы не трогаем — их переоценка и есть то,
+  // от чего заморозка защищает.
+  if (segments.length > 1 && keptAuto.length > 0) {
+    for (const seg of segments) {
+      const from = toUTCDate(seg.booking.checkIn).getTime()
+      const to = toUTCDate(seg.booking.checkOut).getTime()
+      const label = stayLabel({
+        pricingBase,
+        counts: guestCounts(seg.booking),
+        roomNumber: seg.roomNumber,
+        categoryName: seg.categoryName,
+        qualified: true,
+      })
+      for (const c of keptAuto) {
+        const t = toUTCDate(c.date).getTime()
+        if (t < from || t >= to || c.label === label) continue
+        await client.bookingCharge.update({ where: { id: c.id }, data: { label } })
+      }
+    }
+  }
+
+  const totals = await recalcBookingTotals(id, { client, keepIfEmpty })
+  return { created: rows.length, total: totals ? totals.total : null }
+}
+
 // ─── Планы счёта при отмене и раннем выезде ──────────────────────────────────
 //
 // «План» — чистый ответ на вопрос «какими станут строки после действия»: что
@@ -480,7 +724,7 @@ function planCancelCharges(charges) {
  *   `keep` — строки, которые остаются как есть; `dropIds` — id снимаемых;
  *   `create` — новые авто-строки (без id, без bookingId).
  */
-function planEarlyCheckout({ booking, charges, newCheckOut, pricingBase, ratesByDate, bookingServices }) {
+function planEarlyCheckout({ booking, charges, newCheckOut, pricingBase, ratesByDate, bookingServices, segments = null }) {
   if (charges.length === 0) return { keep: charges, dropIds: [], create: [], untouched: true }
 
   const cutTime = toUTCDate(newCheckOut).getTime()
@@ -499,19 +743,36 @@ function planEarlyCheckout({ booking, charges, newCheckOut, pricingBase, ratesBy
   // процентной скидки — ровно то, что нужно.
   const frozen = keep.filter((c) => c.source === 'manual' || c.kind === 'stay')
   const covered = new Set(frozen.filter((c) => c.kind === 'stay' && c.date).map((c) => dateKey(c.date)))
+
+  // Ранний выезд из ЦЕПОЧКИ: укорачивается только последний отрезок — тот, в котором
+  // гость сейчас живёт. Предыдущие отрезки прожиты целиком и в план входят как есть,
+  // иначе питание пересчиталось бы по числу ночей одного номера вместо всей цепочки.
+  const base = (Array.isArray(segments) && segments.length > 0)
+    ? segments
+    : [{ booking, ratesByDate, roomNumber: null, categoryName: null }]
+  const cut = base.map((s, i) => (i === base.length - 1
+    ? { ...s, booking: { ...s.booking, checkOut: newCheckOut } }
+    : s))
+  const priced = segmentsToPrice(cut, charges)
+
   // Ночь без строки (цена на неё не задана) тоже прожита — заглушка на 0 не даёт
   // генератору выдумать ей цену по сегодняшнему календарю.
-  for (const night of nightsOf(booking.checkIn, newCheckOut)) {
-    const key = dateKey(night)
-    if (!covered.has(key)) frozen.push({ kind: 'stay', date: night, amount: 0 })
+  for (const seg of priced) {
+    for (const night of nightsOf(seg.booking.checkIn, seg.booking.checkOut)) {
+      const key = dateKey(night)
+      if (covered.has(key)) continue
+      frozen.push({ kind: 'stay', date: night, amount: 0 })
+      covered.add(key)
+    }
   }
 
   const create = buildAutoCharges({
-    booking: { ...booking, checkOut: newCheckOut },
+    booking: (priced[priced.length - 1] || cut[cut.length - 1]).booking,
     pricingBase,
     ratesByDate,
     bookingServices,
     manualCharges: frozen,
+    segments: (Array.isArray(segments) && segments.length > 0) ? priced : null,
   }).filter((r) => r.kind !== 'stay')  // подстраховка: прожитые ночи не переоцениваем
 
   return { keep, dropIds, create, untouched: false }
@@ -550,14 +811,48 @@ async function dropAutoChargesOnCancel(bookingId, tx) {
   await recalcBookingTotals(bookingId, { client: tx })
 }
 
-/** Применяет план раннего выезда (см. `planEarlyCheckout`). */
+/**
+ * Контекст плана раннего выезда для брони, которая может быть частью цепочки:
+ * отрезки счёта с их календарями цен и услуги текущего отрезка.
+ * У одиночной брони `segments` — один отрезок, и план считается ровно как раньше.
+ */
+async function loadChainStayContext(booking, newCheckOut, client = prisma) {
+  const { headId, segments } = await loadChainSegments(booking.id, client)
+  if (segments.length === 0) {
+    return { headId: booking.id, segments: null, ...(await loadStayContext(booking, newCheckOut, client)) }
+  }
+  // Последний отрезок укорачивается выездом — его календарь берём по новой дате
+  const last = segments[segments.length - 1]
+  const trimmed = segments.map((s, i) => (i === segments.length - 1
+    ? { ...s, booking: { ...s.booking, checkOut: newCheckOut } } : s))
+  await loadSegmentRates(trimmed, client)
+  // Возвращаем НЕукороченные отрезки с уже загруженными ценами: укорачивает их сам
+  // `planEarlyCheckout` — он же единственный, кто знает, какой отрезок закрывается.
+  segments.forEach((s, i) => { s.ratesByDate = trimmed[i].ratesByDate })
+
+  const hotel = await client.hotelSettings.findUnique({ where: { id: 1 } })
+  const bookingServices = await client.bookingService.findMany({
+    where: { bookingId: last.booking.id },
+    include: { service: true },
+    orderBy: { id: 'asc' },
+  })
+  return {
+    headId,
+    segments,
+    pricingBase: hotel?.pricingBase || 'person',
+    ratesByDate: last.ratesByDate || {},
+    bookingServices,
+  }
+}
+
+/** Применяет план раннего выезда (см. `planEarlyCheckout`). Строки — на голове счёта. */
 async function trimChargesToCheckOut(existing, newCheckOut, tx, adminId) {
-  const bookingId = existing.id
+  const { headId, segments, ...ctx } = await loadChainStayContext(existing, newCheckOut, tx)
+  const bookingId = headId
   const charges = await tx.bookingCharge.findMany({ where: { bookingId } })
   if (charges.length === 0) return null
 
-  const ctx = await loadStayContext(existing, newCheckOut, tx)
-  const plan = planEarlyCheckout({ booking: existing, charges, newCheckOut, ...ctx })
+  const plan = planEarlyCheckout({ booking: existing, charges, newCheckOut, segments, ...ctx })
 
   if (plan.dropIds.length > 0) {
     await tx.bookingCharge.deleteMany({ where: { id: { in: plan.dropIds } } })
@@ -674,10 +969,16 @@ module.exports = {
   nightsOf,
   buildAutoCharges,
   buildAutoChargesDetailed,
+  stayLabel,
   priceNight,
   loadChargeContext,
   loadRateContext,
   rebuildAutoCharges,
+  loadChainSegments,
+  loadSegmentRates,
+  segmentsToPrice,
+  loadChainStayContext,
+  rebuildChainCharges,
   recalcBookingTotals,
   pinLegacyTotal,
   LEGACY_TOTAL_LABEL,

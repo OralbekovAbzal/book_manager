@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import type { AdminForm, FieldErrors, StaffDraft, StaffInput, StaffRole } from './setupModel'
+import type { AdminForm, FieldErrors, StaffDraft, StaffInput } from './setupModel'
 import { emptyStaff, newStaffKey, validateStaff } from './setupModel'
 import { PASSWORD_HINT, ROLE_LABELS } from './accountRules'
 import { Field, StepHeading, hintStyle, linkBtn, wizardInput, wizardSecondary } from './setupUi'
@@ -51,11 +51,13 @@ export const StepUsers: React.FC<Props> = ({ staff, admin, onAdd, onRemove }) =>
           <Field label="Пароль" error={errors.password} hint={PASSWORD_HINT}>
             <input type={showPasswords ? 'text' : 'password'} value={draft.password} onChange={e => patch({ password: e.target.value })} style={wizardInput} autoComplete="new-password" />
           </Field>
-          <Field label="Роль">
-            <select value={draft.role} onChange={e => patch({ role: e.target.value as StaffRole })} style={wizardInput}>
-              <option value="STAFF">{ROLE_LABELS.STAFF}</option>
-              <option value="ADMIN">{ROLE_LABELS.ADMIN}</option>
-            </select>
+          {/* Выбора роли больше нет: ролей две, и вторая — главный администратор,
+              которого мастер заводит отдельным шагом. Поле оставлено показом,
+              чтобы в списке добавленных подпись роли не появлялась «из ниоткуда». */}
+          <Field label="Роль" hint="Полный доступ, кроме управления пользователями и лицензией">
+            <div style={{ ...wizardInput, background: 'var(--surface-2)', color: 'var(--text-muted)' }}>
+              {ROLE_LABELS.ADMIN}
+            </div>
           </Field>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>

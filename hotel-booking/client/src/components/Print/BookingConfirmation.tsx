@@ -2,6 +2,7 @@ import React from 'react'
 import { differenceInCalendarDays, parseISO } from 'date-fns'
 import type { Booking } from '../../types'
 import type { BookingMoney } from '../../api/payments'
+import { chainCheckOut, chainRoomsLabel } from '../../utils/bookingAccount'
 import {
   DocBlock, DocHeader, DocPrintedAt, DocRow, DocSigner,
   INK, INK_SOFT, docDate, docMoney, docTitle,
@@ -42,8 +43,11 @@ interface Props {
 export const BookingConfirmation: React.FC<Props> = ({ booking, hotel, money, printedAt }) => {
   const cur = hotel.currency
 
+  // Даты и номера — по всей цепочке: после переезда счёт один, и гостю нужен
+  // документ на всё проживание, а не на его первую половину.
+  const checkOut = chainCheckOut(booking)
   const nights = differenceInCalendarDays(
-    parseISO(booking.checkOut.slice(0, 10)),
+    parseISO(checkOut.slice(0, 10)),
     parseISO(booking.checkIn.slice(0, 10)),
   )
 
@@ -68,9 +72,12 @@ export const BookingConfirmation: React.FC<Props> = ({ booking, hotel, money, pr
   const due = money ? money.due : charged - (booking.paidAmount ?? 0)
   const prepaid = booking.prepaidAmount ?? 0
 
+  const rooms = chainRoomsLabel(booking)
   const roomLine = [
-    booking.room?.number ? `№ ${booking.room.number}` : '',
-    booking.room?.category?.name || '',
+    rooms ? `№ ${rooms}` : '',
+    // Категория — только у брони без переездов: у цепочки их несколько, и одна
+    // подпись на все номера была бы неправдой.
+    (booking.continuations?.length ?? 0) === 0 ? (booking.room?.category?.name || '') : '',
   ].filter(Boolean).join(' · ')
 
   return (
@@ -91,7 +98,7 @@ export const BookingConfirmation: React.FC<Props> = ({ booking, hotel, money, pr
 
       <DocBlock title="Проживание">
         <DocRow label="Заезд" value={docDate(booking.checkIn)} strong />
-        <DocRow label="Выезд" value={docDate(booking.checkOut)} strong />
+        <DocRow label="Выезд" value={docDate(checkOut)} strong />
         <DocRow label="Ночей" value={String(nights)} />
         {roomLine && <DocRow label="Номер" value={roomLine} />}
       </DocBlock>

@@ -1,5 +1,5 @@
 import api from './client'
-import type { Allotment, AllotmentRelease } from '../types'
+import type { Allotment } from '../types'
 
 export interface AllotmentFilters {
   partnerId?: number
@@ -40,17 +40,9 @@ export async function deleteAllotment(id: number): Promise<void> {
   await api.delete(`/allotments/${id}`)
 }
 
-export interface CreateReleasePayload {
-  dateFrom: string
-  dateTo: string
-  reason?: string
-}
-
-export async function createRelease(allotmentId: number, payload: CreateReleasePayload): Promise<AllotmentRelease> {
-  const { data } = await api.post(`/allotments/${allotmentId}/releases`, payload)
-  return data.data
-}
-
-export async function deleteRelease(id: number): Promise<void> {
-  await api.delete(`/allotments/releases/${id}`)
-}
+// Релизы (частичное освобождение квоты) из поставки убраны решением владельца
+// (docs/decisions/bookings.md, 2026-09-08): интерфейса у них не было, роутов на
+// сервере больше нет. Модель `Release` осталась на вырост, и существующие записи
+// проверка квоты по-прежнему учитывает — поэтому поле `releases` в `Allotment`
+// сохранено, а функции `createRelease`/`deleteRelease` удалены: они звали
+// несуществующие эндпоинты.

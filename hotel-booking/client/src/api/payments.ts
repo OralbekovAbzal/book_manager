@@ -73,6 +73,13 @@ export interface DebtRow {
   prepaidAmount: number
   paidAmount: number
   room: { id: number; number: string; building: string } | null
+  /**
+   * Номера всей цепочки строкой: «12 → 15» у гостя, который переезжал.
+   * Продолжения отдельными строками в долгах не приходят — счёт один, и в кассе
+   * он одна строка (data-and-money.md). Для брони без переездов равен номеру
+   * из `room`; поле необязательное — старый сервер его не отдаёт.
+   */
+  rooms?: string | null
   charged: number
   chargesFromRows: boolean
   paid: number

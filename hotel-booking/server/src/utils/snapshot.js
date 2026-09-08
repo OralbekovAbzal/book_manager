@@ -159,6 +159,10 @@ const BOOKING_FIELDS = [
   'disabledChildren', 'discountPercent', 'prepaymentPercent', 'totalAmount',
   'prepaidAmount', 'paidAmount', 'flags', 'partnerId', 'shiftId', 'adminId',
   'actualCheckInAt', 'actualCheckOutAt',
+  // Счёт цепочки и «продана поверх квоты» (волна 5b). Без accountBookingId откат
+  // разорвал бы связь продолжения с головой: деньги остались бы на одной броне,
+  // а вторая стала бы отдельной с нулями — молча, как раньше с паспортами.
+  'accountBookingId', 'allotmentOverride',
   'createdAt', 'updatedAt',
 ]
 // actualCheckInAt/actualCheckOutAt — настоящие timestamp'ы: в JSON снимка они лежат
@@ -291,6 +295,20 @@ async function prepareRestore(id, adminId = null) {
     bookingRows.push(row)
   }
   const keptBookingIds = new Set(bookingRows.map(r => r.id))
+
+  // Второй проход по самоссылке счёта: голова могла не восстановиться (её номер
+  // удалён), и ссылка на несуществующую бронь уронила бы вставку по внешнему ключу.
+  // Обнуляем — как для partnerId выше: продолжение без головы становится обычной
+  // бронью с нулями, но остаётся в базе. Порядок строк тут ни при чём: голова
+  // всегда старше продолжения по id, а вставка идёт в порядке id.
+  for (const row of bookingRows) {
+    if (row.accountBookingId != null && !keptBookingIds.has(row.accountBookingId)) {
+      row.accountBookingId = null
+    }
+  }
+  // Вставка идёт пачками по INSERT_CHUNK строк, и самоссылка обязана попасть в ту же
+  // пачку или позже головы. Голова всегда старше по id — порядок по id это гарантирует.
+  bookingRows.sort((a, b) => a.id - b.id)
 
   // ── Начисления ──
   const chargeRows = []

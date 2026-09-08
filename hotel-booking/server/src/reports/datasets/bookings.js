@@ -72,11 +72,23 @@ const fields = {
   createdAt:     { label: 'Создана',     type: 'datetime' },
   createdDate:   { label: 'Дата создания', type: 'date', groupable: true },
   notes:         { label: 'Примечание',  type: 'text' },
+  // Цепочка после переезда: продолжение остаётся строкой реестра (гость жил в этом
+  // номере эти ночи), но деньги у него нулевые — они на голове счёта. Поэтому
+  // агрегаты «Броней», «Средний чек», «Доля отмен» считаются по головам: иначе
+  // переезд задирал бы число броней и вдвое занижал средний чек.
+  isContinuation:{ label: 'Продолжение счёта', type: 'bool', groupable: true,
+                   description: 'Да — вторая (или следующая) часть брони после переезда; деньги на голове счёта' },
+  accountOf:     { label: 'Счёт брони',  type: 'text',
+                   description: 'Номер брони-головы, если это продолжение после переезда' },
   count:         { label: 'Броней',      type: 'int', synthetic: true },
 }
 
 const metrics = {
-  count:        { label: 'Броней',                 expr: 'count()',                    type: 'int' },
+  // Счётчики броней — по головам: продолжение после переезда это часть той же
+  // брони, и считать его отдельной значит завысить число броней и вдвое занизить
+  // средний чек (деньги цепочки лежат на голове, у продолжения нули).
+  count:        { label: 'Броней',                 expr: 'countIf(isContinuation = false)', type: 'int',
+                  description: 'Продолжения после переезда не считаются: это части одной брони' },
   nights:       { label: 'Ночей',                  expr: 'sum(nights)',                type: 'int' },
   avgNights:    { label: 'Средняя длина, ночей',   expr: 'avg(nights)',                type: 'number', decimals: 1 },
   guests:       { label: 'Гостей',                 expr: 'sum(guests)',                type: 'int' },
@@ -89,11 +101,11 @@ const metrics = {
   debtOnly:     { label: 'Долг (без переплат)',    expr: 'sumIf(debtAmount, debtAmount > 0)', type: 'money', decimals: 0,
                   description: 'Переплаты не гасят чужой долг' },
   debtors:      { label: 'Должников',              expr: 'countIf(debtAmount > 0)',    type: 'int' },
-  avgCheck:     { label: 'Средний чек',            expr: 'sum(totalAmount) / count()', type: 'money', decimals: 0 },
-  cancelled:    { label: 'Отменено',               expr: "countIf(status = 'CANCELLED')", type: 'int' },
-  cancelRate:   { label: 'Доля отмен, %',          expr: "countIf(status = 'CANCELLED') / count() * 100", type: 'percent', decimals: 1,
+  avgCheck:     { label: 'Средний чек',            expr: 'sum(totalAmount) / countIf(isContinuation = false)', type: 'money', decimals: 0 },
+  cancelled:    { label: 'Отменено',               expr: "countIf(status = 'CANCELLED' and isContinuation = false)", type: 'int' },
+  cancelRate:   { label: 'Доля отмен, %',          expr: "countIf(status = 'CANCELLED' and isContinuation = false) / countIf(isContinuation = false) * 100", type: 'percent', decimals: 1,
                   description: 'Считайте с включёнными отменёнными бронями' },
-  noShowRate:   { label: 'Доля незаездов, %',      expr: "countIf(status = 'NO_SHOW') / count() * 100", type: 'percent', decimals: 1 },
+  noShowRate:   { label: 'Доля незаездов, %',      expr: "countIf(status = 'NO_SHOW' and isContinuation = false) / countIf(isContinuation = false) * 100", type: 'percent', decimals: 1 },
 }
 
 /**
@@ -126,6 +138,9 @@ async function load({ params }) {
       adultsWithMeals: true, childrenWithMeals: true, adultsNoMeals: true, childrenNoMeals: true,
       extraBedsWithMeals: true, extraBedsNoMeals: true, disabledAdults: true, disabledChildren: true,
       discountPercent: true, totalAmount: true, prepaidAmount: true, paidAmount: true,
+      // Голова счёта: по ней `loadBookingMoney` берёт деньги цепочки, а реестр
+      // помечает продолжение и не считает его отдельной бронью
+      accountBookingId: true,
       createdAt: true,
       room: { select: { number: true, building: true, floor: true, capacity: true, features: true, category: { select: { name: true } } } },
       partner: { select: { name: true, commissionPercent: true } },
@@ -138,8 +153,14 @@ async function load({ params }) {
   // а не по запросу на бронь: отчёт за год это сотни строк.
   const money = await loadBookingMoney(rows)
 
+  // Деньги цепочки лежат на голове, и `loadBookingMoney` отдаёт их КАЖДОМУ отрезку —
+  // это верно для формы брони («сколько должен гость»), но не для реестра: там
+  // `sum(charged)` сложил бы один и тот же счёт по разу на каждый переезд. Поэтому
+  // в отчётах у продолжения деньги нулевые, а «чей это счёт» видно в `accountOf`.
+  const ZERO_MONEY = { charged: 0, chargesFromRows: true, paid: 0, due: 0 }
+
   return rows.map((b) => {
-    const m = money.get(b.id)
+    const m = b.accountBookingId != null ? ZERO_MONEY : money.get(b.id)
     const adults = b.adultsWithMeals + b.adultsNoMeals + b.disabledAdults
     const children = b.childrenWithMeals + b.childrenNoMeals + b.disabledChildren
     const extraBeds = b.extraBedsWithMeals + b.extraBedsNoMeals
@@ -183,6 +204,8 @@ async function load({ params }) {
       createdAt: b.createdAt,
       createdDate: isoDate(b.createdAt),
       notes: b.notes || '',
+      isContinuation: b.accountBookingId != null,
+      accountOf: b.accountBookingId != null ? `№${b.accountBookingId}` : '',
       count: 1,
     }
   })

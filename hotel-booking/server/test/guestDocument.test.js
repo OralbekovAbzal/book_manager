@@ -53,6 +53,11 @@ function room(id) {
 const CREATE_DEFAULTS = {
   partnerId: null,
   partner: null,
+  // Волна 5b: счёт цепочки и «продана поверх квоты». Продолжение переезда — тот же
+  // гость с тем же документом, поэтому поля живут рядом с паспортными.
+  // `account`/`continuations` вычисляет `fakePrisma` по `accountBookingId`.
+  accountBookingId: null,
+  allotmentOverride: false,
   actualCheckInAt: null,
   actualCheckOutAt: null,
   room: room(101),
@@ -141,6 +146,10 @@ function loadBookingCtrl({ bookings = [] } = {}) {
       },
       '../utils/charges': {
         rebuildAutoCharges: async () => {},
+        // Волна 5b: переезд фиксирует прежний итог и пересобирает счёт цепочки.
+        // Здесь проверяются поля документа гостя, а не деньги — обе пустые.
+        pinLegacyTotal: async () => null,
+        rebuildChainCharges: async () => ({ created: 0, total: null }),
         recalcBookingTotals: async () => {},
         chargeInputsChanged: () => false,
         toUTCDate: (v) => v,

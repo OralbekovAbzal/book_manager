@@ -34,7 +34,6 @@ import { SetupWizard } from './components/Setup/SetupWizard'
 const ROLE_LABELS: Record<string, string> = {
   SUPER_ADMIN: 'Главный администратор',
   ADMIN: 'Администратор',
-  STAFF: 'Сотрудник',
 }
 
 export const App: React.FC = () => {

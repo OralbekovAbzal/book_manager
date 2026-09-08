@@ -70,6 +70,18 @@ interface GridStore {
   openMaintenanceModal: (roomId: number, checkIn: string, checkOut: string) => void
   openEditModal: (booking: GridBooking) => void
   openViewModal: (booking: GridBooking) => void
+  /** Бронь из уже загруженной сетки по id (null — её нет в текущем окне дат). */
+  findBooking: (id: number) => GridBooking | null
+  /**
+   * Текущий (последний) отрезок цепочки переезда.
+   *
+   * После переезда голова закрыта (`CHECKED_OUT`) и сервер её править не даёт:
+   * «Редактировать» на ней должно открывать ту часть, в которой гость живёт
+   * сейчас. Ищем по сетке (`accountBookingId` есть у каждой полоски) — лишнего
+   * запроса не нужно. Если продолжение вне видимого окна дат, возвращаем саму
+   * бронь: сервер откажет с внятным текстом, и это честнее, чем угадывать.
+   */
+  currentSegment: (booking: GridBooking) => GridBooking
   openMoveModal: (booking: GridBooking, newRoomId: number, moveDate: string) => void
   closeModal: () => void
   openContextMenu: (booking: GridBooking, x: number, y: number) => void
@@ -196,6 +208,34 @@ export const useGridStore = create<GridStore>((set, get) => ({
 
   openViewModal: (booking) =>
     set({ modal: { open: true, mode: 'view', booking }, contextMenu: null }),
+
+  findBooking: (id) => {
+    const data = get().data
+    if (!data) return null
+    for (const cat of data.categories) {
+      for (const room of cat.rooms) {
+        const hit = room.bookings.find(b => b.id === id)
+        if (hit) return hit
+      }
+    }
+    return null
+  },
+
+  currentSegment: (booking) => {
+    const data = get().data
+    // У продолжения своих продолжений не бывает: цепочка плоская, все части
+    // ссылаются на голову. Значит искать надо только для головы.
+    if (!data || booking.accountBookingId != null) return booking
+    let last = booking
+    for (const cat of data.categories) {
+      for (const room of cat.rooms) {
+        for (const b of room.bookings) {
+          if (b.accountBookingId === booking.id && b.checkOut > last.checkOut) last = b
+        }
+      }
+    }
+    return last
+  },
 
   openMoveModal: (booking, newRoomId, moveDate) =>
     set({ modal: { open: true, mode: 'move', booking, moveTargetRoomId: newRoomId, moveDate } }),

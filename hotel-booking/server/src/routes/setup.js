@@ -8,7 +8,10 @@ const { passwordRule } = require('../utils/passwordPolicy')
 // Подключается в app.js: app.use('/api/setup', apiLimiter, setupRoutes)
 
 const USERNAME_RE = /^[a-z0-9._-]+$/
-const STAFF_ROLES = ['ADMIN', 'STAFF']
+// Мастер первого запуска заводит только ADMIN: роль STAFF убрана решением 2026-09-08
+// (`docs/decisions/interface.md`). Список оставлен списком — вторая роль сюда вернётся
+// раньше, чем исчезнет сама проверка.
+const STAFF_ROLES = ['ADMIN']
 
 function usernameRule(field) {
   return body(field)
@@ -47,7 +50,7 @@ const completeRules = [
   usernameRule('users.*.username'),
   nameRule('users.*.name', 'Сотрудник'),
   passwordFor('users.*.password'),
-  body('users.*.role').isIn(STAFF_ROLES).withMessage("Роль сотрудника: 'ADMIN' или 'STAFF'"),
+  body('users.*.role').isIn(STAFF_ROLES).withMessage("Роль сотрудника: 'ADMIN'"),
 ]
 
 router.get('/status', ctrl.status)

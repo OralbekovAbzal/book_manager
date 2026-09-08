@@ -137,6 +137,12 @@ const BOOKING_DEFAULTS = {
   flags: [],
   partnerId: null,
   partner: null,
+  // Волна 5b: счёт цепочки и «продана поверх квоты». У обычной брони — голова
+  // сама себе (`null`) и вопрос про квоту не задавали. Сами связи `account` и
+  // `continuations` в фикстуре НЕ лежат: их вычисляет `fakePrisma` по
+  // `accountBookingId`, иначе у одной брони было бы две правды о цепочке.
+  accountBookingId: null,
+  allotmentOverride: false,
   shiftId: 1,
   adminId: 1,
   createdBy: { id: 1, name: 'Админ' },

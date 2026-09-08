@@ -512,6 +512,23 @@ function calcMetrics(layout, S) {
 }
 
 /**
+ * Номера, у которых в горизонте планирования есть квота партнёра.
+ *
+ * Релизы здесь НЕ учитываются намеренно: квота с дырой всё равно остаётся
+ * обещанием партнёру, а оптимизатор двигает брони пачками и «попасть ровно в
+ * освобождённые дни» он не проверяет. Осторожнее — дешевле, чем объяснять
+ * партнёру занятый номер.
+ */
+async function loadQuotaRoomIds(todayUTC, horizonMs) {
+  const to = Number.isFinite(horizonMs) ? new Date(horizonMs) : null
+  const rows = await prisma.allotment.findMany({
+    where: { dateTo: { gt: todayUTC }, ...(to ? { dateFrom: { lt: to } } : {}) },
+    select: { roomId: true },
+  })
+  return new Set(rows.map((a) => a.roomId))
+}
+
+/**
  * POST /api/occupancy/optimize
  * body: { settings: OptimizerSettings }
  */
@@ -558,8 +575,19 @@ async function optimize(req, res, next) {
       },
     })
 
+    // 2b. Номера под квотой партнёра в горизонте планирования.
+    //
+    // Оптимизатор их НЕ ТРОГАЕТ — ни в них, ни из них (решение 2026-09-08,
+    // `docs/decisions/bookings.md`). Квота это обещание партнёру, а не свойство
+    // раскладки: въехать в неё автоматически значит нарушить договорённость,
+    // о которой алгоритм ничего не знает; вывезти из неё чужую бронь — тем более
+    // (её туда положили осознанно, поверх квоты). Проверка обязана быть и здесь,
+    // и в `apply()`: без второй устаревший план всё равно въедет в квоту (D3-008).
+    const quotaRoomIds = await loadQuotaRoomIds(todayUTC, horizonMs)
+
     const roomsByCategory = new Map()
     for (const r of rooms) {
+      if (quotaRoomIds.has(r.id)) continue  // не целевой: сюда оптимизатор не селит
       if (!roomsByCategory.has(r.category.id)) roomsByCategory.set(r.category.id, [])
       roomsByCategory.get(r.category.id).push(r)
     }
@@ -617,6 +645,8 @@ async function optimize(req, res, next) {
       const isMovable =
         b.status === 'CONFIRMED' &&
         b.source !== 'ремонт' &&
+        // Бронь в квотном номере — якорь: её туда положили осознанно, поверх квоты
+        !quotaRoomIds.has(b.roomId) &&
         item.checkInMs >= todayUTC.getTime() &&
         inHorizon &&
         !hasProtectedFlag &&
@@ -788,6 +818,11 @@ async function applyOptimization(req, res, next) {
     const bookingById = new Map(bookings.map(b => [b.id, b]))
     const roomById = new Map(rooms.map(r => [r.id, r]))
 
+    // Квоты проверяем ЗАНОВО, а не доверяем плану: между расчётом и применением
+    // партнёру могли выделить номер, и устаревший план въехал бы в квоту (D3-008).
+    // Горизонт здесь не нужен — сравниваем с датами самих ходов.
+    const quotaRoomIds = await loadQuotaRoomIds(todayUTC, Infinity)
+
     const stale = []
     for (const { bookingId, toRoomId } of parsed) {
       const b = bookingById.get(bookingId)
@@ -801,6 +836,9 @@ async function applyOptimization(req, res, next) {
       else if (!room) reason = 'целевой номер не найден'
       else if (!room.isActive) reason = `номер №${room.number} деактивирован`
       else if (room.categoryId !== b.room.categoryId) reason = `номер №${room.number} другой категории`
+      // Квота — обещание партнёру, а не свойство раскладки: ни въехать, ни выехать
+      else if (quotaRoomIds.has(toRoomId)) reason = `номер №${room.number} выделен партнёру — оптимизатор его не занимает`
+      else if (quotaRoomIds.has(b.roomId)) reason = 'бронь стоит в номере, выделенном партнёру — её не перемещаем'
       if (reason) stale.push({ bookingId, guestName: b.guestName, reason })
     }
     if (stale.length > 0) {

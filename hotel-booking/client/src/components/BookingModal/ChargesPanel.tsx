@@ -5,7 +5,6 @@ import {
 } from '../../api/charges'
 import type { BookingCharge, ChargeKind, ChargePayload } from '../../api/charges'
 import type { Booking } from '../../types'
-import { useAuthStore } from '../../store/useAuthStore'
 
 /**
  * Строки начислений брони: что начислено, откуда взялось и что правил администратор.
@@ -48,10 +47,10 @@ const emptyDraft = {
 }
 
 export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }) => {
-  const admin = useAuthStore(s => s.admin)
-  // Штраф на закрытой брони — действие администратора, а не стойки.
-  const canAddOnClosed = !!readOnly && (admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN')
-  const canAdd = !readOnly || canAddOnClosed
+  // Штраф на закрытой брони доступен любому вошедшему: ролей осталось две, и
+  // обе администраторские (interface.md, 2026-09-08). Проверка «SUPER_ADMIN или
+  // ADMIN» писалась ради STAFF и стала тождественно истинной.
+  const canAddOnClosed = !!readOnly
   const [charges, setCharges] = useState<BookingCharge[]>([])
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -302,7 +301,7 @@ export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }
           </div>
         )}
 
-        {canAdd && (adding ? (
+        {adding ? (
           <div style={{ ...editBoxStyle, marginTop: 8 }}>
             <select
               value={draft.kind}
@@ -361,7 +360,7 @@ export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }
           }}>
             + Добавить строку
           </button>
-        ))}
+        )}
       </div>
     </div>
   )

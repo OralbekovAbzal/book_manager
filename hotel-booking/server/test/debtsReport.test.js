@@ -30,6 +30,9 @@ const bookingRow = (id, over = {}) => ({
   adultsWithMeals: 2, childrenWithMeals: 0, adultsNoMeals: 0, childrenNoMeals: 0,
   extraBedsWithMeals: 0, extraBedsNoMeals: 0, disabledAdults: 0, disabledChildren: 0,
   discountPercent: 0, totalAmount: 0, prepaidAmount: 0, paidAmount: 0,
+  // Волна 5b: датасет броней получит `isContinuation` — деньги цепочки считаются
+  // по голове, а продолжение в реестре стоит с нулями. Здесь все брони одиночные.
+  accountBookingId: null, allotmentOverride: false,
   createdAt: d('2026-07-01'),
   room: { number: String(100 + id), building: 'A', floor: 1, capacity: '2х', features: [], category: { name: 'Комфорт' } },
   partner: null, createdBy: { name: 'Админ' },

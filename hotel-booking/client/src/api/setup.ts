@@ -7,7 +7,8 @@ import type { Admin, SetupStatus } from '../types'
 export interface SetupCompletePayload {
   hotel: { name: string; city?: string }
   mainAdmin: { username: string; name: string; password: string }
-  users?: Array<{ username: string; name: string; password: string; role: 'ADMIN' | 'STAFF' }>
+  /** Роль только ADMIN: STAFF сервер больше не создаёт (400), см. interface.md */
+  users?: Array<{ username: string; name: string; password: string; role: 'ADMIN' }>
 }
 
 /** Ответ POST /api/setup/complete — те же поля, что у /auth/login (авто-вход). */

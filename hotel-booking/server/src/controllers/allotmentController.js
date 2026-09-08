@@ -166,54 +166,10 @@ async function remove(req, res, next) {
   }
 }
 
-// POST /api/allotments/:id/releases
-async function createRelease(req, res, next) {
-  try {
-    const allotmentId = parseInt(req.params.id)
-    const { dateFrom, dateTo, reason } = req.body
-    if (!dateFrom || !dateTo) return next(createError('Укажите период освобождения', 400))
+// Релизы (частичное освобождение квоты) убраны из поставки решением 2026-09-08
+// (`docs/decisions/bookings.md`): интерфейса у них не было, а квота стала
+// предупреждением при продаже — освобождать её отдельной сущностью больше незачем.
+// Модель `Release` и её учёт в `utils/allotment.js` оставлены: у клиентов данные
+// могут быть, и молча перестать их учитывать значило бы продать чужой номер.
 
-    const allotment = await prisma.allotment.findUnique({ where: { id: allotmentId } })
-    if (!allotment) return next(createError('Квота не найдена', 404))
-
-    const from = new Date(dateFrom)
-    const to   = new Date(dateTo)
-    if (to <= from) return next(createError('Дата окончания должна быть позже даты начала', 400))
-    if (from < allotment.dateFrom || to > allotment.dateTo) {
-      return next(createError('Период освобождения должен быть внутри периода квоты', 400))
-    }
-
-    const release = await prisma.release.create({
-      data: {
-        allotmentId,
-        dateFrom: from,
-        dateTo:   to,
-        reason: reason?.trim() || null,
-      },
-    })
-
-    const { invalidateGridCache } = require('./occupancyController')
-    invalidateGridCache()
-
-    res.status(201).json({ data: release })
-  } catch (err) {
-    next(err)
-  }
-}
-
-// DELETE /api/releases/:id
-async function removeRelease(req, res, next) {
-  try {
-    const id = parseInt(req.params.id)
-    await prisma.release.delete({ where: { id } })
-
-    const { invalidateGridCache } = require('./occupancyController')
-    invalidateGridCache()
-
-    res.json({ message: 'Релиз удалён' })
-  } catch (err) {
-    next(err)
-  }
-}
-
-module.exports = { list, create, update, remove, createRelease, removeRelease }
+module.exports = { list, create, update, remove }

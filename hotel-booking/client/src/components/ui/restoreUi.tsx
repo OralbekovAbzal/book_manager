@@ -51,6 +51,33 @@ export function trimApiHint(text: string, apiField: string): string {
     .trim()
 }
 
+/** То немногое из сводки, что нужно тексту согласия: что именно пропадёт. */
+export interface RestoreLossSummary {
+  payments: RestoreTableImpact | null
+  emptiedTables: { table: string; rows: number }[]
+  unknownTables: string[]
+}
+
+/**
+ * Текст галочки согласия — называет цену вопроса цифрами, а не «данные будут
+ * потеряны». Общий на все диалоги восстановления (раздел копий, мастер первого
+ * запуска): формулировка про потерю денег обязана быть одна.
+ */
+export function restoreConsentLabel(a: RestoreLossSummary): string {
+  const parts: string[] = []
+  if ((a.payments?.lost ?? 0) > 0) {
+    parts.push(`платежей ${a.payments!.lost} на ${formatMoney(a.payments!.lostAmount)}`)
+  }
+  if (a.emptiedTables.length > 0) {
+    const rows = a.emptiedTables.reduce((s, t) => s + t.rows, 0)
+    parts.push(`${a.emptiedTables.length} таблиц целиком (записей ${rows})`)
+  }
+  if (a.unknownTables.length > 0) {
+    parts.push(`данные таблиц, которых нет в этой версии программы (${a.unknownTables.join(', ')})`)
+  }
+  return `Понимаю: будет стёрто ${parts.join(' и ')} — восстановить их будет нечем`
+}
+
 export const impactBoxStyle: React.CSSProperties = {
   marginTop: 14, padding: '10px 12px', background: 'var(--surface)',
   border: '1px solid var(--border-subtle)', borderRadius: 8,

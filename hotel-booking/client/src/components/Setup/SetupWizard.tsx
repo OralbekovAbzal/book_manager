@@ -10,10 +10,14 @@ import { StepHotel } from './StepHotel'
 import { StepAdmin } from './StepAdmin'
 import { StepUsers } from './StepUsers'
 import { StepReview } from './StepReview'
+import { StepRestore } from './StepRestore'
 import { STEP_TITLES, Stepper, wizardPrimary, wizardSecondary } from './setupUi'
 
 interface Props {
-  /** Вызывается после успешного POST /setup/complete и установки сессии. */
+  /**
+   * Вызывается, когда мастер закончен целиком: после `POST /setup/complete`,
+   * установки сессии И шага переноса данных (его можно пропустить).
+   */
   onComplete?: () => void
 }
 
@@ -34,6 +38,12 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
   const [adminErrors, setAdminErrors] = useState<FieldErrors<AdminForm>>({})
   const [submitting, setSubmitting] = useState(false)
   const [serverError, setServerError] = useState<ParsedApiError | null>(null)
+  /**
+   * Настройка сохранена, дальше — предложение перенести данные с прошлого
+   * компьютера. Отдельная фаза, а не пятый шаг: назад к формам отсюда нельзя
+   * (учётная запись уже создана), и в нумерации шагов такому шагу не место.
+   */
+  const [phase, setPhase] = useState<'form' | 'restore'>('form')
 
   const last = STEP_TITLES.length - 1
 
@@ -67,9 +77,11 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
     try {
       const res = await completeSetup(buildPayload(hotel, admin, staff))
       setHotelName(hotel.name.trim())
-      // App увидит admin в сторе и откроет шахматку
+      // Сессия нужна прямо сейчас: загрузка файла копии и восстановление идут
+      // под токеном главного администратора. App шахматку пока не покажет —
+      // мастер остаётся на экране, пока не закончится шаг переноса.
       setSession(res.token, res.admin)
-      onComplete?.()
+      setPhase('restore')
     } catch (e) {
       setServerError(parseApiError(e, 'Не удалось завершить настройку'))
     } finally {
@@ -151,11 +163,16 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
           </div>
         </div>
 
-        <Stepper step={step} />
-
-        {step === 2
-          ? <div>{body}{footer}</div>
-          : <form onSubmit={onFormSubmit} noValidate>{body}{footer}</form>}
+        {phase === 'restore' ? (
+          <StepRestore onDone={() => onComplete?.()} />
+        ) : (
+          <>
+            <Stepper step={step} />
+            {step === 2
+              ? <div>{body}{footer}</div>
+              : <form onSubmit={onFormSubmit} noValidate>{body}{footer}</form>}
+          </>
+        )}
       </div>
     </div>
   )

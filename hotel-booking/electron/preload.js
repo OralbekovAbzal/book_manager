@@ -29,6 +29,11 @@ contextBridge.exposeInMainWorld('appConfig', {
   // обычная загрузка по ссылке не работает.
   saveReportPdf: (options) => ipcRenderer.invoke('report:savePdf', options),
   saveReportFile: (payload) => ipcRenderer.invoke('report:saveFile', payload),
+  // Перенос на новый ноутбук: выбор файла копии нативным диалогом.
+  // В браузере тот же экран берёт файл через <input type="file"> — здесь так
+  // нельзя: File из Electron не отдаёт путь, а имя файла нужно серверу.
+  // → { path, name, content } | null (отмена или файл больше 200 МБ)
+  pickBackupFile: () => ipcRenderer.invoke('backup:pickFile'),
   onUpdateStatus: (cb) => {
     const handler = (_event, status) => cb(status)
     ipcRenderer.on('update:status', handler)

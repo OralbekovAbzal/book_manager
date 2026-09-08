@@ -2,13 +2,19 @@ import { create } from 'zustand'
 import api from '../api/client'
 import type { Admin } from '../types'
 
-/** Почему сервер завершил сессию — payload события `auth:revoked` (socketManager.js). */
-export type SessionEndReason = 'account_disabled' | 'session_revoked' | 'password_changed'
+/**
+ * Почему сессия закончилась. Первые три — payload события `auth:revoked`
+ * (socketManager.js); `restored` приходит не от сервера, а из мастера первого
+ * запуска: после восстановления копии учётные записи в базе — те, что с прошлого
+ * компьютера, и только что созданной среди них нет.
+ */
+export type SessionEndReason = 'account_disabled' | 'session_revoked' | 'password_changed' | 'restored'
 
 const SESSION_END_NOTICE: Record<SessionEndReason, string> = {
   account_disabled: 'Учётная запись отключена администратором',
   session_revoked: 'Сессия завершена: выполнен выход на другом устройстве',
   password_changed: 'Пароль изменён — войдите заново с новым паролем',
+  restored: 'Данные восстановлены из копии — войдите учётной записью с прошлого компьютера',
 }
 
 interface AuthStore {

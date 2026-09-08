@@ -4,9 +4,71 @@ import type { BackupsInfo, BackupResult, RestoreResult } from '../types'
 // Резервные копии базы (JSON-дамп всех таблиц). Сервер: routes/system.js.
 // Смотреть и создавать — SUPER_ADMIN и ADMIN, восстанавливать — только SUPER_ADMIN.
 
-export async function fetchBackups(): Promise<BackupsInfo> {
+// ── Константы и типы объявлены ДО функций: объявленная ниже константа падает при
+// горячей перезагрузке с «is not defined» (временная мёртвая зона). Ловили дважды.
+
+/**
+ * Чем плоха ситуация с копиями. Считает сервер, а не клиент: правило «старше двух
+ * суток» должно быть одно на баннер, раздел и будущие подсказки.
+ * `never` — копий не было вовсе; `stale` — последняя удачная слишком старая;
+ * `fallback` — копия легла в запасную папку на этом же компьютере (флешки нет).
+ */
+export type BackupWarning = 'none' | 'stale' | 'fallback' | 'never'
+
+/** Блок `status` из `GET /api/system/backups` (ADMIN+): с путями, для раздела настроек. */
+export interface BackupStatus {
+  lastOkAt: string | null
+  lastOkPath: string | null
+  /** Текст последней ошибки; у fallback-копии он объясняет, почему писали не туда */
+  lastError: string | null
+  /** Куда копии должны писаться (BACKUP_PATH — флешка) */
+  targetPath: string
+  targetAvailable: boolean
+  /** true — последняя копия ушла не в `targetPath`, а в запасную папку */
+  fallbackUsed: boolean
+  fallbackPath: string | null
+}
+
+/** Блок `backup` из `GET /api/system/status` (любой вошедший, без путей) — для баннера. */
+export interface BackupHealth {
+  lastOkAt: string | null
+  ageHours: number | null
+  warning: BackupWarning
+}
+
+export interface SystemStatus {
+  server: string
+  db: string
+  timestamp: string
+  backup: BackupHealth
+}
+
+/** Список копий вместе со статусом папки; `status` = null на сервере старой сборки. */
+export interface BackupsInfoFull extends BackupsInfo {
+  status: BackupStatus | null
+}
+
+export async function fetchBackups(): Promise<BackupsInfoFull> {
   const { data } = await api.get('/system/backups')
-  return data.data
+  const body = data.data as BackupsInfoFull
+  // Старый сервер статуса не отдаёт. Молчаливое `undefined` в интерфейсе выглядит
+  // как «всё хорошо», поэтому явный null — раздел покажет прежний вид без статуса.
+  return { ...body, status: body.status ?? null }
+}
+
+/**
+ * Состояние сервера + здоровье копий. Роут под `authenticate`, но без роли:
+ * баннер о копиях должен видеть любой вошедший, а пути к папкам — не должен.
+ */
+export async function fetchSystemStatus(): Promise<SystemStatus> {
+  const { data } = await api.get('/system/status')
+  return {
+    server: data.server,
+    db: data.db,
+    timestamp: data.timestamp,
+    // Сервер старой сборки блока не пришлёт — тогда предупреждать не о чем
+    backup: data.backup ?? { lastOkAt: null, ageHours: null, warning: 'none' as const },
+  }
 }
 
 export async function createBackup(): Promise<BackupResult> {
@@ -143,4 +205,98 @@ export function readRestoreFailure(err: unknown, fallback: string): RestoreFailu
       : null
 
   return { message: serverText || fallback, impact }
+}
+
+// ─── Копия с другого компьютера ────────────────────────────────────────────────
+// Перенос на новый ноутбук: файл `backup_*.json` с флешки заливается на сервер,
+// тот кладёт его в свою папку копий и отвечает сводкой последствий. Дальше —
+// обычное восстановление по имени файла (`restoreBackup`).
+
+/** Что вернул `POST /api/system/backup/upload`. */
+export interface BackupUploadResult {
+  /** Имя, под которым сервер сохранил файл в своей папке копий */
+  fileName: string
+  impact: RestoreAssessment
+}
+
+/** Выбранный файл копии: `path` есть только в Electron (нативный диалог). */
+export interface PickedBackupFile {
+  name: string
+  content: string
+  path?: string
+}
+
+/**
+ * Заголовок `X-File-Name` едет в HTTP как ISO-8859-1: кириллица в имени файла
+ * роняет сам запрос (браузер отказывается ставить такой заголовок). Имя нужно
+ * серверу только для узнаваемого имени копии, поэтому небезопасные символы
+ * выкидываем, а совсем пустой результат просто не отправляем — сервер придумает
+ * имя сам.
+ */
+function asciiFileName(name: string): string {
+  // Оставляем только печатные ASCII без кавычек и слешей — заголовку хватит
+  return name.replace(/[^A-Za-z0-9 ._()+-]/g, '').trim().slice(0, 120)
+}
+
+/**
+ * Заливает содержимое файла копии как есть (`Content-Type: application/json`).
+ * Строку axios не пересериализует — тело уходит байт в байт, и сервер разбирает
+ * тот же JSON, что лежал на флешке. Мусор → 400 с текстом сервера.
+ */
+export async function uploadBackup(content: string, fileName: string): Promise<BackupUploadResult> {
+  const safeName = asciiFileName(fileName)
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (safeName) headers['X-File-Name'] = safeName
+  const { data } = await api.post('/system/backup/upload', content, { headers })
+  return data.data
+}
+
+/**
+ * Выбор файла копии. В Electron — нативный диалог главного процесса: окно живёт
+ * на file://, и путь к флешке через обычный `<input type=file>` оттуда не виден.
+ * В браузере (dev, режим клиента) — тот же `<input>` + FileReader.
+ *
+ * `null` — пользователь закрыл диалог. Отмену в вебе ловим двумя способами:
+ * событием `cancel` (Chromium 113+, наш Electron новее) и возвратом фокуса окну —
+ * без второго обещание могло бы не разрешиться никогда и кнопка навсегда
+ * осталась бы в состоянии «Загрузка…».
+ */
+export function pickBackupFile(): Promise<PickedBackupFile | null> {
+  const bridge = typeof window !== 'undefined' ? window.appConfig?.pickBackupFile : undefined
+  if (bridge) return bridge()
+
+  return new Promise((resolve) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'application/json,.json'
+    input.style.display = 'none'
+    document.body.appendChild(input)
+
+    let settled = false
+    const finish = (value: PickedBackupFile | null) => {
+      if (settled) return
+      settled = true
+      window.removeEventListener('focus', onFocus)
+      input.remove()
+      resolve(value)
+    }
+    const onFocus = () => {
+      // Диалог закрылся: фокус вернулся окну. Событие `change` приходит после
+      // фокуса, поэтому даём ему фору, прежде чем считать выбор отменённым.
+      window.setTimeout(() => { if (!input.files?.length) finish(null) }, 500)
+    }
+
+    input.addEventListener('cancel', () => finish(null))
+    input.addEventListener('change', () => {
+      const file = input.files?.[0]
+      if (!file) return finish(null)
+      const reader = new FileReader()
+      reader.onload = () => finish({ name: file.name, content: String(reader.result ?? '') })
+      reader.onerror = () => finish(null)
+      reader.readAsText(file)
+    })
+
+    window.addEventListener('focus', onFocus)
+    input.click()
+  })
 }

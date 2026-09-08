@@ -5,14 +5,17 @@ import { fetchCategories, createCategory } from '../../../api/categories'
 import { fetchAllRooms, createRoom } from '../../../api/roomsAdmin'
 import {
   fetchBackups, createBackup, restoreBackup, fetchBackupImpact, readRestoreFailure,
+  uploadBackup, pickBackupFile,
   type BackupImpact, type RestoreAssessment, type BackupRestoreResult,
+  type BackupsInfoFull, type BackupStatus,
 } from '../../../api/system'
+import { useBackupStatusStore } from '../../../store/useBackupStatusStore'
 import { importRoomFund, type RoomFundImportPayload } from '../../../api/roomFund'
-import type { BackupsInfo, BackupFile } from '../../../types'
+import type { BackupFile } from '../../../types'
 import { formatApiError } from '../../Setup/accountRules'
 import { SectionHeader } from './sectionUi'
 import {
-  MoneyImpactRow, ConsentCheckbox, formatMoney, trimApiHint,
+  MoneyImpactRow, ConsentCheckbox, formatMoney, trimApiHint, restoreConsentLabel,
   impactBoxStyle, impactRowStyle, impactNameStyle, impactValueStyle,
   restoreErrorBoxStyle, dangerBtnStyle, confirmBtnStyle,
 } from '../../ui/restoreUi'
@@ -322,22 +325,6 @@ function formatWhen(iso: string): string {
   })
 }
 
-/** Текст галочки согласия — называет цену вопроса цифрами, а не «данные будут потеряны». */
-function consentLabel(a: RestoreAssessment): string {
-  const parts: string[] = []
-  if ((a.payments?.lost ?? 0) > 0) {
-    parts.push(`платежей ${a.payments!.lost} на ${formatMoney(a.payments!.lostAmount)}`)
-  }
-  if (a.emptiedTables.length > 0) {
-    const rows = a.emptiedTables.reduce((s, t) => s + t.rows, 0)
-    parts.push(`${a.emptiedTables.length} таблиц целиком (записей ${rows})`)
-  }
-  if (a.unknownTables.length > 0) {
-    parts.push(`данные таблиц, которых нет в этой версии программы (${a.unknownTables.join(', ')})`)
-  }
-  return `Понимаю: будет стёрто ${parts.join(' и ')} — восстановить их будет нечем`
-}
-
 function describeRestoreResult(name: string, r: BackupRestoreResult): string {
   const rows = r.restored ?? {}
   let text = `Восстановлено из ${name}: броней ${rows.Booking ?? 0}, номеров ${rows.Room ?? 0}, `
@@ -352,19 +339,91 @@ function describeRestoreResult(name: string, r: BackupRestoreResult): string {
   return text
 }
 
+/**
+ * Состояние папки копий: где лежит последняя удачная копия и что не так.
+ *
+ * Отдельный блок, а не одна строка журнала, ровно из-за переноса на новый
+ * ноутбук: копии должны писаться на флешку, и «флешки нет — пишем на этот же
+ * диск» обязано быть видно в интерфейсе, а не только в `BackupLog.error`.
+ * Цвет — по худшему из признаков, чтобы «всё зелено» не соседствовало с бедой.
+ */
+const BackupTargetStatus: React.FC<{ status: BackupStatus }> = ({ status }) => {
+  const bad = !status.lastOkAt || !status.targetAvailable || status.fallbackUsed
+  return (
+    <div style={{
+      marginTop: 12, padding: '10px 12px', borderRadius: 8, fontSize: '0.9rem', lineHeight: 1.5,
+      background: 'var(--surface-2)',
+      border: `1px solid ${bad ? 'var(--s-out)' : 'var(--border-subtle)'}`,
+      display: 'flex', flexDirection: 'column', gap: 4,
+    }}>
+      <div style={{ color: status.lastOkAt ? 'var(--text)' : 'var(--text-faint)' }}>
+        {status.lastOkAt
+          ? <>Последняя копия: <strong>{formatDateTime(status.lastOkAt)}</strong></>
+          : 'Копий ещё нет.'}
+      </div>
+      {status.lastOkPath && (
+        <div className="mono" style={{ fontSize: '0.8rem', color: 'var(--text-faint)', wordBreak: 'break-all' }}>
+          {status.lastOkPath}
+        </div>
+      )}
+
+      {status.fallbackUsed ? (
+        <div style={{ color: 'var(--s-out)' }}>
+          Копия записана на этот компьютер: папка копий недоступна. Вставьте флешку —
+          при выходе из программы копия запишется на неё.
+        </div>
+      ) : !status.targetAvailable ? (
+        <div style={{ color: 'var(--s-out)' }}>
+          Папка копий недоступна — проверьте, вставлена ли флешка.
+        </div>
+      ) : null}
+
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', wordBreak: 'break-all' }}>
+        Папка копий: <span className="mono">{status.targetPath || '—'}</span>
+        {status.fallbackUsed && status.fallbackPath && (
+          <> · запасная: <span className="mono">{status.fallbackPath}</span></>
+        )}
+      </div>
+      {/* Папку копий меняет системный администратор в окне «Настройка системы»
+          (под своим паролем) — из программы её выбрать нельзя, и обещать этого
+          в интерфейсе не надо. */}
+      <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>
+        Папка задаётся в окне «Настройка системы» при запуске программы.
+      </div>
+
+      {status.lastError && (
+        <div style={{ fontSize: '0.8rem', color: 'var(--s-overdue)', wordBreak: 'break-word' }}>
+          {status.lastError}
+        </div>
+      )}
+    </div>
+  )
+}
+
 const DbBackups: React.FC = () => {
   const { admin } = useAuthStore()
   const canView = admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN'
   const canRestore = admin?.role === 'SUPER_ADMIN'
 
-  const [info, setInfo] = useState<BackupsInfo | null>(null)
+  const [info, setInfo] = useState<BackupsInfoFull | null>(null)
   const [loading, setLoading] = useState(true)
-  // 'create' — идёт создание копии; имя файла — идёт восстановление из него
+  // 'create' — идёт создание копии; 'upload' — загрузка файла с флешки;
+  // имя файла — идёт восстановление из него
   const [busy, setBusy] = useState<string | null>(null)
   const [status, setStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  // Полосу под шапкой держит стор: после копии и восстановления она обязана
+  // погаснуть (или зажечься) сама, без перезагрузки окна.
+  const reloadBackupHealth = useBackupStatusStore(s => s.reload)
 
   // ── Окно подтверждения восстановления ──────────────────────────────────────
   const [confirmFile, setConfirmFile] = useState<BackupFile | null>(null)
+  /**
+   * Копия, только что загруженная с другого компьютера: сводку последствий
+   * сервер вернул прямо в ответе на загрузку. Держим её как запасную — если
+   * `GET /impact` не ответит, окно всё равно покажет цифры и даст восстановить,
+   * иначе перенос упирался бы в тупик на чужом ноутбуке.
+   */
+  const [uploaded, setUploaded] = useState<{ from: string; impact: RestoreAssessment } | null>(null)
   const [impact, setImpact] = useState<BackupImpact | null>(null)
   const [impactLoading, setImpactLoading] = useState(false)
   const [dialogError, setDialogError] = useState('')
@@ -373,6 +432,14 @@ const DbBackups: React.FC = () => {
   const [agreed, setAgreed] = useState(false)
   /** Счётчик попыток: им перезапускаем запрос сводки после сбоя или отказа */
   const [impactAttempt, setImpactAttempt] = useState(0)
+
+  // Закрытие окна одной функцией: сводку загруженного файла надо забыть вместе с
+  // окном, иначе она всплыла бы в следующем подтверждении — уже про другой файл.
+  // Объявлено ДО эффектов, которые её зовут (временная мёртвая зона).
+  const closeConfirm = useCallback(() => {
+    setConfirmFile(null)
+    setUploaded(null)
+  }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -417,11 +484,11 @@ const DbBackups: React.FC = () => {
       if (e.key !== 'Escape') return
       e.stopPropagation()
       // Пока идёт восстановление, закрывать нечего: операция уже в базе
-      if (busy === null) setConfirmFile(null)
+      if (busy === null) closeConfirm()
     }
     document.addEventListener('keydown', handler, true)
     return () => document.removeEventListener('keydown', handler, true)
-  }, [confirmFile, busy])
+  }, [confirmFile, busy, closeConfirm])
 
   if (!canView) {
     return (
@@ -438,8 +505,41 @@ const DbBackups: React.FC = () => {
       const r = await createBackup()
       setStatus({ kind: 'ok', text: `Копия создана: ${r.filename} (${formatSize(r.size)}).` })
       await load()
+      void reloadBackupHealth()
     } catch (e) {
       setStatus({ kind: 'err', text: apiMessage(e,'Не удалось создать копию') })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  /**
+   * Перенос с прошлого компьютера: файл `backup_*.json` с флешки уезжает на
+   * сервер как есть, тот кладёт его в свою папку копий и отвечает сводкой.
+   * Дальше — то же самое окно подтверждения, что и у копий из списка: второго
+   * диалога про потерю денег в программе быть не должно.
+   */
+  const handleUpload = async () => {
+    setStatus(null)
+    let picked: Awaited<ReturnType<typeof pickBackupFile>> = null
+    try {
+      picked = await pickBackupFile()
+    } catch {
+      setStatus({ kind: 'err', text: 'Не удалось прочитать файл копии.' })
+      return
+    }
+    if (!picked) return  // диалог закрыли — это не ошибка
+
+    setBusy('upload')
+    try {
+      const res = await uploadBackup(picked.content, picked.name)
+      setUploaded({ from: picked.name, impact: res.impact })
+      // Файл уже лежит в папке копий сервера, поэтому дальше он ничем не
+      // отличается от остальных: имя, размер и «сейчас» — для шапки окна.
+      setConfirmFile({ name: res.fileName, size: picked.content.length, createdAt: new Date().toISOString() })
+      await load()
+    } catch (e) {
+      setStatus({ kind: 'err', text: apiMessage(e, 'Не удалось загрузить файл копии') })
     } finally {
       setBusy(null)
     }
@@ -450,8 +550,10 @@ const DbBackups: React.FC = () => {
     try {
       const r = await restoreBackup(file.name, { allowDataLoss })
       setConfirmFile(null)
+      setUploaded(null)
       setStatus({ kind: 'ok', text: describeRestoreResult(file.name, r) })
       await load()
+      void reloadBackupHealth()
     } catch (e) {
       // Текст сервера объясняет причину лучше любой нашей заглушки, а сводку
       // последствий он прикладывает прямо к отказу 409 — показываем и её.
@@ -468,8 +570,10 @@ const DbBackups: React.FC = () => {
   }
 
   const last = info?.last ?? null
-  // Сводка из отказа свежее той, что показали до клика (сосед мог принять оплату)
-  const assessment: RestoreAssessment | null = refusal ?? impact
+  const backupStatus = info?.status ?? null
+  // Сводка из отказа свежее той, что показали до клика (сосед мог принять оплату);
+  // сводка загрузки — последний рубеж, когда `GET /impact` не ответил вовсе.
+  const assessment: RestoreAssessment | null = refusal ?? impact ?? uploaded?.impact ?? null
   const needsConsent = assessment?.requiresConfirmation === true
   const restoring = confirmFile !== null && busy === confirmFile.name
   const canSubmit = busy === null && !!assessment && (!needsConsent || agreed)
@@ -485,23 +589,41 @@ const DbBackups: React.FC = () => {
             Вся база целиком: брони, номера, тарифы, пользователи, справочник. Ночная копия — автоматически в 03:00.
           </div>
         </div>
-        <button onClick={handleCreate} disabled={busy !== null} style={primaryBtn}>
-          {busy === 'create' ? 'Создание…' : 'Сделать копию сейчас'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {/* Загрузка файла — только у главного администратора: восстановление
+              всё равно пустит только его, и кнопка вела бы в 403 без объяснений. */}
+          {canRestore && (
+            <button onClick={handleUpload} disabled={busy !== null} style={secondaryBtn}>
+              {busy === 'upload' ? 'Загрузка…' : 'Загрузить файл копии…'}
+            </button>
+          )}
+          <button onClick={handleCreate} disabled={busy !== null} style={primaryBtn}>
+            {busy === 'create' ? 'Создание…' : 'Сделать копию сейчас'}
+          </button>
+        </div>
       </div>
 
-      {/* Последняя копия: когда и удалась ли */}
-      <div style={{
-        marginTop: 12, padding: '8px 12px', borderRadius: 8, fontSize: '0.9rem', lineHeight: 1.5,
-        background: 'var(--surface-2)',
-        color: !last ? 'var(--text-faint)' : last.success ? 'var(--s-in)' : 'var(--s-overdue)',
-      }}>
-        {loading && !info ? 'Загрузка…'
-          : !last ? 'Копий ещё не было.'
-          : last.success
-            ? `Последняя копия: ${formatDateTime(last.createdAt)} — успешно, ${formatSize(last.size)}.`
-            : `Последняя попытка: ${formatDateTime(last.createdAt)} — ошибка${last.error ? `: ${last.error}` : ''}.`}
-      </div>
+      {/* Состояние папки копий. Сервер старой сборки статуса не отдаёт — тогда
+          показываем прежнюю строку журнала, а не пустое место. */}
+      {loading && !info ? (
+        <div style={{
+          marginTop: 12, padding: '8px 12px', borderRadius: 8, fontSize: '0.9rem',
+          background: 'var(--surface-2)', color: 'var(--text-faint)',
+        }}>Загрузка…</div>
+      ) : backupStatus ? (
+        <BackupTargetStatus status={backupStatus} />
+      ) : (
+        <div style={{
+          marginTop: 12, padding: '8px 12px', borderRadius: 8, fontSize: '0.9rem', lineHeight: 1.5,
+          background: 'var(--surface-2)',
+          color: !last ? 'var(--text-faint)' : last.success ? 'var(--s-in)' : 'var(--s-overdue)',
+        }}>
+          {!last ? 'Копий ещё не было.'
+            : last.success
+              ? `Последняя копия: ${formatDateTime(last.createdAt)} — успешно, ${formatSize(last.size)}.`
+              : `Последняя попытка: ${formatDateTime(last.createdAt)} — ошибка${last.error ? `: ${last.error}` : ''}.`}
+        </div>
+      )}
 
       {/* Файлы копий на сервере */}
       {info && info.files.length > 0 && (
@@ -515,7 +637,12 @@ const DbBackups: React.FC = () => {
               <span style={{ fontSize: '0.82rem', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{formatDateTime(f.createdAt)}</span>
               <span style={{ fontSize: '0.82rem', color: 'var(--text-faint)', whiteSpace: 'nowrap', minWidth: 52, textAlign: 'right' }}>{formatSize(f.size)}</span>
               {canRestore && (
-                <button onClick={() => setConfirmFile(f)} disabled={busy !== null} style={{ ...secondaryBtn, padding: '5px 10px', fontSize: '0.82rem' }}>
+                <button
+                  // Сводку прошлой загрузки сбрасываем: она про другой файл
+                  onClick={() => { setUploaded(null); setConfirmFile(f) }}
+                  disabled={busy !== null}
+                  style={{ ...secondaryBtn, padding: '5px 10px', fontSize: '0.82rem' }}
+                >
                   {busy === f.name ? 'Восстановление…' : 'Восстановить'}
                 </button>
               )}
@@ -555,7 +682,7 @@ const DbBackups: React.FC = () => {
           ошибки — вся касса. */}
       {confirmFile && (
         <div
-          onClick={(e) => { if (e.target === e.currentTarget && busy === null) setConfirmFile(null) }}
+          onClick={(e) => { if (e.target === e.currentTarget && busy === null) closeConfirm() }}
           style={{
             position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 600,
             display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16,
@@ -585,6 +712,11 @@ const DbBackups: React.FC = () => {
                   копия текущего состояния. Если вашей учётной записи нет в копии, после
                   восстановления придётся войти под учётной записью из неё.
                 </div>
+                {uploaded && (
+                  <div style={{ fontSize: '0.86rem', color: 'var(--text-faint)', marginTop: 6, wordBreak: 'break-all' }}>
+                    Файл загружен с другого носителя: {uploaded.from}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -592,13 +724,14 @@ const DbBackups: React.FC = () => {
               <div style={{ ...impactBoxStyle, color: 'var(--text-faint)' }}>Считаем последствия…</div>
             )}
 
-            {impact && assessment && !impactLoading && (
+            {assessment && !impactLoading && (
               // Счётчики берём из `assessment`, а не из `impact`: после отказа 409
               // сервер прикладывает пересчитанную сводку, и она свежее показанной
               // до клика. Сводка, разошедшаяся с фактом, хуже её отсутствия.
-              // Из `impact` — только «сколько вернётся»: это свойство файла.
+              // Из `impact` — только «сколько вернётся»: это свойство файла, и у
+              // загруженного файла без ответа `/impact` этих строк просто нет.
               <div style={impactBoxStyle}>
-                {HEADLINE_TABLES.map(t => (
+                {impact && HEADLINE_TABLES.map(t => (
                   <div key={t} style={impactRowStyle}>
                     <span style={impactNameStyle}>{tableLabel(t)}</span>
                     <span style={impactValueStyle}>вернётся <strong>{impact.rows[t] ?? 0}</strong></span>
@@ -626,9 +759,9 @@ const DbBackups: React.FC = () => {
                 )}
                 {/* Про старый формат сервер пишет и сам — в тексте отказа ниже.
                     Своей строкой дублируем его только когда отказа нет. */}
-                {impact.legacyFormat && !showWarning && (
+                {assessment.legacyFormat && !showWarning && (
                   <div style={{ fontSize: '0.82rem', color: 'var(--s-overdue)', paddingTop: 2, lineHeight: 1.45 }}>
-                    Файл старого формата (версия {impact.version}): состав таблиц в нём вёлся
+                    Файл старого формата (версия {assessment.version}): состав таблиц в нём вёлся
                     вручную, кассы и услуг броней он не хранит вовсе.
                   </div>
                 )}
@@ -654,12 +787,12 @@ const DbBackups: React.FC = () => {
 
             {needsConsent && assessment && (
               <ConsentCheckbox checked={agreed} disabled={busy !== null} onChange={setAgreed}>
-                {consentLabel(assessment)}
+                {restoreConsentLabel(assessment)}
               </ConsentCheckbox>
             )}
 
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 20, flexWrap: 'wrap' }}>
-              <button onClick={() => setConfirmFile(null)} disabled={busy !== null} style={secondaryBtn}>
+              <button onClick={closeConfirm} disabled={busy !== null} style={secondaryBtn}>
                 Отмена
               </button>
               {/* Сводку могли не получить (сбой сети, сервер старой сборки) или она

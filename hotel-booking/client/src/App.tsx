@@ -23,7 +23,9 @@ import { PaymentsScreen } from './components/Payments/PaymentsScreen'
 import { NavDrawer, type NavSection } from './components/NavDrawer/NavDrawer'
 import type { ActiveSection } from './components/Settings/SettingsPanel'
 import { useLicenseStore } from './store/useLicenseStore'
+import { useBackupStatusStore } from './store/useBackupStatusStore'
 import { LicenseBanner } from './components/License/LicenseBanner'
+import { BackupBanner } from './components/Backup/BackupBanner'
 import { MaintenanceGateScreen } from './components/License/MaintenanceGateScreen'
 import { fetchBookingFlags } from './api/bookingFlags'
 import { fetchSetupStatus } from './api/setup'
@@ -74,11 +76,20 @@ export const App: React.FC = () => {
     setNavOpen(false)
   }
 
+  // Тот же приём для полосы о резервных копиях: она обязана приводить туда, где
+  // проблему видно целиком (папка копий, последняя копия, загрузка файла).
+  const openBackupSettings = () => {
+    setSettingsSection('backup')
+    setSection('settings')
+    setNavOpen(false)
+  }
+
   // Лицензия — общее состояние: полоса в шапке, раздел настроек и экран
   // блокировки читают один стор.
   const licenseBlock = useLicenseStore(s => s.block)
   const licenseUnblockedAt = useLicenseStore(s => s.unblockedAt)
   const loadLicense = useLicenseStore(s => s.load)
+  const loadBackupStatus = useBackupStatusStore(s => s.load)
 
   // Старт приложения: одновременно узнаём состояние сервера (нужна ли первичная
   // настройка, название отеля) и восстанавливаем сессию по сохранённому токену.
@@ -142,6 +153,14 @@ export const App: React.FC = () => {
     if (!admin) return
     void loadLicense()
   }, [admin, loadLicense])
+
+  // Здоровье резервных копий — рядом с лицензией и по той же причине:
+  // /system/status требует входа. `load` (а не `reload`) возвращает полосу,
+  // если её скрыли крестиком в прошлой сессии окна.
+  useEffect(() => {
+    if (!admin) return
+    void loadBackupStatus()
+  }, [admin, loadBackupStatus, licenseUnblockedAt])
 
   // Метки броней — источник истины в БД. Подгружаем в стор, чтобы все потребители
   // (грид, модалка, оптимизатор) читали актуальные определения с эффектами.
@@ -269,6 +288,10 @@ export const App: React.FC = () => {
       {/* Полоса лицензии — под шапкой и над любым разделом: она про программу
           целиком, а не про шахматку, поэтому в обвязку сетки не входит. */}
       <LicenseBanner onOpen={openLicenseSettings} />
+
+      {/* Полоса о резервных копиях — там же и по той же причине: копии про
+          программу целиком. Показывается только когда сервер сообщил о беде. */}
+      <BackupBanner onOpen={openBackupSettings} />
 
       {/* Шахматка со своей обвязкой: панель дат, фильтры и строка состояния
           принадлежат именно ей, поэтому уходят вместе с ней. */}

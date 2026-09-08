@@ -6,4 +6,6 @@ contextBridge.exposeInMainWorld('settingsApi', {
   pickFolder: (title) => ipcRenderer.invoke('config:pickFolder', title),
   test: (url) => ipcRenderer.invoke('config:test', url),
   apply: (payload) => ipcRenderer.invoke('config:apply', payload),
+  // Проверить прямо здесь, что копия в выбранную папку пишется
+  backupNow: () => ipcRenderer.invoke('system:backupNow'),
 })

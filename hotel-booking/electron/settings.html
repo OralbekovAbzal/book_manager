@@ -97,7 +97,17 @@
       <input id="backupDir" type="text" spellcheck="false" />
       <button class="btn" id="pickBackup" type="button">Выбрать…</button>
     </div>
-    <div class="help">Сюда сервер складывает автоматические резервные копии базы.</div>
+    <div class="help">
+      Сюда сервер складывает автоматические резервные копии базы.
+      <b>Рекомендуем флешку или внешний диск:</b> копия хранится отдельно от базы,
+      при смене компьютера достаточно восстановить из неё. Если носителя нет на месте,
+      копия запишется во внутреннюю папку программы, а в разделе «Резервная копия»
+      появится предупреждение.
+    </div>
+    <div class="with-btn" style="margin-top:6px; align-items:center">
+      <button class="btn" id="backupNow" type="button">Сделать копию сейчас</button>
+      <span class="help" id="backupNowStatus" style="margin-top:0"></span>
+    </div>
 
     <div class="note" id="lanNote"></div>
   </div>
@@ -258,6 +268,23 @@
     $('pickBackup').onclick = async () => {
       const dir = await window.settingsApi.pickFolder('Папка резервных копий')
       if (dir) $('backupDir').value = dir
+    }
+
+    // Копия делается СЕРВЕРОМ в ту папку, что уже сохранена в настройках:
+    // только что введённый в поле путь применится после «Сохранить».
+    $('backupNow').onclick = async () => {
+      const out = $('backupNowStatus')
+      $('backupNow').disabled = true
+      out.textContent = 'Делаю копию…'
+      try {
+        const r = await window.settingsApi.backupNow()
+        if (!r || !r.ok) out.textContent = 'Не получилось: ' + ((r && r.error) || 'неизвестная ошибка')
+        else if (r.fallbackUsed) out.textContent = 'Папка копий недоступна — записал во внутреннюю папку: ' + r.fileName
+        else out.textContent = 'Готово: ' + r.fileName
+      } catch (e) {
+        out.textContent = 'Не получилось: ' + (e && e.message ? e.message : String(e))
+      }
+      $('backupNow').disabled = false
     }
 
     $('test').onclick = async () => {

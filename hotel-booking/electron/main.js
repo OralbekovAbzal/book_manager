@@ -21,6 +21,17 @@ function resourcePath(...p) {
 const DB_PORT = 5433
 const DB_NAME = 'hotel_booking'
 const DEFAULT_HOST_PORT = 3001
+
+/**
+ * Разовый секрет для внутренних вызовов API (копия при выходе, кнопка «Сделать
+ * копию сейчас» в настройках). У main-процесса нет и не может быть JWT: он не
+ * входит в программу под учётной записью. Секрет живёт ТОЛЬКО в памяти и в env
+ * запущенного сервера — в config.json он не пишется намеренно: файл переживает
+ * переустановку, а этот секрет не должен переживать даже перезапуск.
+ */
+const INTERNAL_TOKEN = crypto.randomBytes(24).toString('hex')
+// Файл копии, принесённый с другого компьютера, читается целиком в память
+const MAX_BACKUP_FILE_BYTES = 200 * 1024 * 1024
 // Отметка «схема накатана» в папке данных: пишется ПОСЛЕ успешного init.sql + seed.sql
 const SCHEMA_MARKER = 'schema-ready.json'
 const APP_VERSION = app.getVersion()
@@ -357,8 +368,16 @@ function spawnServer(cfg) {
   // папка резервных копий — из config.json.
   const logPath = path.join(app.getPath('userData'), 'logs')
   const backupPath = cfg.backupDir || defaultPaths().backupDir
+  // Запасная папка на случай вынутой флешки — рядом с данными программы.
+  // Её создаём всегда, а вот backupPath — только если он вообще доступен:
+  // mkdir по пути на отсутствующем диске (E:\Копии) просто упадёт, и это
+  // не повод не запускать сервер (см. resolveBackupDir в utils/backup.js).
+  const backupFallbackPath = path.join(app.getPath('userData'), 'backups-local')
   fs.mkdirSync(logPath, { recursive: true })
-  fs.mkdirSync(backupPath, { recursive: true })
+  fs.mkdirSync(backupFallbackPath, { recursive: true })
+  try { fs.mkdirSync(backupPath, { recursive: true }) } catch (e) {
+    hlog('backup dir unavailable:', backupPath, String(e && (e.message || e)))
+  }
 
   const proc = spawn(process.execPath, [serverEntry], {
     cwd: resourcePath('server'),
@@ -374,8 +393,14 @@ function spawnServer(cfg) {
       TZ: 'UTC',
       LOG_PATH: logPath,
       BACKUP_PATH: backupPath,
+      BACKUP_FALLBACK_PATH: backupFallbackPath,
       // Ночная копия в 03:00 по местному времени хоста, а не по UTC
       BACKUP_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
+      // Ноутбук ночью выключают: при старте догоняем пропущенную копию,
+      // а в течение дня снимаем каждые 4 часа работы.
+      BACKUP_MAX_AGE_HOURS: '20',
+      BACKUP_EVERY_HOURS: '4',
+      INTERNAL_TOKEN,
     },
   })
   proc.stdout?.on('data', (d) => hlog('[server]', String(d).trim()))
@@ -450,6 +475,44 @@ function stopPostgresGracefully(dataDir) {
     proc.on('error', (e) => { clearTimeout(timer); finish(false, String(e && (e.message || e))) })
     proc.on('exit', (code) => { clearTimeout(timer); finish(code === 0, `код ${code} ${out.trim()}`) })
   })
+}
+
+/**
+ * Копия «прямо сейчас» через внутренний роут сервера. Зовётся при выходе из
+ * программы и кнопкой в настройках. Ошибку не бросает: копия — страховка,
+ * а не условие выхода.
+ * @returns {Promise<{ok: boolean, data?: object, error?: string}>}
+ */
+async function requestInternalBackup(timeoutMs = 20000) {
+  if (!serverProc) return { ok: false, error: 'Сервер не запущен' }
+  const port = readConfig().hostPort || DEFAULT_HOST_PORT
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/system/backup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Token': INTERNAL_TOKEN },
+      body: '{}',
+      signal: ctrl.signal,
+    })
+    const text = await res.text()
+    if (!res.ok) {
+      hlog('[backup] HTTP', res.status, text.slice(0, 300))
+      return { ok: false, error: `HTTP ${res.status}` }
+    }
+    let data = {}
+    try { data = JSON.parse(text) } catch { /* ответ не JSON — не беда */ }
+    hlog('[backup] ok:', data.filename || text.slice(0, 200))
+    return { ok: true, data }
+  } catch (err) {
+    const message = err && err.name === 'AbortError'
+      ? `копия не уложилась в ${Math.round(timeoutMs / 1000)} с`
+      : String(err && (err.message || err))
+    hlog('[backup] failed:', message)
+    return { ok: false, error: message }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 // Корректно гасим сервер и базу (иначе можно повредить данные Postgres).
@@ -802,6 +865,46 @@ ipcMain.handle('system:login', (_e, password) => {
   return { ok: verifySysadminPassword(cfg, password) }
 })
 
+// «Сделать копию сейчас» из окна «Настройка системы»: сисадмин выбрал папку на
+// флешке и тут же хочет убедиться, что копия туда пишется. Идёт тем же
+// внутренним путём, что и копия при выходе, — JWT в этом окне нет.
+// → { ok: true, fileName, path, fallbackUsed } | { ok: false, error }
+ipcMain.handle('system:backupNow', async () => {
+  const r = await requestInternalBackup(60000)
+  if (!r.ok) return { ok: false, error: r.error || 'Не удалось создать копию' }
+  const d = r.data || {}
+  return { ok: true, fileName: d.filename || '', path: d.path || '', fallbackUsed: !!d.fallbackUsed }
+})
+
+// Выбор файла копии для переноса с другого компьютера (мастер первого запуска и
+// раздел «Резервная копия»). В Electron `<input type=file>` даёт объект File без
+// пути, а нам нужно и содержимое, и исходное имя — читаем файл здесь.
+// → { path, name, content } | null (отмена или отказ по размеру)
+ipcMain.handle('backup:pickFile', async () => {
+  const opts = {
+    title: 'Выберите файл резервной копии',
+    filters: [{ name: 'Резервная копия (.json)', extensions: ['json'] }],
+    properties: ['openFile'],
+  }
+  const parent = BrowserWindow.getFocusedWindow() || mainWindow
+  const r = parent ? await dialog.showOpenDialog(parent, opts) : await dialog.showOpenDialog(opts)
+  const file = !r.canceled && r.filePaths ? r.filePaths[0] : null
+  if (!file) return null
+  try {
+    const size = fs.statSync(file).size
+    if (size > MAX_BACKUP_FILE_BYTES) {
+      // Причину показываем сами: возвращаем null, чтобы контракт остался простым
+      dialog.showErrorBox('Файл слишком большой',
+        `Файл копии больше 200 МБ (${Math.round(size / 1048576)} МБ) — такой перенести нельзя.`)
+      return null
+    }
+    return { path: file, name: path.basename(file), content: fs.readFileSync(file, 'utf8') }
+  } catch (err) {
+    dialog.showErrorBox('Не удалось прочитать файл', String(err && (err.message || err)))
+    return null
+  }
+})
+
 // Открыть окно настроек системы — только по паролю сисадмина (из приложения, preload.js).
 ipcMain.handle('system:openSettings', (_e, password) => {
   const cfg = readConfig()
@@ -885,12 +988,20 @@ if (!gotLock) {
     if (BrowserWindow.getAllWindows().length === 0) boot()
   })
 
-  // Корректное завершение: гасим сервер и базу, чтобы не повредить данные.
+  // Корректное завершение: сначала копия (последнее, что успеет попасть на
+  // флешку), потом гасим сервер и базу, чтобы не повредить данные.
   app.on('before-quit', async (e) => {
     if (isQuitting) return
     if (!serverProc && !pgInstance) return
     e.preventDefault()
     isQuitting = true
+    if (serverProc) {
+      // Ноутбук закрывают, не выходя из программы, поэтому копия при выходе —
+      // самый надёжный момент. Но выход она не блокирует: 20 секунд и хватит.
+      try { createSplash('Сохраняю резервную копию…') } catch { /* окно не обязательно */ }
+      await requestInternalBackup(20000)
+      closeSplash()
+    }
     await stopHostProcesses()
     app.quit()
   })

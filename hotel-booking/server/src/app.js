@@ -38,6 +38,25 @@ app.use(helmet())
 // CORS под desktop/LAN-модель (детали и обоснование — в utils/corsOrigin.js).
 const { corsOrigin } = require('./utils/corsOrigin')
 app.use(cors({ origin: corsOrigin, credentials: true }))
+// Перенос на новый ноутбук: файл копии приходит целым JSON-документом (сотня
+// броней с платежами — единицы-десятки мегабайт), поэтому у ЭТОГО пути свой
+// парсер и свой лимит. Он обязан стоять ДО общего `express.json({ limit: '1mb' })`:
+// иначе тело прочитал бы тот и отказал по лимиту раньше, чем дело дойдёт до роута.
+// `type: () => true` — содержимое файла шлют и как application/json, и как text/plain.
+app.use('/api/system/backup/upload', express.json({ limit: '200mb', type: () => true }))
+// Ошибки этого парсера переводим на человеческий здесь же: до errorHandler они
+// доедут как SyntaxError без объяснения, что именно не так с файлом.
+app.use('/api/system/backup/upload', (err, _req, res, next) => {
+  if (!err) return next()
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'Файл копии слишком большой (максимум 200 МБ)' })
+  }
+  if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    return res.status(400).json({ error: 'Это не файл резервной копии Qonaq' })
+  }
+  return next(err)
+})
+
 app.use(express.json({ limit: '1mb' }))
 app.use(express.urlencoded({ extended: true }))
 

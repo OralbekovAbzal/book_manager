@@ -42,6 +42,14 @@ declare global {
         Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>
       saveReportFile?: (payload: { fileName: string; base64: string }) =>
         Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>
+      /**
+       * Выбор файла резервной копии (`.json`) нативным диалогом — для мастера
+       * первого запуска и раздела «Резервная копия». Содержимое возвращается
+       * строкой: окно упакованной программы живёт на file://, а <input type=file>
+       * там открывает диалог без доступа к путям на флешке.
+       * `null` — пользователь закрыл диалог.
+       */
+      pickBackupFile?: () => Promise<{ path: string; name: string; content: string } | null>
       checkForUpdates?: () => Promise<{ ok: boolean; state?: UpdateState; version?: string; error?: string }>
       downloadUpdate?: () => Promise<{ ok: boolean; error?: string }>
       installUpdate?: () => Promise<{ ok: boolean; error?: string }>

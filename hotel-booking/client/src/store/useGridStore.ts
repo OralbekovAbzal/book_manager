@@ -2,7 +2,7 @@ import { create } from 'zustand'
 import { addDays, format, parseISO } from 'date-fns'
 import { fetchGrid, fetchToday } from '../api/occupancy'
 import { fetchCurrentShift } from '../api/shifts'
-import type { GridData, GridBooking, GridFilters, ModalState, TodayEvents } from '../types'
+import type { GridData, GridBooking, GridFilters, ModalState, TodayEvents, BookingStatus } from '../types'
 import { useSettingsStore } from './useSettingsStore'
 
 export type RoomStatusFilter =
@@ -25,6 +25,123 @@ const _todayNow = new Date()
 const today = new Date(Date.UTC(_todayNow.getUTCFullYear(), _todayNow.getUTCMonth(), _todayNow.getUTCDate()))
 
 const LS_FILTERS = 'grid_filters'
+
+// Таймер короткого сообщения над сеткой (переезд удался / сервер отказал).
+// Живёт в модуле, а не в состоянии: перезапуск таймера не должен перерисовывать грид.
+let noticeTimer: number | undefined
+const NOTICE_MS = { info: 3000, error: 6000 }
+
+/** Короткое сообщение над сеткой. `error` — красная рамка и держится дольше. */
+export interface GridNotice {
+  text: string
+  kind: 'info' | 'error'
+}
+
+// ─── Цепочка переезда: кто чей сосед ──────────────────────────────────────────
+// Полоска брони должна знать, есть ли у неё продолжение (рисуем рваный край
+// вместо мыса) и в каком номере оно живёт (подсказка «Переселён в №B с 1 июля»).
+// Грид отдаёт только `accountBookingId`, поэтому соседей ищем сами — но ОДИН раз
+// на загруженные данные, а не в каждом блоке: блоков на экране сотни.
+
+/** Соседний отрезок цепочки. `roomNumber === null` — он вне видимой выборки. */
+export interface ChainNeighbor {
+  id: number
+  roomNumber: string | null
+  /** Дата разлома: заезд более позднего из двух отрезков */
+  date: string
+}
+
+export interface ChainEdges {
+  /** Отрезок ДО этого (гость приехал из него) */
+  prev?: ChainNeighbor
+  /** Отрезок ПОСЛЕ этого (гость переехал в него) */
+  next?: ChainNeighbor
+  /**
+   * Статус ПОСЛЕДНЕГО отрезка цепочки. Голова после переезда закрыта
+   * (`CHECKED_OUT`), но гость никуда не выезжал — он живёт дальше в другом
+   * номере. Красить первую часть в серый «выехал» рядом с зелёной второй значит
+   * показывать двух разных гостей вместо одного, поэтому вся цепочка берёт цвет
+   * своего последнего отрезка.
+   */
+  chainStatus?: BookingStatus
+}
+
+export type ChainIndex = Record<number, ChainEdges>
+
+const EMPTY_CHAIN_INDEX: ChainIndex = {}
+
+function buildChainIndex(data: GridData): ChainIndex {
+  const index: ChainIndex = {}
+  const roomNumberOf = new Map<number, string>()
+  const chains = new Map<number, GridBooking[]>()
+  let anyChain = false
+
+  for (const cat of data.categories) {
+    for (const room of cat.rooms) {
+      roomNumberOf.set(room.id, room.number)
+      for (const b of room.bookings) {
+        if (b.accountBookingId != null) anyChain = true
+        // Цепочка плоская: все продолжения ссылаются на голову (см. currentSegment)
+        const headId = b.accountBookingId ?? b.id
+        const list = chains.get(headId)
+        if (list) list.push(b)
+        else chains.set(headId, [b])
+      }
+    }
+  }
+  // Переезды — редкость: в обычной выборке ни одной цепочки нет, и дальше идти незачем
+  if (!anyChain) return index
+
+  for (const list of chains.values()) {
+    if (list.length < 2 && list[0]?.accountBookingId == null) continue
+    const segs = [...list].sort((a, b) => {
+      const ai = a.checkIn.slice(0, 10)
+      const bi = b.checkIn.slice(0, 10)
+      return ai === bi ? a.id - b.id : ai < bi ? -1 : 1
+    })
+    const lastStatus = segs[segs.length - 1]?.status
+    segs.forEach((b, i) => {
+      const prevSeg = segs[i - 1]
+      const nextSeg = segs[i + 1]
+      const edges: ChainEdges = { chainStatus: lastStatus }
+      if (prevSeg) {
+        edges.prev = {
+          id: prevSeg.accountBookingId ?? prevSeg.id,
+          roomNumber: roomNumberOf.get(prevSeg.roomId) ?? null,
+          date: b.checkIn.slice(0, 10),
+        }
+      } else if (b.accountBookingId != null) {
+        // Голова вне видимого окна (другой период или скрытая категория) — про
+        // разлом мы всё равно знаем, просто не знаем номер, из которого приехали.
+        edges.prev = { id: b.accountBookingId, roomNumber: null, date: b.checkIn.slice(0, 10) }
+      }
+      if (nextSeg) {
+        edges.next = {
+          id: nextSeg.id,
+          roomNumber: roomNumberOf.get(nextSeg.roomId) ?? null,
+          date: nextSeg.checkIn.slice(0, 10),
+        }
+      }
+      if (edges.prev || edges.next) index[b.id] = edges
+    })
+  }
+  return index
+}
+
+// Кэш по объекту данных: `data` заменяется целиком на каждый ответ сервера и на
+// каждое socket-событие, поэтому WeakMap хватает — пересчёт ровно один на выборку,
+// а ссылка на индекс стабильна, и блоки не перерисовываются впустую.
+const chainIndexCache = new WeakMap<GridData, ChainIndex>()
+
+/** Индекс цепочек переезда по текущим данным сетки. Селектор: `selectChainIndex(data)`. */
+export function selectChainIndex(data: GridData | null): ChainIndex {
+  if (!data) return EMPTY_CHAIN_INDEX
+  const cached = chainIndexCache.get(data)
+  if (cached) return cached
+  const built = buildChainIndex(data)
+  chainIndexCache.set(data, built)
+  return built
+}
 
 // Порядковый номер запроса сетки. При быстром листании ответы приходят не по порядку —
 // применяем только ответ на самый последний запрос (см. fetchGrid).
@@ -54,6 +171,11 @@ interface GridStore {
   shiftDate: string | null              // YYYY-MM-DD текущей открытой смены
   roomStatusFilter: RoomStatusFilter
   hiddenCategoryIds: number[]           // клиентский фильтр категорий (чекбоксы в панели)
+  notice: GridNotice | null             // короткое сообщение над сеткой (переезд, отказ сервера)
+
+  /** Показать сообщение над сеткой и погасить его по таймеру. */
+  flashNotice: (text: string, kind?: GridNotice['kind']) => void
+  clearNotice: () => void
 
   fetchGrid: () => Promise<void>
   fetchToday: () => Promise<void>
@@ -111,6 +233,18 @@ export const useGridStore = create<GridStore>((set, get) => ({
   shiftDate: null,
   roomStatusFilter: 'all',
   hiddenCategoryIds: [],
+  notice: null,
+
+  flashNotice: (text, kind = 'info') => {
+    window.clearTimeout(noticeTimer)
+    set({ notice: { text, kind } })
+    noticeTimer = window.setTimeout(() => set({ notice: null }), NOTICE_MS[kind])
+  },
+
+  clearNotice: () => {
+    window.clearTimeout(noticeTimer)
+    set({ notice: null })
+  },
 
   fetchGrid: async () => {
     const { dateFrom, dateTo, filters, guestSearch } = get()

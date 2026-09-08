@@ -5,7 +5,8 @@ const MENU_WIDTH = 180
 
 export const BookingContextMenu: React.FC = () => {
   const {
-    contextMenu, closeContextMenu, openEditModal, openDeleteConfirm, currentSegment,
+    contextMenu, closeContextMenu, openEditModal, openDeleteConfirm, openMoveModal,
+    currentSegment, data,
   } = useGridStore()
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -53,6 +54,16 @@ export const BookingContextMenu: React.FC = () => {
   // отменить нельзя — оформите выезд» (data-and-money.md). Пункт, который всегда
   // кончается ошибкой, не показываем — выезд оформляют из формы брони.
   const canDelete = !isClosed && booking.accountBookingId == null
+  // «Переселить…» — единственный способ выбрать дату переезда руками: перетаскивание
+  // блока переселяет сразу с рабочей даты, а окно `MoveBookingModal` само открывается
+  // только при конфликте по квоте. Пункт нужен именно заселённому гостю: у брони,
+  // которая ещё не заехала, номер меняется в форме, а закрытую бронь сервер не
+  // переселяет. Продолжение цепочки — живой отрезок, его переселять можно (в отличие
+  // от отмены), поэтому `accountBookingId` здесь не смотрим.
+  // Пустая строка вместо null — чтобы дата в openMoveModal оставалась `string`
+  // (сетка без данных контекстное меню не открывает, но тип честнее проверки).
+  const today = data?.today ?? ''
+  const canMove = booking.status === 'CHECKED_IN' && today !== ''
 
   return (
     <div
@@ -82,6 +93,16 @@ export const BookingContextMenu: React.FC = () => {
           onClick={() => openEditModal(currentSegment(booking))}
         />
       )}
+      {canMove && (
+        <MenuItem
+          label="Переселить…"
+          icon="⇄"
+          // Номер подставляем текущий — в окне он выбирается заново, но сразу видно,
+          // откуда переезжает гость. Дата по умолчанию — рабочая (бизнес-дата с
+          // сервера, `data.today`), пользователь меняет её прямо в окне.
+          onClick={() => { closeContextMenu(); openMoveModal(booking, booking.roomId, today) }}
+        />
+      )}
       {canDelete && (
         <MenuItem
           label="Удалить"
@@ -90,7 +111,7 @@ export const BookingContextMenu: React.FC = () => {
           onClick={() => openDeleteConfirm(booking)}
         />
       )}
-      {!canEdit && !canDelete && (
+      {!canEdit && !canMove && !canDelete && (
         <div style={{ padding: '9px 12px', fontSize: '0.9rem', color: 'var(--text-faint)' }}>
           Бронь закрыта
         </div>

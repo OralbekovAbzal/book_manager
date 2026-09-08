@@ -2,7 +2,8 @@ import React, { useState, useRef, useMemo } from 'react'
 import { differenceInCalendarDays, parseISO, addDays, format } from 'date-fns'
 import { getBookingLabel, getBlockGeometry, getBookingStatusVar } from './utils'
 import { useGridSettings } from './GridSettingsContext'
-import { useGridStore } from '../../store/useGridStore'
+import { useGridStore, selectChainIndex } from '../../store/useGridStore'
+import { moveBooking } from '../../api/bookings'
 import { useSettingsStore } from '../../store/useSettingsStore'
 import type { GridBooking, GridData } from '../../types'
 
@@ -30,29 +31,86 @@ interface DragState {
 
 const DRAG_THRESHOLD = 5
 
+// Зубцов на рваном крае и их глубина в px. Подбирал на макете при реальном размере
+// полоски (высота ~20px, день 40px): 3 зубца читаются как крупные выемки, 6 — как шум,
+// глубина меньше 4px на такой высоте почти незаметна рядом с обычным мысом.
+const TEAR_TEETH = 4
+const TEAR_DEPTH = 4
+
+/** Края полоски: `true` — рваный разлом вместо мыса. */
+interface TornSides { left: boolean; right: boolean }
+
 /**
- * Шеврон (мыс слева и справа) с мягко скруглённым, а не острым, кончиком.
- * Геометрия — 1:1 с дизайн-хендоффом (taper=7px), меняется только то, как
+ * Шеврон (мыс слева и справа) с мягко скруглённым, а не острым, кончиком,
+ * плюс рваный край на стороне разлома цепочки переезда.
+ *
+ * Геометрия мыса — 1:1 с дизайн-хендоффом (taper=7px), меняется только то, как
  * рисуется сам кончик: вместо одной острой вершины — квадратичная кривая,
  * идущая от точки на скошенном ребре ДО кончика (control point — сам
  * исходный острый угол) к симметричной точке ПОСЛЕ кончика.
+ *
+ * Рваная сторона: вместо мыса — зигзаг из `TEAR_TEETH` зубцов на всю высоту.
+ * Он занимает всю ширину блока (мыс там не рисуется), поэтому две части одной
+ * брони стыкуются в точке переезда «излом в излом». Мыс на противоположной
+ * стороне остаётся — это по-прежнему обычный край брони.
+ *
+ * Возвращаем `path()`, а не `polygon()`: скруглённый кончик мыса (коммит
+ * a39c57c) полигоном не выразить, а терять его у переехавших броней нельзя —
+ * они стояли бы в сетке заметно острее соседей.
  */
-function roundedChevronPath(w: number, h: number, taper: number, round: number): string {
+function tornChevronPath(w: number, h: number, taper: number, round: number, torn: TornSides): string {
   const halfH = h / 2
   const edgeLen = Math.sqrt(taper * taper + halfH * halfH) || 1
   const rx = (round * taper) / edgeLen
   const ry = (round * halfH) / edgeLen
+  // На узкой полоске (одна ночь) зубцы во всю глубину съели бы четверть ширины
+  const depth = Math.max(1.5, Math.min(TEAR_DEPTH, w / 4))
   const n = (v: number) => Math.round(v * 100) / 100
 
-  return `path('M ${n(taper)} 0 ` +
-    `L ${n(w - taper)} 0 ` +
-    `L ${n(w - rx)} ${n(halfH - ry)} ` +
-    `Q ${n(w)} ${n(halfH)} ${n(w - rx)} ${n(halfH + ry)} ` +
-    `L ${n(w - taper)} ${n(h)} ` +
-    `L ${n(taper)} ${n(h)} ` +
-    `L ${n(rx)} ${n(halfH + ry)} ` +
-    `Q 0 ${n(halfH)} ${n(rx)} ${n(halfH - ry)} ` +
-    `Z')`
+  const d: string[] = []
+  // Левый верхний угол → верхняя грань → правый верхний угол
+  d.push(`M ${n(torn.left ? 0 : taper)} 0`)
+  d.push(`L ${n(torn.right ? w : w - taper)} 0`)
+  // Правая сторона: сверху вниз
+  if (torn.right) {
+    for (let k = 1; k <= TEAR_TEETH; k++) {
+      d.push(`L ${n(k % 2 ? w - depth : w)} ${n((k * h) / TEAR_TEETH)}`)
+    }
+  } else {
+    d.push(`L ${n(w - rx)} ${n(halfH - ry)}`)
+    d.push(`Q ${n(w)} ${n(halfH)} ${n(w - rx)} ${n(halfH + ry)}`)
+    d.push(`L ${n(w - taper)} ${n(h)}`)
+  }
+  // Нижняя грань
+  d.push(`L ${n(torn.left ? 0 : taper)} ${n(h)}`)
+  // Левая сторона: снизу вверх, к точке старта
+  if (torn.left) {
+    for (let k = 1; k <= TEAR_TEETH; k++) {
+      d.push(`L ${n(k % 2 ? depth : 0)} ${n(h - (k * h) / TEAR_TEETH)}`)
+    }
+  } else {
+    d.push(`L ${n(rx)} ${n(halfH + ry)}`)
+    d.push(`Q 0 ${n(halfH)} ${n(rx)} ${n(halfH - ry)}`)
+  }
+  d.push('Z')
+  return `path('${d.join(' ')}')`
+}
+
+/** «1 июля» для подсказок: даты `@db.Date` приходят UTC-полуночью, поэтому timeZone UTC. */
+function humanDay(iso: string): string {
+  return new Date(iso.slice(0, 10) + 'T12:00:00Z')
+    .toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: 'UTC' })
+}
+
+/** Номер комнаты по id — для сообщения «переезд в №15» после успешного drop. */
+function roomNumberOf(data: GridData | null, roomId: number): string | null {
+  if (!data) return null
+  for (const cat of data.categories) {
+    for (const room of cat.rooms) {
+      if (room.id === roomId) return room.number
+    }
+  }
+  return null
 }
 
 /** Две брони пересекаются, если их интервалы [checkIn, checkOut) перекрываются */
@@ -84,7 +142,7 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
   const [hovered, setHovered] = useState(false)
   const [drag, setDrag] = useState<DragState | null>(null)
   const { DAY_WIDTH, ROW_HEIGHT, BLOCK_PADDING, FONT_SIZE } = useGridSettings()
-  const { openEditModal, openMoveModal, data } = useGridStore()
+  const { openEditModal, openMoveModal, data, fetchGrid, flashNotice } = useGridStore()
   const { roomFund } = useSettingsStore()
 
   // Собираем человекочитаемые метки
@@ -97,15 +155,26 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
 
   const hasFlags = flagLabels.length > 0
 
-  // Продолжение переезда: деньги этой полоски лежат на брони №N, а не на ней.
-  // Без пометки вторая часть выглядит как отдельная бронь «без начислений»,
-  // и стойка идёт принимать оплату второй раз (data-and-money.md, 2026-09-08).
-  const accountId = booking.accountBookingId ?? null
-  const chainHint = accountId ? `\nПродолжение брони №${accountId} — счёт общий` : ''
+  // Переезд: полоса брони «ломается» на дате переезда — часть до неё остаётся в
+  // старом номере, часть после идёт в новом, и обе рисуются с рваным краем в
+  // точке разлома. Значка ⛓ больше нет: разлом виден сам по себе, а деньги
+  // всё равно одни на цепочку (data-and-money.md, 2026-09-08).
+  const chain = selectChainIndex(data)[booking.id]
+  const tornSides: TornSides = { left: !!chain?.prev, right: !!chain?.next }
+  const chainHint = [
+    chain?.next
+      ? `Переселён в №${chain.next.roomNumber ?? '?'} с ${humanDay(chain.next.date)}`
+      : null,
+    chain?.prev
+      ? (chain.prev.roomNumber
+          ? `Продолжение брони №${chain.prev.id} из №${chain.prev.roomNumber}`
+          : `Продолжение брони №${chain.prev.id} — счёт общий`)
+      : null,
+  ].filter(Boolean).map(s => `\n${s}`).join('')
 
   // ─── Правила drag по статусу ──────────────────────────────────────────
-  // CONFIRMED        — полный drag (дата и комната)
-  // CHECKED_IN       — drag разрешён → открывает модал «Переезд» (комната + дата переезда)
+  // CONFIRMED        — полный drag (дата и комната), drop открывает форму брони
+  // CHECKED_IN       — drop в другой номер = переезд с рабочей даты, сразу и без окна
   // CHECKED_OUT      — нельзя двигать (закрытая бронь)
   // CANCELLED/NO_SHOW — нельзя двигать
   const isCheckedIn   = booking.status === 'CHECKED_IN'
@@ -121,6 +190,8 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
   const dragRef  = useRef<DragState | null>(null)
   const dataRef  = useRef<GridData | null>(data)
   dataRef.current = data
+  /** Переезд уже отправлен и ответа ещё нет — второй drop игнорируем */
+  const movingRef = useRef(false)
 
   const updateDrag = (s: DragState | null) => {
     dragRef.current = s
@@ -132,12 +203,67 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
     parseISO(booking.checkIn.slice(0, 10)),
   )
 
+  const origCheckIn  = booking.checkIn.slice(0, 10)
+  const origCheckOut = booking.checkOut.slice(0, 10)
+
+  // Дата переезда заселённого гостя — РАБОЧАЯ дата (`data.today`, бизнес-дата с
+  // сервера), а не колонка, в которую уронили блок, и не часы устройства
+  // (bookings.md: «Дата смены хранится в БД»). Гость переезжает сегодня — вчера
+  // и завтра переехать нельзя, поэтому выбирать дату мышью незачем.
+  // Кламп по краям брони: заезд сегодня → moveDate === checkIn, и сервер переносит
+  // бронь целиком без сплита; просроченный выезд → разлом не позже последней ночи.
+  const maxMoveDate = format(addDays(parseISO(origCheckOut), -1), 'yyyy-MM-dd')
+  const moveDate = today < origCheckIn ? origCheckIn
+    : today > maxMoveDate ? maxMoveDate
+    : today
+  // Ночей в новом номере после переезда (0 — переезд целиком, без сплита)
+  const movedNights = differenceInCalendarDays(parseISO(origCheckOut), parseISO(moveDate))
+
+  /**
+   * Переезд по перетаскиванию: без окна, сразу запросом. Окно нужно только когда
+   * номер выделен партнёру по квоте — там уже есть `AllotmentConfirm` с вопросом
+   * «продать всё равно?». Из контекстного меню («Переселить») окно открывается
+   * как раньше: там можно выбрать другую дату.
+   */
+  const performMove = async (targetRoomId: number) => {
+    // Второй drop, пока первый ещё в пути, отправил бы второй переезд по той же
+    // брони: сетка на экране ещё старая, а на сервере гость уже в другом номере.
+    if (movingRef.current) return
+    movingRef.current = true
+    const targetNumber = roomNumberOf(dataRef.current, targetRoomId)
+    try {
+      await moveBooking(booking.id, targetRoomId, moveDate)
+      await fetchGrid()
+      flashNotice(
+        `${booking.guestName}: переезд в №${targetNumber ?? targetRoomId} с ${humanDay(moveDate)}`,
+      )
+    } catch (err: unknown) {
+      const e = err as {
+        response?: { status?: number; data?: { error?: string; code?: string } }
+        message?: string
+      }
+      if (e.response?.status === 409 && e.response.data?.code === 'ALLOTMENT_CONFLICT') {
+        openMoveModal(booking, targetRoomId, moveDate)
+        return
+      }
+      // Текст сервера как есть: «номер занят», «буфер после метки», «не тот статус» —
+      // он объясняет, что делать, а своё «не удалось» это скрывало бы.
+      flashNotice(e.response?.data?.error || e.message || 'Не удалось выполнить переезд', 'error')
+    } finally {
+      movingRef.current = false
+    }
+  }
+
   const { left, width, visible, isPoint } = getBlockGeometry(booking, dateFrom, DAY_WIDTH, BLOCK_PADDING)
   if (!visible) return null
 
-  const colorVar = getBookingStatusVar(booking)
+  // Цвет цепочки — по её последнему отрезку: голова после переезда закрыта, но
+  // гость живёт дальше, и серая первая часть рядом с зелёной второй читалась бы
+  // как «один выехал, другой заехал». Это один гость — значит один цвет.
+  const colorVar = chain?.next && chain.chainStatus
+    ? getBookingStatusVar({ ...booking, status: chain.chainStatus })
+    : getBookingStatusVar(booking)
   const label    = getBookingLabel(booking)
-  void today
 
   // Штриховка поверх цвета когда есть метки
   const stripeOverlay = hasFlags
@@ -202,19 +328,13 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
           let checkOut: string
 
           if (isCheckedIn) {
-            // CHECKED_IN: targetDate = moveDate, clamp в [checkIn, checkOut-1]
-            const origCheckIn  = booking.checkIn.slice(0, 10)
-            const origCheckOut = booking.checkOut.slice(0, 10)
-            const maxMove      = format(addDays(parseISO(origCheckOut), -1), 'yyyy-MM-dd')
-
-            let proposedDate = format(addDays(parseISO(areaDateFrom), dayOffset), 'yyyy-MM-dd')
-            if (proposedDate < origCheckIn) proposedDate = origCheckIn
-            if (proposedDate > maxMove)     proposedDate = maxMove
-
-            date     = proposedDate
+            // CHECKED_IN: дата разлома фиксирована рабочей датой, колонка drop
+            // на неё не влияет — призрак показывает ровно тот отрезок, который
+            // появится в целевом номере, и проверка «занято» идёт по нему же.
+            date     = moveDate
             checkOut = origCheckOut
 
-            // пересчитываем dayOffset из clamped даты — чтобы ghost снапился корректно
+            // dayOffset пересчитываем из даты переезда — чтобы ghost снапился корректно
             dayOffset = differenceInCalendarDays(parseISO(date), parseISO(areaDateFrom))
           } else {
             // CONFIRMED: обычный перенос — длительность сохраняется
@@ -294,24 +414,13 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
 
       // Drop на валидной позиции, отличной от исходной
       if (dropInfo) {
-        const origCheckIn = booking.checkIn.slice(0, 10)
         const changedRoom = dropInfo.targetRoomId !== booking.roomId
         const changedDate = dropInfo.targetDate   !== origCheckIn
 
-        // CHECKED_IN — переезд гостя (открывается MoveBookingModal)
+        // CHECKED_IN — переезд гостя прямо с рабочей даты, без окна.
+        // Тот же номер — ничего не делаем: дата переезда не выбирается мышью.
         if (isCheckedIn) {
-          if (changedRoom) {
-            // moveDate — это та дата, куда уронили блок (но не раньше checkIn, не позже checkOut-1)
-            const origCheckOut = booking.checkOut.slice(0, 10)
-            let moveDate = dropInfo.targetDate
-            if (moveDate < origCheckIn) moveDate = origCheckIn
-            // максимально допустимая moveDate — день до checkOut
-            const maxMoveDate = format(addDays(parseISO(origCheckOut), -1), 'yyyy-MM-dd')
-            if (moveDate > maxMoveDate) moveDate = maxMoveDate
-            openMoveModal(booking, dropInfo.targetRoomId, moveDate)
-            return
-          }
-          // Тот же номер — для CHECKED_IN ничего не делаем (дата заезда фиксирована)
+          if (changedRoom) void performMove(dropInfo.targetRoomId)
           return
         }
 
@@ -378,10 +487,26 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
 
   // Треугольные мысы по краям — фиксированные 7px (1:1 с дизайн-хендоффом).
   // Кончик мыса скруглён (round=3px) — острая вершина смотрелась грубовато.
+  // На стороне разлома цепочки мыса нет — там рваный край.
   const taperPx = 7
-  const clipPath = roundedChevronPath(width, blockHeight, taperPx, 3)
+  const clipPath = tornChevronPath(width, blockHeight, taperPx, 3, tornSides)
   // padding учитывает обрезаемые мысы — текст не должен наезжать на скос
   const padX = taperPx + 6
+
+  // Призрак перетаскивания: у заселённого гостя это НЕ вся бронь, а только тот
+  // отрезок, который появится в целевом номере — от даты переезда до выезда.
+  // Показывать полную полосу было бы враньём: старый номер за гостем остаётся.
+  const isSplitMove = isCheckedIn && moveDate > origCheckIn
+  const ghostWidth = isCheckedIn
+    ? Math.max(DAY_WIDTH * 0.5, movedNights * DAY_WIDTH - BLOCK_PADDING * 2)
+    : width
+  const ghostClip = tornChevronPath(ghostWidth, blockHeight, taperPx, 3, {
+    left: isSplitMove, right: false,
+  })
+
+  const dragHint = isCheckedIn
+    ? `Перетащите в другой номер — переезд с ${humanDay(moveDate)}`
+    : 'Перетащите чтобы перенести'
 
   return (
     <>
@@ -395,7 +520,7 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
         onKeyDown={(e) => e.key === 'Enter' && onView(booking)}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        title={`${booking.guestName}\n${booking.checkIn.slice(0, 10)} → ${booking.checkOut.slice(0, 10)}${chainHint}\n\nДвойной клик — просмотр · Правый клик — меню · Перетащите чтобы перенести`}
+        title={`${booking.guestName}\n${origCheckIn} → ${origCheckOut}${chainHint}\n\nДвойной клик — просмотр · Правый клик — меню · ${dragHint}`}
         style={{
           position: 'absolute',
           left: left + BLOCK_PADDING,
@@ -448,18 +573,8 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
           alignItems: 'center',
           gap: 5,
         }}>
-          {/* Значок цепочки — перед именем: он объясняет, почему у этой полоски
-              «нет денег». Подробности — в подсказке блока (title). */}
-          {accountId && (
-            <span
-              aria-hidden
-              style={{
-                flexShrink: 0,
-                fontSize: Math.max(9, FONT_SIZE - 2),
-                opacity: 0.9,
-              }}
-            >⛓</span>
-          )}
+          {/* Значка цепочки здесь больше нет: про переезд говорит рваный край
+              полоски, а подробности («переселён в №B с 1 июля») — в подсказке. */}
           {booking.partner && (
             <span style={{
               display: 'inline-flex',
@@ -507,10 +622,10 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
             position: 'fixed',
             left: drag.ghostScreenX,
             top:  drag.ghostScreenY,
-            width,
+            width: ghostWidth,
             height: blockHeight,
             background: `var(${colorVar})`,
-            clipPath,
+            clipPath: ghostClip,
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'flex-start',
@@ -560,7 +675,13 @@ export const BookingBlock: React.FC<Props> = ({ booking, dateFrom, today, onView
         >
           {drag.hoverInvalid
             ? 'Занято'
-            : `${drag.targetDate} → ${drag.targetCheckOut}`
+            : isCheckedIn
+              // У заселённого гостя двигается не бронь, а гость: показываем, что
+              // именно произойдёт, а не пару дат, которую можно принять за перенос.
+              ? (isSplitMove
+                  ? `Переезд с ${humanDay(moveDate)} → ${drag.targetCheckOut}`
+                  : `Переезд целиком · ${drag.targetDate} → ${drag.targetCheckOut}`)
+              : `${drag.targetDate} → ${drag.targetCheckOut}`
           }
         </div>
       )}

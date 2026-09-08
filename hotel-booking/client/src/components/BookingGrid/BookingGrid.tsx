@@ -98,7 +98,7 @@ interface InnerProps {
 }
 
 const BookingGridInner: React.FC<InnerProps> = ({ scrollbarWidth, onScrollbarWidth }) => {
-  const { data, loading, error, dateFrom, dateTo, fetchGrid, roomStatusFilter, shiftDate, hiddenCategoryIds } = useGridStore()
+  const { data, loading, error, dateFrom, dateTo, fetchGrid, roomStatusFilter, shiftDate, hiddenCategoryIds, notice, clearNotice } = useGridStore()
   const { ROW_HEIGHT, DAY_WIDTH, ROOM_COL_WIDTH } = useGridSettings()
   const parentRef = useRef<HTMLDivElement>(null)
   // Обёртка шапки дат: шапка лежит вне прокручиваемого тела, её scrollLeft ведём вручную
@@ -190,7 +190,38 @@ const BookingGridInner: React.FC<InnerProps> = ({ scrollbarWidth, onScrollbarWid
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg)' }}>
+    // position: relative — якорь для сообщения о переезде (оно всплывает НАД сеткой,
+    // а не внутри прокручиваемого тела, иначе уезжало бы вместе со строками).
+    // Transform здесь ставить нельзя: он сделал бы этот блок containing block для
+    // position: fixed потомков (призрак перетаскивания, меню) — грабли из NOTES.md.
+    <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg)' }}>
+      {notice && (
+        <div
+          onClick={clearNotice}
+          title="Скрыть"
+          style={{
+            position: 'absolute',
+            top: 10,
+            left: '50%',
+            marginLeft: -180,
+            width: 360,
+            zIndex: 50,
+            padding: '8px 12px',
+            borderRadius: 8,
+            textAlign: 'center',
+            cursor: 'pointer',
+            background: 'var(--surface)',
+            border: `1px solid ${notice.kind === 'error' ? 'var(--status-overdue)' : 'var(--border)'}`,
+            color: notice.kind === 'error' ? 'var(--status-overdue)' : 'var(--text)',
+            boxShadow: 'var(--shadow-lg)',
+            fontSize: '0.88rem',
+            fontWeight: 600,
+          }}
+        >
+          {notice.text}
+        </div>
+      )}
+
       {/* Шапка дат — вне прокручиваемого тела (sticky там не работает), поэтому обёртка
           с overflow:hidden и её scrollLeft синхронизируется из onScroll тела. Sticky-колонка
           «Номер» внутри шапки прилипает к левому краю этой обёртки. */}

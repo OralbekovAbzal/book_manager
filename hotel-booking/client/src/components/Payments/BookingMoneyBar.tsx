@@ -1,6 +1,9 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { fetchBookingPayments, type BookingMoney } from '../../api/payments'
+import { useGridStore } from '../../store/useGridStore'
+import type { BookingStatus } from '../../types'
 import { BookingPaymentPanel } from './BookingPaymentPanel'
+import { SettlementDialog } from '../BookingModal/SettlementDialog'
 import { money } from './paymentsUi'
 
 /**
@@ -28,17 +31,22 @@ interface Props {
   /** Заголовок рамки. Без него компонент рисуется «голым» — внутри чужой секции. */
   title?: string
   /**
-   * Суммы брони изменились: сервер пересчитал `Booking.paidAmount`.
-   * Открытая форма брони об этом не знает — обязана подхватить новое значение,
-   * иначе сохранение вернёт старое число поверх пересчитанного кэша.
+   * Деньги брони: и после первой загрузки, и после каждой операции по журналу.
+   *
+   * Один колбэк вместо двух (`onChanged` + `onJournalPresence`): форма брони
+   * показывает «Оплачено» и остаток по этим же числам, а два независимых
+   * источника давали окно, в котором форма считала «платежей нет» и отправляла
+   * своё `paidAmount` (аудит D5-011, D6-012). Теперь суммы грузит только эта
+   * полоса, и она же их раздаёт.
    */
-  onChanged?: (summary: BookingMoney) => void
+  onSummary?: (summary: BookingMoney) => void
   /**
-   * Есть ли в журнале хоть одна запись платежа. Форма брони по этому признаку
-   * решает, можно ли ещё править «Оплачено» руками: как только у брони появился
-   * платёж, число принадлежит журналу, а не полю формы.
+   * Статус брони. Нужен ровно для одного: у ОТМЕНЁННОЙ брони возврат переплаты
+   * оформляется окном расчёта при самой отмене, и вторая кнопка здесь только
+   * сбивала бы с толку. У живой брони переплата — это «внесли больше, чем
+   * насчитали», и вернуть её надо не выходя в «Кассу».
    */
-  onJournalPresence?: (hasPayments: boolean) => void
+  bookingStatus?: BookingStatus
 }
 
 /** Чтобы «Оплачено» в форме брони могло открыть приём оплаты, не дублируя диалог. */
@@ -47,20 +55,24 @@ export interface BookingMoneyBarHandle {
 }
 
 export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function BookingMoneyBar(
-  { bookingId, guestName, subtitle, title, onChanged, onJournalPresence }, ref,
+  { bookingId, guestName, subtitle, title, onSummary }, ref,
 ) {
+  const fetchGrid = useGridStore(s => s.fetchGrid)
   const [summary, setSummary] = useState<BookingMoney | null>(null)
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
   const [dialog, setDialog] = useState(false)
+  // Возврат переплаты — то же окно расчёта, что при отмене и раннем выезде,
+  // только без действия над самой бронью (`action: 'none'`).
+  const [refundDialog, setRefundDialog] = useState(false)
 
   // Номер запроса: ответ отменённой загрузки не должен затирать свежий.
   const reqId = useRef(0)
 
   // Колбэк в ref: иначе он попадёт в зависимости эффекта и незапомненная стрелка
   // из родителя перезапустит загрузку журнала на каждый его рендер.
-  const presenceRef = useRef(onJournalPresence)
-  presenceRef.current = onJournalPresence
+  const summaryRef = useRef(onSummary)
+  summaryRef.current = onSummary
 
   useImperativeHandle(ref, () => ({ openPayment: () => setDialog(true) }), [])
 
@@ -72,7 +84,7 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
         if (my !== reqId.current) return
         setSummary(d.summary)
         setFailed(false)
-        presenceRef.current?.(d.payments.length > 0)
+        summaryRef.current?.(d.summary)
       })
       .catch(() => { if (my === reqId.current) setFailed(true) })
       .finally(() => { if (my === reqId.current) setLoading(false) })
@@ -86,12 +98,13 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
 
   const handleChanged = (s: BookingMoney) => {
     setSummary(s)
-    // Любое изменение из панели означает операцию по журналу, а записи в нём
-    // не исчезают (платёж нельзя удалить, только отменить) — значит журнал
-    // непуст. Отдельно перечитывать список ради счётчика незачем.
-    presenceRef.current?.(true)
-    onChanged?.(s)
+    summaryRef.current?.(s)
   }
+
+  // Отрицательный долг и есть переплата — своего поля под неё в сводке нет.
+  // Переплату возвращают и по отменённой брони: при отмене могли вернуть не всё
+  // («денег в кассе нет, вернём завтра») — назавтра оформляют из той же формы.
+  const canRefund = !!summary && summary.due < 0
 
   const body = (
     <>
@@ -145,6 +158,21 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
       >
         Принять оплату
       </button>
+      {/* Переплата: принято больше, чем начислено. Возврат делается здесь же —
+          иначе за ним надо идти в раздел «Касса» и искать там ту же бронь. */}
+      {canRefund && (
+        <button
+          type="button"
+          onClick={() => setRefundDialog(true)}
+          style={{
+            marginTop: 6, width: '100%', height: 32, borderRadius: 8, cursor: 'pointer',
+            background: 'var(--bg)', color: 'var(--text)', border: '1px solid var(--border)',
+            fontFamily: 'inherit', fontSize: '0.86rem', fontWeight: 600,
+          }}
+        >
+          Вернуть переплату
+        </button>
+      )}
     </>
   )
 
@@ -171,6 +199,24 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
           subtitle={subtitle}
           onClose={() => setDialog(false)}
           onChanged={handleChanged}
+        />
+      )}
+
+      {refundDialog && (
+        <SettlementDialog
+          bookingId={bookingId}
+          action="none"
+          guestName={guestName}
+          subtitle={subtitle}
+          onClose={() => setRefundDialog(false)}
+          onDone={(res) => {
+            // Бронь остаётся открытой: возврат переплаты её не закрывает.
+            // Поэтому обновляем сводку прямо здесь — вторым запросом за теми же
+            // числами была бы гонка с этим ответом.
+            setRefundDialog(false)
+            handleChanged(res.summary)
+            fetchGrid()
+          }}
         />
       )}
     </>

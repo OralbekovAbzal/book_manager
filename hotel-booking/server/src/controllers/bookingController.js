@@ -4,8 +4,10 @@ const { emitBookingEvent } = require('../socket/socketManager')
 const { createError } = require('../middleware/errorHandler')
 const { ensureCurrentShift, getCurrentBusinessDate } = require('../utils/businessDate')
 const {
-  rebuildAutoCharges, recalcBookingTotals, chargeInputsChanged, toUTCDate,
+  rebuildAutoCharges, recalcBookingTotals, chargeInputsChanged, toUTCDate, dateKey,
   replaceBookingServices, defaultServiceLinks, serviceLinksChanged, normalizeServiceLinks,
+  buildAutoChargesDetailed, loadRateContext, sumCharges,
+  dropAutoChargesOnCancel, trimChargesToCheckOut, pinLegacyTotal,
 } = require('../utils/charges')
 
 /**
@@ -280,9 +282,13 @@ async function create(req, res, next) {
       roomId, guestName, guestPhone, checkIn, checkOut, source, notes, status,
       adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
       extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
-      discountPercent, prepaymentPercent, totalAmount, prepaidAmount, paidAmount, flags, shiftId,
+      discountPercent, prepaymentPercent, flags, shiftId,
       services,
     } = req.body
+    // totalAmount / prepaidAmount / paidAmount из тела НЕ читаются намеренно (волна 5a):
+    // итог брони — только сумма строк начислений (recalcBookingTotals), принято —
+    // только журнал платежей (recalcBookingPaid). Присланные клиентом числа раньше
+    // писались как есть и расходились со строками (аудит D2-005, D2-007).
 
     // Проверка: минимум 1 ночь
     if (new Date(checkOut) <= new Date(checkIn)) {
@@ -361,9 +367,13 @@ async function create(req, res, next) {
           disabledChildren: disabledChildren ?? 0,
           discountPercent: discountPercent ?? 0,
           prepaymentPercent: prepaymentPercent ?? 50,
-          totalAmount: totalAmount ?? 0,
-          prepaidAmount: prepaidAmount ?? 0,
-          paidAmount: paidAmount ?? 0,
+          totalAmount: 0,
+          prepaidAmount: 0,
+          paidAmount: 0,
+          // Гость «с улицы»: бронь заводят в момент, когда он уже стоит у стойки,
+          // поэтому фактический заезд и есть сейчас. Через кнопку «Заезд» время
+          // ставилось, а через walk-in из шахматки терялось (аудит D7-004).
+          ...(initialStatus === 'CHECKED_IN' && { actualCheckInAt: new Date() }),
           flags: Array.isArray(flags) ? flags : [],
           shiftId: resolvedShiftId,
           adminId: req.admin.id,
@@ -400,9 +410,12 @@ async function update(req, res, next) {
       roomId, guestName, guestPhone, checkIn, checkOut, source, notes,
       adultsWithMeals, childrenWithMeals, adultsNoMeals, childrenNoMeals,
       extraBedsWithMeals, extraBedsNoMeals, disabledAdults, disabledChildren,
-      discountPercent, prepaymentPercent, totalAmount, prepaidAmount, paidAmount, flags, shiftId,
+      discountPercent, prepaymentPercent, flags, shiftId,
       services, actualCheckInAt, actualCheckOutAt,
     } = req.body
+    // totalAmount / prepaidAmount / paidAmount из тела игнорируются — см. комментарий
+    // в create(). Правила валидации в routes оставлены: старый клиент может их слать,
+    // и отвечать ему 400 незачем — поля просто не влияют на запись.
 
     const existing = await prisma.booking.findUnique({ where: { id } })
     if (!existing) return next(createError('Бронь не найдена', 404))
@@ -542,9 +555,6 @@ async function update(req, res, next) {
           ...(disabledChildren !== undefined && { disabledChildren }),
           ...(discountPercent !== undefined && { discountPercent }),
           ...(prepaymentPercent !== undefined && { prepaymentPercent }),
-          ...(totalAmount !== undefined && { totalAmount }),
-          ...(prepaidAmount !== undefined && { prepaidAmount }),
-          ...(paidAmount !== undefined && { paidAmount }),
           ...(flags !== undefined && { flags: Array.isArray(flags) ? flags : [] }),
           ...(shiftId !== undefined && { shiftId: shiftId ? parseInt(shiftId) : null }),
           ...(actualCheckInAt !== undefined && { actualCheckInAt: nextActualIn }),
@@ -557,7 +567,16 @@ async function update(req, res, next) {
       // пересоздавало бы строки (новые id, новая дата создания) без всякой причины.
       if (servicesChanged) await replaceBookingServices(id, services, tx)
 
-      if (!needsRebuild) return updated
+      if (!needsRebuild) {
+        // Процент предоплаты на строки не влияет, но prepaidAmount считается от него.
+        // Раньше новое значение присылал клиент; теперь его считает только сервер,
+        // и без этого пересчёта «Предоплата» осталась бы от старого процента.
+        const pctChanged = prepaymentPercent !== undefined
+          && Number(prepaymentPercent) !== Number(existing.prepaymentPercent)
+        if (!pctChanged) return updated
+        await recalcBookingTotals(id, { client: tx, keepIfEmpty: true })
+        return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
+      }
 
       await rebuildAutoCharges(id, { adminId: req.admin.id, client: tx, keepIfEmpty: true })
       return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
@@ -570,6 +589,85 @@ async function update(req, res, next) {
   }
 }
 
+/** Дата брони (@db.Date) как UTC-полночь — в этом виде её сравнивают с рабочей датой. */
+function bookingDayUTC(date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+}
+
+/**
+ * Можно ли отменить бронь. Вынесено из `cancel`, потому что те же проверки обязан
+ * пройти расчёт с гостем (`settlementController`): отмена там — то же действие,
+ * а не его копия.
+ * @returns {Error|null} готовая ошибка для next() или null
+ */
+function cancelGuard(existing, role) {
+  if (existing.status === 'CANCELLED') return createError('Бронь уже отменена', 400)
+  if (existing.status === 'CHECKED_OUT') return createError('Нельзя отменить закрытую бронь', 400)
+  // Отмена живущего гостя — операция с последствиями для расчётов, только администраторам
+  if (existing.status === 'CHECKED_IN' && !['SUPER_ADMIN', 'ADMIN'].includes(role)) {
+    return createError('Отменить заселённого гостя может только администратор', 403)
+  }
+  return null
+}
+
+/**
+ * Можно ли оформить выезд. Рабочая дата раньше заезда (бронь заселена «в будущее») —
+ * выезд оформить нельзя, иначе checkOut ушёл бы раньше checkIn.
+ * @returns {Error|null}
+ */
+function checkOutGuard(existing, businessDate) {
+  if (existing.status !== 'CHECKED_IN') {
+    return createError(`Нельзя отметить выезд: статус "${existing.status}"`, 400)
+  }
+  if (businessDate.getTime() < bookingDayUTC(existing.checkIn).getTime()) {
+    return createError('Рабочая дата раньше даты заезда — выезд невозможен', 400)
+  }
+  return null
+}
+
+/** Отмена внутри транзакции: статус + обнуление автоматического счёта. */
+async function applyCancel(tx, existing, { note = null } = {}) {
+  await tx.booking.update({
+    where: { id: existing.id },
+    data: {
+      status: 'CANCELLED',
+      ...(note ? { notes: appendNote(existing.notes, note) } : {}),
+    },
+  })
+  await dropAutoChargesOnCancel(existing.id, tx)
+}
+
+/**
+ * Выезд внутри транзакции. Возвращает, каким событием это закончилось:
+ * выезд день-в-день с заездом — это отмена (гость не ночевал), а не выезд.
+ * @returns {Promise<'booking:cancelled'|'booking:checkout'>}
+ */
+async function applyCheckOut(tx, existing, businessDate, adminId) {
+  // Выезд день-в-день с заездом: гость не ночевал.
+  // Раньше здесь было `booking.delete` — запись физически исчезала из базы вместе
+  // с историей, аудитом и деньгами, хотя обычная отмена принципиально ничего не
+  // удаляет. Теперь отменяем, как везде: номер освобождается (CANCELLED выведен
+  // из-под ограничения booking_no_overlap), а факт остаётся в базе. Счёт при этом
+  // обнуляется по правилам отмены — начислять проживание не за что.
+  if (businessDate.getTime() === bookingDayUTC(existing.checkIn).getTime()) {
+    await applyCancel(tx, existing, { note: 'Выезд в день заезда — гость не ночевал' })
+    return 'booking:cancelled'
+  }
+
+  // actualCheckOutAt — реальный момент выезда; checkOut остаётся датой суток отеля.
+  // Их специально двое: гость, уехавший в 11:40 рабочего дня, и гость, уехавший
+  // ночью, дают одну и ту же дату выезда, но разное время освобождения номера.
+  const data = { status: 'CHECKED_OUT', actualCheckOutAt: new Date() }
+  const early = businessDate < existing.checkOut
+  if (early) data.checkOut = businessDate
+
+  await tx.booking.update({ where: { id: existing.id }, data })
+  // Бронь с новой датой и старыми начислениями за непрожитые ночи — это ложный долг
+  // в кассе и в «Долгах», поэтому пересчёт идёт той же транзакцией.
+  if (early) await trimChargesToCheckOut(existing, businessDate, tx, adminId)
+  return 'booking:checkout'
+}
+
 // DELETE /api/bookings/:id — отмена (не удаление из БД)
 async function cancel(req, res, next) {
   try {
@@ -578,21 +676,12 @@ async function cancel(req, res, next) {
     const existing = await prisma.booking.findUnique({ where: { id } })
     if (!existing) return next(createError('Бронь не найдена', 404))
 
-    if (existing.status === 'CANCELLED') {
-      return next(createError('Бронь уже отменена', 400))
-    }
-    if (existing.status === 'CHECKED_OUT') {
-      return next(createError('Нельзя отменить закрытую бронь', 400))
-    }
-    // Отмена живущего гостя — операция с последствиями для расчётов, только администраторам
-    if (existing.status === 'CHECKED_IN' && !['SUPER_ADMIN', 'ADMIN'].includes(req.admin?.role)) {
-      return next(createError('Отменить заселённого гостя может только администратор', 403))
-    }
+    const denied = cancelGuard(existing, req.admin?.role)
+    if (denied) return next(denied)
 
-    const booking = await prisma.booking.update({
-      where: { id },
-      data: { status: 'CANCELLED' },
-      select: BOOKING_SELECT,
+    const booking = await prisma.$transaction(async (tx) => {
+      await applyCancel(tx, existing)
+      return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
     })
 
     emitBookingEvent('booking:cancelled', { bookingId: id, roomId: booking.room.id })
@@ -670,6 +759,20 @@ async function checkIn(req, res, next) {
       return next(createError('Нельзя отметить заезд раньше даты заезда брони. Сначала перейдите к дню заезда.', 400))
     }
 
+    // Верхняя граница: заселить бронь, у которой выезд уже прошёл, значит получить
+    // CHECKED_IN с выездом в прошлом — «Следующий день» после этого блокируется
+    // (просроченный выезд), а «Выезд» закроет бронь вчерашней датой (аудит D3-004).
+    // Полуоткрытый интервал: выезд РОВНО в текущий рабочий день — тоже прошлое,
+    // ночевать уже негде.
+    const checkOutUTC = new Date(Date.UTC(
+      existing.checkOut.getUTCFullYear(),
+      existing.checkOut.getUTCMonth(),
+      existing.checkOut.getUTCDate(),
+    ))
+    if (checkOutUTC.getTime() <= businessDate.getTime()) {
+      return next(createError('Дата выезда уже прошла — измените даты или отмените бронь', 400))
+    }
+
     const booking = await prisma.booking.update({
       where: { id },
       // Момент нажатия кнопки «Заезд» и есть фактический заезд: дата смены может
@@ -694,57 +797,22 @@ async function checkOut(req, res, next) {
 
     const existing = await prisma.booking.findUnique({ where: { id } })
     if (!existing) return next(createError('Бронь не найдена', 404))
-    if (existing.status !== 'CHECKED_IN') {
-      return next(createError(`Нельзя отметить выезд: статус "${existing.status}"`, 400))
-    }
 
     const todayUTC = await getCurrentBusinessDate()
-    const checkInUTC = new Date(Date.UTC(
-      existing.checkIn.getUTCFullYear(),
-      existing.checkIn.getUTCMonth(),
-      existing.checkIn.getUTCDate(),
-    ))
+    const denied = checkOutGuard(existing, todayUTC)
+    if (denied) return next(denied)
 
-    // Рабочая дата раньше заезда (бронь заселена «в будущее») — выезд оформить нельзя,
-    // иначе checkOut ушёл бы раньше checkIn
-    if (todayUTC.getTime() < checkInUTC.getTime()) {
-      return next(createError('Рабочая дата раньше даты заезда — выезд невозможен', 400))
-    }
-
-    // Выезд день-в-день с заездом: гость не ночевал.
-    // Раньше здесь было `booking.delete` — запись физически исчезала из базы вместе
-    // с историей, аудитом и деньгами, хотя обычная отмена принципиально ничего не
-    // удаляет. Теперь отменяем, как везде: номер освобождается (CANCELLED выведен
-    // из-под ограничения booking_no_overlap), а факт остаётся в базе.
-    if (todayUTC.getTime() === checkInUTC.getTime()) {
-      const booking = await prisma.booking.update({
-        where: { id },
-        data: {
-          status: 'CANCELLED',
-          notes: appendNote(existing.notes, 'Выезд в день заезда — гость не ночевал'),
-        },
-        select: BOOKING_SELECT,
-      })
-      emitBookingEvent('booking:cancelled', { bookingId: id, roomId: booking.room.id })
-      return res.json({ data: booking })
-    }
-
-    // actualCheckOutAt — реальный момент выезда; checkOut ниже остаётся датой суток
-    // отеля. Их специально двое: гость, уехавший в 11:40 рабочего дня, и гость,
-    // уехавший ночью, дают одну и ту же дату выезда, но разное время освобождения.
-    const data = { status: 'CHECKED_OUT', actualCheckOutAt: new Date() }
-    // Ранний выезд — фиксируем фактическую дату выезда (сегодня)
-    if (todayUTC < existing.checkOut) {
-      data.checkOut = todayUTC
-    }
-
-    const booking = await prisma.booking.update({
-      where: { id },
-      data,
-      select: BOOKING_SELECT,
+    // Статус, дата выезда и пересчёт счёта — одной транзакцией (см. applyCheckOut)
+    const { event, booking } = await prisma.$transaction(async (tx) => {
+      const ev = await applyCheckOut(tx, existing, todayUTC, req.admin.id)
+      return { event: ev, booking: await tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT }) }
     })
 
-    emitBookingEvent('booking:checkout', { booking })
+    if (event === 'booking:cancelled') {
+      emitBookingEvent('booking:cancelled', { bookingId: id, roomId: booking.room.id })
+    } else {
+      emitBookingEvent('booking:checkout', { booking })
+    }
     res.json({ data: booking })
   } catch (err) {
     next(err)
@@ -1043,6 +1111,172 @@ async function checkAvailability(req, res, next) {
   }
 }
 
+// POST /api/bookings/preview — сколько будет стоить, ЕЩЁ НЕ СОХРАНЯЯ.
+//
+// Зачем отдельный эндпоинт. Предпросмотр в форме считался своим кодом
+// (`client/src/utils/calculator.ts`), и три числа расходились с сохранённым счётом:
+// у клиента была своя база процентной скидки, ручные строки в неё не входили, а
+// частичная цена ночи не показывалась вовсе (аудит D7-009, D2-003, D5-002).
+// Теперь предпросмотр считает ТОТ ЖЕ код, что и сохранение: `buildAutoCharges`
+// + ручные строки + `sumCharges`. Расходиться больше нечему.
+//
+// Ничего не пишет в базу, поэтому доступен любому вошедшему.
+async function preview(req, res, next) {
+  try {
+    const {
+      roomId, checkIn, checkOut, discountPercent, prepaymentPercent, services,
+      bookingId, manualCharges,
+    } = req.body
+
+    if (!roomId || !checkIn || !checkOut) {
+      return next(createError('roomId, checkIn, checkOut обязательны', 400))
+    }
+    if (new Date(checkOut) <= new Date(checkIn)) {
+      return next(createError('Дата выезда должна быть позже даты заезда', 400))
+    }
+
+    const room = await prisma.room.findUnique({
+      where: { id: parseInt(roomId) },
+      select: { id: true, categoryId: true },
+    })
+    if (!room) return next(createError('Номер не найден', 404))
+
+    // Бронь «на бумаге» — той же формы, что читает генератор из базы.
+    const draft = {
+      id: bookingId ? parseInt(bookingId) : 0,
+      checkIn: toUTCDate(checkIn),
+      checkOut: toUTCDate(checkOut),
+      adultsWithMeals: intOr0(req.body.adultsWithMeals),
+      childrenWithMeals: intOr0(req.body.childrenWithMeals),
+      adultsNoMeals: intOr0(req.body.adultsNoMeals),
+      childrenNoMeals: intOr0(req.body.childrenNoMeals),
+      extraBedsWithMeals: intOr0(req.body.extraBedsWithMeals),
+      extraBedsNoMeals: intOr0(req.body.extraBedsNoMeals),
+      discountPercent: Number(discountPercent) || 0,
+    }
+
+    if (services !== undefined) {
+      const badService = await findUnknownServices(services)
+      if (badService) return next(createError(badService, 400))
+    }
+
+    // Набор услуг — как в create: не прислали → услуги «включены в тариф».
+    const links = normalizeServiceLinks(
+      services !== undefined ? services : await defaultServiceLinks(draft),
+    )
+    const serviceRows = links.length > 0
+      ? await prisma.service.findMany({ where: { id: { in: links.map(l => l.serviceId) } } })
+      : []
+    const serviceById = new Map(serviceRows.map(s => [s.id, s]))
+    const bookingServices = links.map(l => ({ ...l, service: serviceById.get(l.serviceId) || null }))
+
+    // Ручные строки: уже сохранённые (по bookingId) + ещё не сохранённые из тела.
+    // Именно они делают предпросмотр честным: база процентной скидки на сервере
+    // включает ручные строки, и без них итог формы был бы больше сохранённого.
+    const saved = bookingId
+      ? await prisma.bookingCharge.findMany({
+        where: { bookingId: parseInt(bookingId), source: 'manual' },
+        orderBy: { id: 'asc' },
+      })
+      : []
+    const manualList = [...saved, ...normalizePreviewManual(manualCharges)]
+
+    const rateCtx = await loadRateContext(
+      { categoryId: room.categoryId, checkIn: draft.checkIn, checkOut: draft.checkOut },
+      prisma,
+    )
+
+    const detailed = buildAutoChargesDetailed({
+      booking: draft, ...rateCtx, bookingServices, manualCharges: manualList,
+    })
+
+    const asRow = (r, source) => ({
+      kind: r.kind,
+      label: r.label,
+      quantity: r.quantity,
+      unitPrice: r.unitPrice,
+      amount: r.amount,
+      date: r.date ? dateKey(r.date) : null,
+      source,
+    })
+    // Порядок как в сохранённом счёте (`loadCharges`): по дате, строки без даты — в конце.
+    // Ручные идут перед автоматическими: после пересборки у автоматических новые id.
+    const rows = [
+      ...manualList.map(r => asRow(r, 'manual')),
+      ...detailed.rows.map(r => asRow(r, 'auto')),
+    ]
+      .map((row, i) => ({ row, i }))
+      .sort((a, b) => {
+        // Строки без даты (услуги, скидка) — в конец: то же, что NULLS LAST в базе
+        const ad = a.row.date || '9999-99-99'
+        const bd = b.row.date || '9999-99-99'
+        return ad === bd ? a.i - b.i : (ad < bd ? -1 : 1)
+      })
+      .map(x => x.row)
+
+    const total = sumCharges(rows)
+    const pct = prepaymentPercent !== undefined && prepaymentPercent !== null
+      ? Number(prepaymentPercent) || 0
+      : (await previewPrepaymentPercent(bookingId))
+    const prepaid = Math.round(total * (pct / 100))
+
+    res.json({
+      data: {
+        rows,
+        total,
+        prepaid,
+        nights: detailed.nights,
+        missingPrices: detailed.missingPrices,
+      },
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+function intOr0(v) {
+  const n = parseInt(v)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+/** Процент предоплаты, если форма его не прислала: у существующей брони — её, иначе 50 (как в create). */
+async function previewPrepaymentPercent(bookingId) {
+  if (!bookingId) return 50
+  const b = await prisma.booking.findUnique({
+    where: { id: parseInt(bookingId) },
+    select: { prepaymentPercent: true },
+  })
+  return b?.prepaymentPercent ?? 50
+}
+
+/**
+ * Ручные строки из тела предпросмотра — их ещё нет в базе, поэтому нормализуем здесь
+ * по тем же правилам, что и при сохранении (`normalizeCharge`): скидка не может быть
+ * плюсом, суммы — целые.
+ */
+function normalizePreviewManual(list) {
+  if (!Array.isArray(list)) return []
+  return list.slice(0, 100).map((raw) => {
+    const kind = CHARGE_KINDS.includes(raw?.kind) ? raw.kind : 'extra'
+    const quantity = raw?.quantity == null ? 1 : Number(raw.quantity) || 0
+    const money = normalizeCharge(kind, quantity, Number(raw?.unitPrice) || 0)
+    // Клиент может прислать посчитанный amount (так строка хранится в базе) —
+    // тогда верим ему, но знак скидки всё равно приводим.
+    const given = raw?.amount == null ? null : Math.round(Number(raw.amount))
+    const amount = given !== null && Number.isFinite(given)
+      ? (kind === 'discount' ? -Math.abs(given) : given)
+      : money.amount
+    return {
+      kind,
+      label: String(raw?.label || '').trim() || 'Ручная строка',
+      quantity: money.quantity,
+      unitPrice: money.unitPrice,
+      amount,
+      date: raw?.date ? toUTCDate(raw.date) : null,
+    }
+  })
+}
+
 // ─── Начисления брони (BookingCharge) ────────────────────────────────────────
 //
 // Итог брони = СУММА СТРОК (NOTES, 2026-09-02). Тариф порождает строки
@@ -1092,12 +1326,25 @@ async function respondWithCharges(bookingId, res, { emit = true } = {}) {
   })
 }
 
-/** Бронь под правку начислений: отменённую не трогаем, у закрытой деньги править можно. */
-async function loadBookingForCharges(id, next) {
+/**
+ * Бронь под правку начислений: у закрытой деньги править можно, отменённую по-прежнему
+ * не пересобираем и не правим построчно.
+ *
+ * Исключение — ДОБАВЛЕНИЕ ручной строки (`allowClosed`): удержание или штраф за отмену
+ * оформляется именно так (решение владельца 2026-09-08). Раньше записать его было
+ * некуда — начисления отменённой брони заблокированы целиком (аудит D2-006).
+ * Только администратор: это правка денег по закрытой сделке.
+ */
+async function loadBookingForCharges(id, next, { allowClosed = false, role = null } = {}) {
   const booking = await prisma.booking.findUnique({ where: { id }, select: { id: true, status: true } })
   if (!booking) { next(createError('Бронь не найдена', 404)); return null }
-  if (booking.status === 'CANCELLED') {
+  if (booking.status === 'CANCELLED' && !allowClosed) {
     next(createError('Нельзя менять начисления отменённой брони', 400))
+    return null
+  }
+  const closed = ['CANCELLED', 'CHECKED_OUT'].includes(booking.status)
+  if (allowClosed && closed && !['SUPER_ADMIN', 'ADMIN'].includes(role)) {
+    next(createError('Добавить строку к закрытой брони может только администратор', 403))
     return null
   }
   return booking
@@ -1127,7 +1374,9 @@ async function listCharges(req, res, next) {
 async function addCharge(req, res, next) {
   try {
     const id = parseInt(req.params.id)
-    const booking = await loadBookingForCharges(id, next)
+    // Ручная строка — единственная операция, разрешённая на отменённой брони:
+    // штраф или удержание за отмену записывать больше некуда.
+    const booking = await loadBookingForCharges(id, next, { allowClosed: true, role: req.admin?.role })
     if (!booking) return
 
     const { kind, label, quantity = 1, unitPrice = 0, date, reason } = req.body
@@ -1140,6 +1389,9 @@ async function addCharge(req, res, next) {
     if (!Number.isFinite(money.amount)) return next(createError('Некорректная сумма', 400))
 
     await prisma.$transaction(async (tx) => {
+      // У брони без строк итог живёт кэшем `totalAmount`: не зафиксировав его строкой,
+      // пересчёт ниже приравнял бы весь счёт к этой одной ручной строке.
+      await pinLegacyTotal(id, { client: tx, adminId: req.admin.id })
       await tx.bookingCharge.create({
         data: {
           bookingId: id,
@@ -1256,7 +1508,10 @@ async function rebuildCharges(req, res, next) {
 // BOOKING_SELECT экспортируется для optimizeController — payload socket-событий должен быть единым
 module.exports = {
   list, getOne, create, update, cancel, checkIn, checkOut, checkAvailability, move,
-  updateActualTimes,
+  updateActualTimes, preview,
+  // Для settlementController: отмена и выезд в расчёте с гостем — ТЕ ЖЕ действия,
+  // а не их копия (проверки статусов + применение внутри транзакции)
+  cancelGuard, checkOutGuard, applyCancel, applyCheckOut, bookingDayUTC,
   listCharges, addCharge, updateCharge, removeCharge, rebuildCharges,
   BOOKING_SELECT,
 }

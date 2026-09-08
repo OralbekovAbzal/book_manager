@@ -201,23 +201,39 @@ async function debts(req, res, next) {
       ]
     }
 
-    const bookings = await prisma.booking.findMany({
-      where,
-      select: {
-        id: true, guestName: true, guestPhone: true, checkIn: true, checkOut: true,
-        status: true, totalAmount: true, prepaidAmount: true, paidAmount: true,
-        room: { select: { id: true, number: true, building: true } },
-      },
-      orderBy: [{ checkIn: 'asc' }, { id: 'asc' }],
-      take: 300,
-    })
+    const DEBT_SELECT = {
+      id: true, guestName: true, guestPhone: true, checkIn: true, checkOut: true,
+      status: true, totalAmount: true, prepaidAmount: true, paidAmount: true,
+      room: { select: { id: true, number: true, building: true } },
+    }
+
+    // Отменённые берём ОТДЕЛЬНЫМ запросом, а не расширением статусов: их в базе
+    // заметно больше живых, и общая выборка с `take` вытеснила бы настоящие долги.
+    // Нужны только те, где деньги не закрыты — невозвращённая предоплата или
+    // удержание по ручной строке; раньше такая бронь исчезала из виду совсем
+    // (аудит D2-006). Фильтр по нулю — ниже, после подсчёта денег.
+    const cancelledWhere = { ...where, status: 'CANCELLED' }
+
+    const [active, cancelled] = await Promise.all([
+      prisma.booking.findMany({
+        where, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: 300,
+      }),
+      prisma.booking.findMany({
+        where: cancelledWhere, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: 300,
+      }),
+    ])
+    const bookings = [...active, ...cancelled]
     if (bookings.length === 0) return res.json({ data: { businessDate, bookings: [] } })
 
     const money = await loadBookingMoney(bookings)
-    const rows = bookings.map((b) => {
-      const m = money.get(b.id)
-      return { ...b, charged: m.charged, chargesFromRows: m.chargesFromRows, paid: m.paid, due: m.due }
-    })
+    const rows = bookings
+      .map((b) => {
+        const m = money.get(b.id)
+        return { ...b, charged: m.charged, chargesFromRows: m.chargesFromRows, paid: m.paid, due: m.due }
+      })
+      // Отменённая с закрытыми деньгами в рабочем списке не нужна: она ничего не требует
+      .filter((b) => b.status !== 'CANCELLED' || b.paid !== 0 || b.due !== 0)
+      .sort((a, b) => (a.checkIn - b.checkIn) || (a.id - b.id))
 
     res.json({ data: { businessDate, bookings: rows } })
   } catch (err) { next(err) }
@@ -246,6 +262,12 @@ async function create(req, res, next) {
     const id = parseInt(bookingId)
     if (!Number.isInteger(id)) return next(createError('Укажите бронь', 400))
     if (!KINDS.includes(kind)) return next(createError('Неизвестный тип платежа', 400))
+    // «Свободный» возврат отменён (решение владельца 2026-09-08): этот путь не проверял
+    // ни наличие исходного платежа, ни лимит остатком, и одной кнопкой рисовал в кассе
+    // возврат при нулевом приходе (аудит D2-001). Возврат — только по записи журнала.
+    if (kind === 'refund') {
+      return next(createError('Возврат — только по конкретному платежу: откройте запись в журнале', 400))
+    }
     if (!METHODS.includes(method)) return next(createError('Неизвестный способ оплаты', 400))
 
     const amount = parseAmount(req.body?.amount)
@@ -415,6 +437,10 @@ module.exports = {
   voidPayment,
   recalcBookingPaid,
   bookingMoney,
+  // Для settlementController (расчёт с гостем): он пишет возвраты теми же полями
+  // и обязан разослать то же событие — второй реализации денег быть не должно
+  notifyBookingMoneyChanged,
+  PAYMENT_INCLUDE,
   KINDS,
   METHODS,
   METHOD_LABELS,

@@ -3,7 +3,8 @@ const { prisma } = require('./prisma')
 /**
  * Деньги брони: начислено / принято / долг — ОДНО определение на всю программу.
  *
- *   начислено (charged) = сумма строк BookingCharge; строк нет — Booking.totalAmount
+ *   начислено (charged) = сумма строк BookingCharge; строк нет — Booking.totalAmount,
+ *                         а у отменённой брони без строк — ноль (отмена обнуляет счёт)
  *   принято   (paid)    = сумма НЕотменённых платежей, возврат со знаком минус
  *   долг      (due)     = начислено − принято  (минус = переплата)
  *
@@ -35,17 +36,29 @@ function signedPayment(p) {
 
 /**
  * Начислено по брони из уже посчитанных слагаемых.
- * @param {{ chargesTotal:number, hasCharges:boolean, totalAmount:number }} src
+ *
+ * `status`: отмена обнуляет счёт (решение владельца 2026-09-08,
+ * `docs/decisions/data-and-money.md`), поэтому у отменённой брони БЕЗ строк начислений
+ * начислено ноль, а не старый кэш `totalAmount`. Нынешний `cancel` такой брони итог
+ * обнуляет сам, но брони, отменённые до этого правила (в рабочей базе их много),
+ * донесли старую сумму — и висели фантомными должниками в кассе и в отчёте «Долги».
+ * Решаем здесь, в единой точке, а не разовой миграцией: правило одно на всю программу.
+ * В долги такая бронь попадёт только при `paid ≠ 0` — как переплата к возврату.
+ *
+ * @param {{ chargesTotal:number, hasCharges:boolean, totalAmount:number, status?:string }} src
  */
-function chargedOf({ chargesTotal, hasCharges, totalAmount }) {
-  return hasCharges ? round2(chargesTotal) : round2(totalAmount)
+function chargedOf({ chargesTotal, hasCharges, totalAmount, status = null }) {
+  if (hasCharges) return round2(chargesTotal)
+  if (status === 'CANCELLED') return 0
+  return round2(totalAmount)
 }
 
 /**
  * Деньги сразу по списку броней — ГРУППОВЫМИ запросами, а не по запросу на бронь:
  * экран долгов и отчёты работают на сотнях броней.
  *
- * @param {Array<{id:number, totalAmount:number}>} bookings уже загруженные брони
+ * @param {Array<{id:number, totalAmount:number, status?:string}>} bookings уже загруженные
+ *   брони (`status` нужен правилу «отмена обнуляет счёт», см. `chargedOf`)
  * @returns {Promise<Map<number, {charged:number, chargesTotal:number, chargesFromRows:boolean, paid:number, due:number}>>}
  */
 async function loadBookingMoney(bookings, client = prisma) {
@@ -76,7 +89,7 @@ async function loadBookingMoney(bookings, client = prisma) {
     const c = chargeMap.get(b.id)
     const hasCharges = !!c && (c._count ? c._count._all > 0 : true)
     const chargesTotal = round2(c && c._sum ? c._sum.amount || 0 : 0)
-    const charged = chargedOf({ chargesTotal, hasCharges, totalAmount: b.totalAmount })
+    const charged = chargedOf({ chargesTotal, hasCharges, totalAmount: b.totalAmount, status: b.status })
     const paid = round2(paidMap.get(b.id) || 0)
     out.set(b.id, {
       charged,
@@ -98,7 +111,8 @@ async function loadBookingMoney(bookings, client = prisma) {
 async function bookingMoney(bookingId, client = prisma) {
   const booking = await client.booking.findUnique({
     where: { id: bookingId },
-    select: { id: true, guestName: true, totalAmount: true, prepaidAmount: true, paidAmount: true },
+    // `status` — для правила «отмена обнуляет счёт» в chargedOf
+    select: { id: true, guestName: true, status: true, totalAmount: true, prepaidAmount: true, paidAmount: true },
   })
   if (!booking) return null
 

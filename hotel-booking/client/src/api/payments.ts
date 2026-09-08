@@ -1,4 +1,5 @@
 import api from './client'
+import type { BookingStatus } from '../types'
 
 /**
  * Платежи — журнал ПРИНЯТЫХ денег.
@@ -61,7 +62,13 @@ export interface DebtRow {
   guestPhone: string | null
   checkIn: string
   checkOut: string
-  status: string
+  /**
+   * Статус брони. С волны 5a в списке долгов есть и ОТМЕНЁННЫЕ брони с
+   * незакрытыми деньгами: отмена снимает начисления, и принятая предоплата
+   * становится отрицательным долгом — «к возврату». Без статуса такая строка
+   * выглядела бы обычной бронью с переплатой.
+   */
+  status: BookingStatus
   totalAmount: number
   prepaidAmount: number
   paidAmount: number

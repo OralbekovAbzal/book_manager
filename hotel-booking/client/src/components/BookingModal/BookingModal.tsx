@@ -15,26 +15,29 @@ import {
   updateActualTimes,
   checkAvailability,
   fetchBooking,
+  previewBooking,
 } from '../../api/bookings'
-import type { GuestDocPayload } from '../../api/bookings'
+import type {
+  GuestDocPayload, PreviewResult, PreviewRow, MissingPrice, SettlementAction,
+} from '../../api/bookings'
 import { lookupGuest } from '../../api/guests'
 import type {
-  Room, GridBooking, Booking, RatePrice, Service, MealPlan, PricingBase,
+  Room, GridBooking, Booking, Service, MealPlan,
   GuestDocType, GuestSex, GuestDocument, GuestLookup,
 } from '../../types'
+import type { BookingMoney } from '../../api/payments'
 import { fetchRoomAvailability } from '../../api/occupancy'
-import { fetchRates } from '../../api/rates'
 import { fetchServices, fetchMealPlans } from '../../api/services'
-import { fetchHotel } from '../../api/hotel'
-import { calculate, buildCalcKey, nightsOf } from '../../utils/calculator'
-import type { CalcInput, CalcResult, RateContext, BreakdownLine } from '../../utils/calculator'
+import { nightsBetween } from '../../utils/calculator'
+import { formatApiError } from '../Setup/accountRules'
 import { ChargesPanel } from './ChargesPanel'
 import { AllotmentConfirm } from './AllotmentConfirm'
+import { SettlementDialog } from './SettlementDialog'
 import { BookingMoneyBar } from '../Payments/BookingMoneyBar'
 import type { BookingMoneyBarHandle } from '../Payments/BookingMoneyBar'
 import {
   defaultLinks, linksFromBooking, linksKey, linksToPayload, newLink, isPerPerson,
-  servicePreviewLines, syncLinksWithGuests,
+  syncLinksWithGuests,
 } from './serviceLines'
 import type { ServiceLink, GuestTotals } from './serviceLines'
 import { DatePicker } from '../ui/DatePicker'
@@ -649,27 +652,6 @@ const DocSuggestionRow: React.FC<{
   </div>
 )
 
-// Сохранённые суммы брони (edit без пересчёта). totalAmount/prepaidAmount могут отсутствовать,
-// если полную версию с сервера загрузить не удалось.
-interface SavedTotals {
-  totalAmount?: number
-  prepaidAmount?: number
-  paidAmount: number
-}
-
-interface ResultCardProps {
-  result: CalcResult
-  discountPercent: number
-  prepaymentPercent: number
-  categoryName: string
-  loading?: boolean
-  saved?: SavedTotals | null   // edit: показать сохранённые суммы вместо расчёта
-  onRecalc?: () => void        // кнопка «Пересчитать по тарифу»
-  willRecalc?: boolean         // edit: итог уйдёт на сервер при сохранении
-  /** Выбранные услуги без цены — в счёт они не попали, и это надо объяснить */
-  unpricedServices?: string[]
-}
-
 /**
  * Услуга с нулевой ценой строки начисления не порождает (ноль — это незаполненный
  * тариф, а не «бесплатно»). Без пояснения это выглядит поломкой: включили
@@ -701,137 +683,175 @@ const resultRowStyle: React.CSSProperties = {
   display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)', marginBottom: 4,
 }
 
-const ResultCard: React.FC<ResultCardProps> = ({
-  result, discountPercent, prepaymentPercent, categoryName, loading, saved, onRecalc, willRecalc,
-  unpricedServices,
+// ─── Предпросмотр начислений ─────────────────────────────────────────────────
+// Числа приходят из `POST /bookings/preview` — того же кода, что выполняет
+// сохранение. Своего расчёта у формы больше нет: до волны 5a их было два (свой
+// в `utils/calculator.ts` и свой в `serviceLines.ts`), и на экране висели два
+// разных итога, а в базу записывался третий (аудит D7-009).
+
+/** Чего именно не хватает в календаре цен — говорим словами, а не кодом поля. */
+const MISSING_PART_LABELS: Record<string, string> = {
+  adult: 'взрослые',
+  child: 'дети',
+  extraBed: 'доп. место',
+  room: 'номер',
+}
+
+/**
+ * «На 2 ноч. цена не задана» + какие даты и что именно не заполнено.
+ * Молчать нельзя: итог получится неполным, а выглядеть будет обычным.
+ */
+const MissingPricesNote: React.FC<{ items: MissingPrice[] }> = ({ items }) => {
+  if (items.length === 0) return null
+  const parts = new Set<string>()
+  for (const it of items) for (const p of it.parts) parts.add(MISSING_PART_LABELS[p] ?? p)
+  const dates = items.map(i => fmtDay(i.date))
+  return (
+    <div style={{ ...infoBoxStyle('#fffbeb', '#b45309'), fontSize: '0.85rem', marginBottom: 8 }}>
+      На {items.length} ноч. цена не задана — итог неполный.
+      <div style={{ fontSize: '0.78rem', marginTop: 2 }}>
+        {dates.slice(0, 6).join(', ')}
+        {dates.length > 6 ? ` и ещё ${dates.length - 6}` : ''}
+        {parts.size > 0 ? ` · не заполнено: ${[...parts].join(', ')}` : ''}
+      </div>
+      <div style={{ fontSize: '0.78rem', marginTop: 2 }}>
+        Цены заполняются в разделе «Тарифы и наличие».
+      </div>
+    </div>
+  )
+}
+
+interface PreviewCardProps {
+  preview: PreviewResult | null
+  loading: boolean
+  /** Предпросмотр не получен: сеть, 400 от сервера. Молча показывать ноль нельзя. */
+  error: string
+  /** Принято по журналу платежей — без него «остаток» соврал бы */
+  paid: number
+  prepaymentPercent: number
+  categoryName: string
+  /** Выбранные услуги без цены — строки они не породят, и это надо объяснить */
+  unpricedServices?: string[]
+  /**
+   * Бронь закрыта (выехал или отменена). Предпросмотр по тарифу для неё был бы
+   * враньём: у отменённой автоматических начислений уже нет, у выехавшей раньше
+   * срока сняты непрожитые ночи. Настоящие деньги — в начислениях и в полосе
+   * «Оплата» выше, туда и отправляем.
+   */
+  closed?: boolean
+}
+
+/**
+ * Итог брони — ОДИН на экране (D7-009). Раньше их было два: «Итого по строкам»
+ * в панели начислений и «Итого со скидкой» здесь, и они не совпадали. Теперь
+ * панель начислений своего итога не печатает, а этот приходит с сервера.
+ */
+const PreviewCard: React.FC<PreviewCardProps> = ({
+  preview, loading, error, paid, prepaymentPercent, categoryName, unpricedServices, closed,
 }) => {
-  if (loading) {
+  if (closed) {
+    return (
+      <div style={{ textAlign: 'center', color: 'var(--text-faint)', fontSize: '0.9rem', padding: '12px 0', lineHeight: 1.5 }}>
+        Бронь закрыта — по тарифу больше не считается.
+        <div style={{ marginTop: 4 }}>Итог и оплата — в блоках «Начисления» и «Оплата» выше.</div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div style={{ ...infoBoxStyle('#fef2f2', '#dc2626'), fontSize: '0.88rem' }}>
+        {error}
+        <div style={{ fontSize: '0.78rem', marginTop: 2 }}>
+          Сумму считает сервер — пока он не ответил, показывать нечего.
+        </div>
+      </div>
+    )
+  }
+
+  if (loading || !preview) {
     return (
       <div style={{ textAlign: 'center', color: 'var(--text-faint)', fontSize: '1rem', padding: '12px 0' }}>
-        Загрузка…
+        {loading ? 'Считаем…' : 'Нет данных для расчёта'}
       </div>
     )
   }
 
-  // Edit без изменения входов калькулятора: итог не пересчитываем, показываем сохранённый
-  if (saved) {
-    const fmtOpt = (n?: number) => (n != null ? fmt(n) : '—')
-    const remaining = saved.totalAmount != null ? saved.totalAmount - saved.paidAmount : undefined
-    return (
-      <div>
-        <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)', marginBottom: 6 }}>Сохранённая сумма брони</div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>
-          <span>Итого</span>
-          <span style={{ color: '#6366f1' }}>{fmtOpt(saved.totalAmount)}</span>
-        </div>
-        <div style={resultRowStyle}>
-          <span>Предоплата</span>
-          <span style={{ color: 'var(--s-in)', fontWeight: 600 }}>{fmtOpt(saved.prepaidAmount)}</span>
-        </div>
-        <div style={resultRowStyle}>
-          <span>Оплачено</span>
-          <span style={{ fontWeight: 600 }}>{fmt(saved.paidAmount)}</span>
-        </div>
-        <div style={{ ...resultRowStyle, marginBottom: 10 }}>
-          <span>Остаток</span>
-          <span style={{ color: 'var(--s-overdue)', fontWeight: 600 }}>{fmtOpt(remaining)}</span>
-        </div>
-        <UnpricedNote names={unpricedServices} />
-        <button type="button" onClick={onRecalc} style={{ ...cancelBtnStyle, width: '100%', fontSize: '0.9rem', marginTop: 8 }}>
-          Пересчитать по тарифу
-        </button>
-      </div>
-    )
-  }
+  // Проживание — одной строкой: ночей может быть тридцать, и список ночей здесь
+  // не нужен. Подробности по ночам разворачиваются в панели начислений.
+  const stayRows = preview.rows.filter(r => r.kind === 'stay')
+  const otherRows = preview.rows.filter(r => r.kind !== 'stay')
+  const stayTotal = stayRows.reduce((s, r) => s + r.amount, 0)
+  const remaining = preview.total - paid
 
-  // Ни на одну ночь нет цены в календаре: 0 из калькулятора — это не цена
-  if (result.nights > 0 && result.noRates && categoryName) {
-    // Питание и услуги свою цену имеют и начислятся всё равно. Молчать о них
-    // нельзя: администратор увидел бы «итог не рассчитан», сохранил — и в брони
-    // появилась бы сумма из ниоткуда.
-    const svcTotal = result.breakdown
-      .filter(l => l.kind !== 'stay')
-      .reduce((sum, l) => sum + l.amount, 0)
+  if (preview.rows.length === 0) {
     return (
       <div style={{ textAlign: 'center', color: 'var(--s-out)', fontSize: '0.95rem', padding: '12px 0' }}>
-        Для категории «{categoryName}» на эти даты нет цен в календаре — проживание не рассчитано.
-        <div style={{ fontSize: '0.82rem', color: 'var(--text-faint)', marginTop: 4 }}>
-          Цены заполняются в разделе «Тарифы и наличие».
-        </div>
-        {svcTotal > 0 && (
-          <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--border-subtle)', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-            Питание и услуги начислятся: <strong>{fmt(svcTotal)}</strong>
-          </div>
+        <MissingPricesNote items={preview.missingPrices} />
+        {preview.missingPrices.length === 0 && (
+          <>
+            Начислять нечего: {categoryName ? `для категории «${categoryName}» ` : ''}
+            не заданы ни цены, ни гости.
+          </>
         )}
-        <UnpricedNote names={unpricedServices} hideWhere />
+        <UnpricedNote names={unpricedServices} hideWhere={preview.missingPrices.length > 0} />
       </div>
     )
   }
 
-  const hasGuests = result.nights > 0 && result.total !== 0
-  if (!hasGuests) {
-    return (
-      <div style={{ textAlign: 'center', color: 'var(--text-faint)', fontSize: '1rem', padding: '12px 0' }}>
-        Нет данных для расчёта
-      </div>
-    )
-  }
+  const rowLine = (r: PreviewRow, i: number) => (
+    <div key={i} style={{
+      display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem',
+      color: r.kind === 'discount' ? 'var(--s-out)' : 'var(--text-faint)', marginBottom: 4,
+    }}>
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={r.label}>
+        {/* Ручная строка помечена так же, как в панели начислений: одна и та же
+            строка не должна выглядеть в двух местах по-разному. */}
+        {r.source === 'manual' && (
+          <span style={{
+            marginRight: 5, padding: '0 4px', borderRadius: 4, fontSize: '0.7rem', fontWeight: 700,
+            background: '#fef3c7', color: '#92400e',
+          }} title="Ручная строка администратора">✎</span>
+        )}
+        {r.label}
+        {r.quantity !== 1 ? ` (${r.quantity} × ${r.unitPrice.toLocaleString('ru-RU')})` : ''}
+      </span>
+      <span style={{ whiteSpace: 'nowrap' }}>{fmt(r.amount)}</span>
+    </div>
+  )
 
   return (
     <div>
-      {result.missingNights > 0 && (
-        <div style={{ ...infoBoxStyle('#fffbeb', '#b45309'), fontSize: '0.85rem', marginBottom: 8 }}>
-          На {result.missingNights} ноч. цена не задана — итог неполный.
-          <div style={{ fontSize: '0.78rem', marginTop: 2 }}>
-            {result.missingDates.slice(0, 6).join(', ')}
-            {result.missingDates.length > 6 ? ` и ещё ${result.missingDates.length - 6}` : ''}
-          </div>
+      <MissingPricesNote items={preview.missingPrices} />
+
+      {stayRows.length > 0 && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: 'var(--text)', marginBottom: 4 }}>
+          {/* Ночей ровно столько, сколько строк проживания: ночь без цены
+              строки не порождает, и писать за неё «н.» значило бы соврать. */}
+          <span>Проживание ({stayRows.length} н.)</span>
+          <span style={{ whiteSpace: 'nowrap' }}>{fmt(stayTotal)}</span>
         </div>
       )}
-      {result.breakdown.map((line, i) => (
-        <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: '0.92rem', color: line.kind === 'stay' ? 'var(--text)' : 'var(--text-faint)', marginBottom: 4 }}>
-          <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={line.label}>
-            {line.label}
-            {line.kind === 'stay'
-              ? ` (${line.nights} н.)`
-              : line.quantity && line.quantity !== 1
-                ? ` (${line.quantity} × ${line.unitPrice?.toLocaleString('ru-RU')})`
-                : ''}
-          </span>
-          <span style={{ whiteSpace: 'nowrap' }}>{fmt(line.amount)}</span>
-        </div>
-      ))}
+      {otherRows.map(rowLine)}
+
       <div style={{ borderTop: '1px solid var(--border-subtle)', marginTop: 8, paddingTop: 8 }}>
-        {discountPercent > 0 && (
-          <>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)', marginBottom: 4 }}>
-              <span>Итого (до скидки)</span>
-              <span>{fmt(result.total)}</span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--s-out)', marginBottom: 4 }}>
-              <span>Скидка ({discountPercent}%)</span>
-              <span>−{fmt(result.total - result.totalAfterDiscount)}</span>
-            </div>
-          </>
-        )}
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '1.15rem', fontWeight: 700, color: 'var(--text)', marginBottom: 6 }}>
-          <span>Итого{discountPercent > 0 ? ' со скидкой' : ''}</span>
-          <span style={{ color: '#6366f1' }}>{fmt(result.totalAfterDiscount)}</span>
+          <span>Итого по строкам</span>
+          <span style={{ color: '#6366f1' }}>{fmt(preview.total)}</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)', marginBottom: 4 }}>
+        <div style={{ ...resultRowStyle }}>
           <span>Предоплата ({prepaymentPercent}%)</span>
-          <span style={{ color: 'var(--s-in)', fontWeight: 600 }}>{fmt(result.prepaidAmount)}</span>
+          <span style={{ color: 'var(--s-in)', fontWeight: 600 }}>{fmt(preview.prepaid)}</span>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.92rem', color: 'var(--text-faint)' }}>
-          <span>Остаток</span>
-          <span style={{ color: 'var(--s-overdue)', fontWeight: 600 }}>{fmt(result.remaining)}</span>
+        <div style={{ ...resultRowStyle }}>
+          <span>Оплачено</span>
+          <span style={{ fontWeight: 600 }}>{fmt(paid)}</span>
+        </div>
+        <div style={{ ...resultRowStyle }}>
+          <span>{remaining < 0 ? 'Переплата' : 'Остаток'}</span>
+          <span style={{ color: 'var(--s-overdue)', fontWeight: 600 }}>{fmt(Math.abs(remaining))}</span>
         </div>
         <UnpricedNote names={unpricedServices} />
-        {willRecalc && (
-          <div style={{ marginTop: 8, fontSize: '0.8rem', color: 'var(--text-faint)', textAlign: 'center' }}>
-            Итог будет пересчитан при сохранении
-          </div>
-        )}
       </div>
     </div>
   )
@@ -851,29 +871,38 @@ export const BookingModal: React.FC = () => {
   const [submitting, setSubmitting] = useState(false)
   const [apiError, setApiError] = useState('')
   const [earlyCheckoutConfirm, setEarlyCheckoutConfirm] = useState(false)
+  // Расчёт с гостем (отмена или ранний выезд по брони, где уже есть деньги).
+  // Состояние эфемерное — как у остальных диалогов формы, в стор ему не место.
+  const [settlement, setSettlement] = useState<SettlementAction | null>(null)
   const [roomOccupied, setRoomOccupied] = useState(false)
   // Квота партнёра: сервер вернул 409 ALLOTMENT_CONFLICT, ждём осознанного подтверждения
   const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
   const pendingValues = useRef<FormValues | null>(null)
-  // Есть ли у брони платежи. Если есть — «Оплачено» больше не поле ввода:
-  // `Booking.paidAmount` это КЭШ суммы платежей, сервер пересчитывает его после
-  // каждой операции по журналу (`paymentController.recalcBookingPaid`). Ручная
-  // правка продержится до следующего платежа и молча разойдётся с кассой.
-  // Пока платежей нет — поле остаётся редактируемым: 107 старых броней хранят
-  // принятые деньги просто числом, и запрет правки сделал бы их неисправимыми.
-  const [hasPayments, setHasPayments] = useState(false)
+  // Деньги брони по журналу платежей: «принято» и «долг». Приходят из
+  // BookingMoneyBar, который их и загружает. Поле «Оплачено» в форме теперь
+  // ТОЛЬКО показывает это число: `Booking.paidAmount` — кэш журнала, и правка
+  // руками жила до следующего платежа, а гонка между двумя запросами позволяла
+  // отправить устаревшее значение на сервер (аудит D5-011, D6-012).
+  const [moneySummary, setMoneySummary] = useState<BookingMoney | null>(null)
   const moneyBarRef = useRef<BookingMoneyBarHandle>(null)
   // Подставили ли в НОВУЮ бронь услуги «включено в тариф». Отметка нужна, потому что
   // справочник услуг грузится асинхронно: без неё повторная загрузка вернула бы
   // снятые галочки обратно.
   const linksSeeded = useRef(false)
 
-  // Цены — из календаря RatePrice, а не из localStorage: одна цена на каждую ночь
-  const [pricingBase, setPricingBase] = useState<PricingBase>('person')
   const [allServices, setAllServices] = useState<Service[]>([])
   const [mealPlans, setMealPlans] = useState<MealPlan[]>([])
-  const [ratesByDate, setRatesByDate] = useState<Record<string, RatePrice>>({})
-  const [ratesLoading, setRatesLoading] = useState(false)
+
+  // Предпросмотр начислений с сервера. Календарь цен форма больше не читает
+  // вовсе: цену ночи, базу скидки и округление знает генератор начислений,
+  // и второй такой же на клиенте — источник расхождений (D7-009).
+  const [preview, setPreview] = useState<PreviewResult | null>(null)
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewError, setPreviewError] = useState('')
+  // Номер запроса: ответ устаревшего предпросмотра не должен затирать свежий.
+  const previewReq = useRef(0)
+  // Панель начислений сохранила ручную строку — предпросмотр обязан её увидеть.
+  const [chargesVersion, setChargesVersion] = useState(0)
 
   // Гости — три счётчика, а не шесть. Деление «с питанием / без питания» ушло:
   // на проживание оно не влияло (счётчики складывались), а кому начислять питание,
@@ -887,7 +916,6 @@ export const BookingModal: React.FC = () => {
   const [disabledChildren, setDisabledChildren] = useState(0)
   const [discountPercent, setDiscountPercent] = useState(0)
   const [prepaymentPercent, setPrepaymentPercent] = useState(50)
-  const [paidAmount, setPaidAmount] = useState(0)
   const [selectedFlags, setSelectedFlags] = useState<string[]>([])
   const [customFlag, setCustomFlag] = useState('')
   // Фактические заезд/выезд держим в формате datetime-local ('YYYY-MM-DDTHH:mm',
@@ -907,8 +935,10 @@ export const BookingModal: React.FC = () => {
   // Edit: полная бронь с сервера (объект из сетки может быть частичным) и её загрузка
   const [serverBooking, setServerBooking] = useState<Booking | null>(null)
   const [loadingBooking, setLoadingBooking] = useState(false)
-  // Edit: админ явно нажал «Пересчитать по тарифу»
-  const [recalc, setRecalc] = useState(false)
+
+  // Закрытая бронь — общий признак для предпросмотра и для блокировки правок.
+  // Объявлен здесь, а не ниже, потому что от него зависит эффект предпросмотра.
+  const bookingClosed = modal.booking?.status === 'CANCELLED' || modal.booking?.status === 'CHECKED_OUT'
 
   const isEdit        = modal.mode === 'edit'
   const isMaintenance = modal.mode === 'maintenance' ||
@@ -933,11 +963,11 @@ export const BookingModal: React.FC = () => {
     fetchRooms({ isActive: true }).then(r => setRooms([...r].sort(compareRooms)))
   }, [])
 
-  // Настройки объекта, справочник услуг и пресеты пансиона — общие для всей формы.
-  // pricingBase решает, какие поля цены значимы: 'room' — за номер, 'person' — за место.
+  // Справочник услуг и пресеты пансиона — общие для всей формы. Цены объекта
+  // (pricingBase, календарь RatePrice) форма больше не читает: по ним считает
+  // предпросмотр на сервере.
   // Услуги берём ВСЕ активные: питание выбирается галочками, а не флагом в справочнике.
   useEffect(() => {
-    fetchHotel().then(h => setPricingBase(h.pricingBase)).catch(() => {})
     fetchServices()
       .then(list => setAllServices(list.filter(s => s.isActive)))
       .catch(() => setAllServices([]))
@@ -951,7 +981,9 @@ export const BookingModal: React.FC = () => {
   const mealServices = useMemo(() => allServices.filter(s => s.kind === 'meal'), [allServices])
   const extraServices = useMemo(() => allServices.filter(s => s.kind !== 'meal'), [allServices])
 
-  // Счётчики гостей, скидка, предоплата, «Оплачено» — из брони; {} даёт сброс для create.
+  // Счётчики гостей, скидка и предоплата — из брони; {} даёт сброс для create.
+  // «Оплачено» здесь больше нет: это число живёт в журнале платежей, форма его
+  // только показывает (см. moneySummary).
   // Старые брони держат гостей в ДВУХ колонках («с питанием» / «без питания») —
   // складываем: в форме тип гостя один, а питание живёт отдельным блоком.
   const applyCalcFields = (b: Partial<Booking>) => {
@@ -962,7 +994,6 @@ export const BookingModal: React.FC = () => {
     setDisabledChildren(b.disabledChildren ?? 0)
     setDiscountPercent(b.discountPercent ?? 0)
     setPrepaymentPercent(b.prepaymentPercent ?? 50)
-    setPaidAmount(b.paidAmount ?? 0)
     // Объект сетки этих полей не отдаёт вовсе — там будет пусто, настоящие значения
     // приедут вторым вызовом, уже с полной бронью из GET /bookings/:id.
     setActualCheckInAt(isoToLocalInput(b.actualCheckInAt))
@@ -1001,7 +1032,6 @@ export const BookingModal: React.FC = () => {
       // сетки его не несёт. До ответа сервера поля пустые, а «Сохранить»
       // заблокирована (loadingBooking) — отправить пустой документ нельзя.
       setDoc(EMPTY_DOC)
-      setRecalc(false)
       setLoadingBooking(true)
       fetchBooking(booking.id)
         .then(full => {
@@ -1035,7 +1065,6 @@ export const BookingModal: React.FC = () => {
       setSelectedFlags([])
       setCustomFlag('')
       setServerBooking(null)
-      setRecalc(false)
       setLoadingBooking(false)
       // Новая бронь получает услуги «включено в тариф». Справочник мог ещё не
       // загрузиться — тогда набор подставит эффект ниже, поэтому снимаем отметку.
@@ -1049,10 +1078,12 @@ export const BookingModal: React.FC = () => {
     // Диалог «Ранний выезд» не должен переживать закрытие формы и всплывать на другой брони
     setEarlyCheckoutConfirm(false)
     setAllotmentWarning(null)
-    // Признак платежей — про КОНКРЕТНУЮ бронь. Не сбросить его значит перенести
-    // «только для чтения» с оплаченной брони на следующую открытую, у которой
-    // платежей нет; настоящее значение приходит из BookingMoneyBar после загрузки.
-    setHasPayments(false)
+    // Деньги и предпросмотр — про КОНКРЕТНУЮ бронь. Не сбросить их значит
+    // показать на следующей открытой брони чужие суммы, пока не придут свои.
+    setMoneySummary(null)
+    setPreview(null)
+    setPreviewError('')
+    setChargesVersion(0)
     // Предложение подставить документ — про КОНКРЕТНЫЙ телефон. Не сбросить его
     // значит показать на следующей открытой брони чужую подсказку.
     setDocSuggestion(null)
@@ -1177,87 +1208,100 @@ export const BookingModal: React.FC = () => {
     () => rooms.find(r => r.id === Number(watchedRoomId)),
     [rooms, watchedRoomId]
   )
+  // Категория нужна только для подписи: цену по ней считает сервер.
   const categoryName = selectedRoom?.category?.name ?? ''
-  const categoryId = selectedRoom?.category?.id ?? 0
   // Номер комнаты для диалога оплаты: список номеров грузится асинхронно, поэтому
   // подстраховываемся серверной версией брони — деньги нельзя принять «непонятно куда».
   const roomNumberLabel = selectedRoom?.number ?? serverBooking?.room?.number ?? ''
 
-  // Цены на ночи брони. Спрашиваем ровно ночи [checkIn, checkOut): последняя ночь —
-  // это checkOut минус день, за сам день выезда не платят.
-  useEffect(() => {
-    const dates = nightsOf(watchedCheckIn, watchedCheckOut)
-    if (!categoryId || dates.length === 0) {
-      setRatesByDate({})
-      setRatesLoading(false)
-      return
-    }
-    let cancelled = false
-    setRatesLoading(true)
-    fetchRates(dates[0], dates[dates.length - 1], categoryId)
-      .then(list => {
-        if (cancelled) return
-        const map: Record<string, RatePrice> = {}
-        for (const r of list) map[String(r.date).slice(0, 10)] = r
-        setRatesByDate(map)
-      })
-      .catch(() => { if (!cancelled) setRatesByDate({}) })
-      .finally(() => { if (!cancelled) setRatesLoading(false) })
-    return () => { cancelled = true }
-  }, [categoryId, watchedCheckIn, watchedCheckOut])
+  // «Оплачено» — только из журнала платежей. Пока полоса денег не ответила,
+  // показываем кэш брони: это то же число, снятое чуть раньше. Ввода нет —
+  // менять его может лишь операция по кассе.
+  const paidAmount = moneySummary?.paid ?? (serverBooking ?? booking)?.paidAmount ?? 0
 
-  // Калькулятор считает только проживание. Услуги он не знает: скольким гостям
-  // начислено питание, сказано строками BookingService, и предпросмотр по ним
-  // собирается ниже (servicePreviewLines).
-  const rateCtx = useMemo<RateContext>(
-    () => ({ pricingBase, ratesByDate }),
-    [pricingBase, ratesByDate],
-  )
-
-  // Входы калькулятора — общие для расчёта и для ключа «изменились ли входы».
-  // Три счётчика формы кладём в поля `*WithMeals`: на проживание деление не влияет,
-  // а старые поля остаются ради 107 существующих броней (см. NOTES).
-  const calcInput = useMemo<CalcInput>(() => ({
-    checkIn: watchedCheckIn,
-    checkOut: watchedCheckOut,
-    categoryId,
-    categoryName,
-    adultsWithMeals: adults,
-    childrenWithMeals: children,
-    adultsNoMeals: 0,
-    childrenNoMeals: 0,
-    extraBedsWithMeals: extraBeds,
-    extraBedsNoMeals: 0,
-    disabledAdults,
-    disabledChildren,
-    discountPercent,
-    prepaymentPercent,
-  }), [
-    watchedCheckIn, watchedCheckOut, categoryId, categoryName,
+  // ─── Предпросмотр начислений: считает СЕРВЕР ───────────────────────────────
+  // Ключ входов. Меняется он — уходит новый запрос; не меняется (правка заметки,
+  // имени, метки) — сервер не дёргаем. `chargesVersion` в ключе: панель начислений
+  // сохранила ручную строку, и предпросмотр обязан её увидеть, хотя поля формы
+  // при этом не изменились.
+  const previewKey = [
+    // Открытие/закрытие в ключе намеренно: закрыли и открыли ту же бронь с теми
+    // же полями — ключ обязан смениться, иначе после сброса состояния запрос не
+    // уйдёт и карточка останется пустой.
+    modal.open ? 1 : 0,
+    watchedRoomId, watchedCheckIn, watchedCheckOut,
     adults, children, extraBeds, disabledAdults, disabledChildren,
     discountPercent, prepaymentPercent,
-  ])
+    linksKey(serviceLinks),
+    isEdit ? booking?.id : 0,
+    // Пока полная бронь не загружена, набор услуг в форме пуст не потому, что
+    // питание сняли, — предпросмотр по нему соврал бы. Ждём серверную версию.
+    isEdit ? (serverBooking ? 1 : 0) : 1,
+    bookingClosed ? 1 : 0,
+    chargesVersion,
+  ].join('|')
 
-  // Проживание — из калькулятора, услуги — из выбранных строк. Складываем здесь,
-  // потому что скидка считается от ВСЕГО счёта: так же, как её пишет сервер.
-  const calcResult = useMemo<CalcResult>(() => {
-    const base = calculate(calcInput, rateCtx)
-    const svc: BreakdownLine[] = servicePreviewLines(serviceLinks, servicesById, base.nights)
-    if (svc.length === 0) return base
+  useEffect(() => {
+    // У «Ремонта» денег нет вовсе, калькулятор ему не показывается.
+    if (isMaintenance) { setPreview(null); setPreviewLoading(false); setPreviewError(''); return }
 
-    const total = base.total + svc.reduce((s, l) => s + l.amount, 0)
-    const discount = discountPercent > 0 ? Math.round(total * discountPercent / 100) : 0
-    const totalAfterDiscount = total - discount
-    const prepaid = Math.round(totalAfterDiscount * (prepaymentPercent / 100))
-    return {
-      ...base,
-      breakdown: [...base.breakdown, ...svc],
-      total,
-      totalAfterDiscount,
-      prepaidAmount: prepaid,
-      remaining: totalAfterDiscount - prepaid,
+    const roomId = Number(watchedRoomId)
+    const ready = modal.open && !bookingClosed
+      && !!roomId && !!watchedCheckIn && !!watchedCheckOut && watchedCheckOut > watchedCheckIn
+      && (!isEdit || !!serverBooking)
+    if (!ready) {
+      // Считать нечего — гасим и предыдущий ответ, иначе на экране останутся
+      // суммы от прошлых дат.
+      previewReq.current++
+      setPreview(null)
+      setPreviewLoading(false)
+      setPreviewError('')
+      return
     }
-  }, [calcInput, rateCtx, serviceLinks, servicesById, discountPercent, prepaymentPercent])
+
+    // Номер запроса растёт на КАЖДЫЙ прогон эффекта: ответ, отправленный до
+    // последней правки, к этому моменту уже устарел и в состояние не попадает.
+    const my = ++previewReq.current
+    setPreviewLoading(true)
+    const timer = setTimeout(() => {
+      previewBooking({
+        roomId,
+        checkIn: watchedCheckIn,
+        checkOut: watchedCheckOut,
+        // Гости — в поля `*WithMeals`, как и при сохранении: деление «с питанием /
+        // без питания» осталось только в старых колонках (см. NOTES).
+        adultsWithMeals: adults,
+        childrenWithMeals: children,
+        adultsNoMeals: 0,
+        childrenNoMeals: 0,
+        extraBedsWithMeals: extraBeds,
+        extraBedsNoMeals: 0,
+        disabledAdults,
+        disabledChildren,
+        discountPercent,
+        prepaymentPercent,
+        services: linksToPayload(serviceLinks),
+        // Правка брони: ручные строки (уступки, штрафы) сервер подтянет сам по id.
+        ...(isEdit && booking ? { bookingId: booking.id } : {}),
+      })
+        .then(r => {
+          if (my !== previewReq.current) return
+          setPreview(r)
+          setPreviewError('')
+        })
+        .catch(e => {
+          if (my !== previewReq.current) return
+          setPreview(null)
+          setPreviewError(formatApiError(e, 'Не удалось рассчитать стоимость'))
+        })
+        .finally(() => {
+          if (my === previewReq.current) setPreviewLoading(false)
+        })
+    }, 300)
+
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewKey, isMaintenance])
 
   // Выбранные услуги, у которых цены нет вовсе. Строку начисления они не породят
   // (ноль — это незаполненный тариф, а не «бесплатно»), поэтому в счёте их просто
@@ -1274,48 +1318,6 @@ export const BookingModal: React.FC = () => {
     }
     return names
   }, [serviceLinks, servicesById])
-
-  // Базовый ключ входов — из СЕРВЕРНОЙ версии брони (категория: room.category.name из BOOKING_SELECT)
-  const baseCalcKey = useMemo(() => {
-    if (!serverBooking) return null
-    return buildCalcKey({
-      checkIn: serverBooking.checkIn.slice(0, 10),
-      checkOut: serverBooking.checkOut.slice(0, 10),
-      categoryId: serverBooking.room?.category?.id ?? 0,
-      categoryName: serverBooking.room?.category?.name ?? '',
-      // Сравниваем в той же системе координат, что и форма: гости сложены по типам,
-      // иначе открытие старой брони «с питанием + без питания» само выглядело бы
-      // как изменение и переоценивало её по сегодняшнему тарифу.
-      adultsWithMeals: (serverBooking.adultsWithMeals ?? 0) + (serverBooking.adultsNoMeals ?? 0),
-      childrenWithMeals: (serverBooking.childrenWithMeals ?? 0) + (serverBooking.childrenNoMeals ?? 0),
-      adultsNoMeals: 0,
-      childrenNoMeals: 0,
-      extraBedsWithMeals: (serverBooking.extraBedsWithMeals ?? 0) + (serverBooking.extraBedsNoMeals ?? 0),
-      extraBedsNoMeals: 0,
-      disabledAdults: serverBooking.disabledAdults ?? 0,
-      disabledChildren: serverBooking.disabledChildren ?? 0,
-      discountPercent: serverBooking.discountPercent ?? 0,
-      prepaymentPercent: serverBooking.prepaymentPercent ?? 50,
-    })
-  }, [serverBooking])
-
-  // Питание — такой же вход тарифа, как даты и гости: сняли обед — итог обязан
-  // пересчитаться, иначе форма показывала бы старую сохранённую сумму.
-  const baseServicesKey = useMemo(
-    () => (serverBooking ? linksKey(linksFromBooking(serverBooking.services)) : null),
-    [serverBooking],
-  )
-
-  // В edit итог пересчитываем только если изменились входы калькулятора (даты, категория, гости,
-  // скидка, предоплата) или админ нажал «Пересчитать по тарифу». Иначе правка заметки на ноутбуке
-  // с другим тарифом в localStorage молча переоценивала бронь.
-  // rooms.length > 0: пока номера не загружены, categoryName пустой и ключи различались бы ложно.
-  const inputsChanged = isEdit && baseCalcKey !== null && rooms.length > 0
-    && (baseCalcKey !== buildCalcKey(calcInput) || baseServicesKey !== linksKey(serviceLinks))
-  const sendTotals = !isEdit || recalc || inputsChanged
-  // Цен на эти даты нет (или ещё грузятся): 0 из калькулятора — не цена, суммы не отправляем.
-  // Итог всё равно соберёт сервер из строк начислений — он и есть источник истины.
-  const includeTotals = sendTotals && !calcResult.noRates && !ratesLoading
 
   // Real-time availability check
   useEffect(() => {
@@ -1409,18 +1411,14 @@ export const BookingModal: React.FC = () => {
         disabledChildren,
         discountPercent,
         prepaymentPercent,
-        // Итог и предоплата — только при создании, изменении входов или явном «Пересчитать»
-        ...(includeTotals
-          ? { totalAmount: calcResult.totalAfterDiscount, prepaidAmount: calcResult.prepaidAmount }
-          : {}),
-        // «Оплачено» отправляем, только пока платежей нет. Как только журнал
-        // непуст, число считает сервер, и слать своё — значит затирать кэш
-        // тем, что было на экране в момент открытия формы (соседнее рабочее
-        // место могло принять деньги минуту назад). Сервер пишет поле только
-        // при `paidAmount !== undefined`, поэтому пропуск ключа его не трогает.
-        ...(hasPayments ? {} : { paidAmount }),
+        // ИТОГ, ПРЕДОПЛАТА И «ОПЛАЧЕНО» НЕ ОТПРАВЛЯЮТСЯ ВОВСЕ (волна 5a).
+        // Итог брони — сумма строк начислений, её собирает сервер тем же кодом,
+        // что и предпросмотр; `paidAmount` — кэш журнала платежей. Раньше форма
+        // слала свои числа, и они расходились с базой (D5-002, D2-005), а гонка
+        // между ответами двух запросов позволяла затереть свежий кэш платежей
+        // старым (D5-011, D6-012). Этих полей нет даже в типе `BookingPayload`.
         // Фактические заезд/выезд отправляем ТОЛЬКО если админ их действительно
-        // изменил. Причина та же, что у «Оплачено»: обычно время ставят кнопки
+        // изменил: обычно время ставят кнопки
         // «Заезд»/«Выезд», и слать своё на каждое сохранение брони — значит
         // затирать то, что минуту назад отметило соседнее рабочее место.
         // Сравниваем с серверной версией; пока она не загружена, сравнивать не с чем.
@@ -1431,9 +1429,9 @@ export const BookingModal: React.FC = () => {
           ? { actualCheckOutAt: localInputToIso(actualCheckOutAt) }
           : {}),
         flags: [...selectedFlags, ...(customFlag.trim() ? [customFlag.trim()] : [])],
-        // Строки начислений сервер пересобирает сам при изменении дат/гостей/скидки;
-        // здесь просим это явно, когда админ нажал «Пересчитать по тарифу».
-        ...(recalc ? { recalcCharges: true } : {}),
+        // Строки начислений сервер пересобирает сам при изменении дат/гостей/скидки.
+        // Явное «Пересчитать по тарифу» живёт в панели начислений («⟳ По тарифу»):
+        // там видно, что именно пересоберётся, и делается это сразу, без сохранения.
         ...(allowAllotmentOverride ? { allowAllotmentOverride: true } : {}),
       }
 
@@ -1454,7 +1452,9 @@ export const BookingModal: React.FC = () => {
         setAllotmentWarning(res.data.error ?? 'Номер выделен партнёру по квоте')
         return
       }
-      setApiError(res?.data?.error ?? 'Ошибка сохранения')
+      // formatApiError добавляет к сообщению разбор по полям: при 400 сервер
+      // отвечает «Ошибка валидации» + details, и без них было непонятно, что чинить.
+      setApiError(formatApiError(err, 'Не удалось сохранить бронь'))
     } finally {
       setSubmitting(false)
     }
@@ -1468,15 +1468,37 @@ export const BookingModal: React.FC = () => {
     if (values) submitValues(values, true)
   }
 
+  /**
+   * Отмена брони. Сервер ставит `CANCELLED` и снимает автоматические начисления;
+   * ручные строки (штраф за отмену) остаются. Оплаченное превращается в
+   * отрицательный долг — «к возврату», он виден в «Кассе → Долги».
+   * Раньше окно спрашивало просто «Отменить бронь?» и молчало про деньги (D7-007).
+   */
   const handleCancel = async () => {
-    if (!booking || !confirm('Отменить бронь?')) return
+    if (!booking) return
+    const paid = moneySummary?.paid ?? 0
+    // По брони уже приняты деньги — отмена без разговора о них оставила бы
+    // переплату висеть до тех пор, пока кто-нибудь не откроет «Кассу».
+    // Открываем расчёт: там и штраф за отмену, и возврат.
+    if (paid > 0) { setSettlement('cancel'); return }
+    const text = [
+      'Отменить бронь?',
+      '',
+      'Бронь останется в истории со статусом «Отменена». Начисления будут сняты.',
+      paid > 0
+        ? `Принятые ${fmt(paid)} станут «к возврату» — их видно в разделе «Касса» → «Долги».`
+        : '',
+    ].filter(Boolean).join('\n')
+    if (!confirm(text)) return
     setSubmitting(true)
     try {
       await cancelBooking(booking.id)
       closeModal()
       await Promise.all([fetchGrid(), fetchToday()])
-    } catch {
-      setApiError('Ошибка отмены')
+    } catch (e) {
+      // Текст сервера, а не «Ошибка отмены»: он объясняет, что делать
+      // (не тот статус, нет прав, бронь уже закрыта) — аудит D5-005.
+      setApiError(formatApiError(e, 'Не удалось отменить бронь'))
     } finally {
       setSubmitting(false)
     }
@@ -1489,8 +1511,10 @@ export const BookingModal: React.FC = () => {
       await checkInBooking(booking.id)
       closeModal()
       await Promise.all([fetchGrid(), fetchToday()])
-    } catch {
-      setApiError('Ошибка отметки заезда')
+    } catch (e) {
+      // Сервер отвечает содержательно: «раньше даты заезда», «дата выезда уже
+      // прошла», «не тот статус». Своё «Ошибка отметки заезда» это скрывало.
+      setApiError(formatApiError(e, 'Не удалось отметить заезд'))
     } finally {
       setSubmitting(false)
     }
@@ -1501,9 +1525,12 @@ export const BookingModal: React.FC = () => {
   const handleCheckOut = async () => {
     if (!booking) return
 
-    // Если выезд раньше запланированной даты — показываем подтверждение
+    // Если выезд раньше запланированной даты — показываем подтверждение.
+    // А если по брони уже приняты деньги, подтверждения мало: непрожитые ночи
+    // снимутся со счёта, и разницу нужно тут же вернуть — открываем расчёт.
     const plannedCheckOut = booking.checkOut.slice(0, 10)
     if (effectiveToday < plannedCheckOut && !earlyCheckoutConfirm) {
+      if ((moneySummary?.paid ?? 0) > 0) { setSettlement('checkout'); return }
       setEarlyCheckoutConfirm(true)
       return
     }
@@ -1514,8 +1541,8 @@ export const BookingModal: React.FC = () => {
       await checkOutBooking(booking.id)
       closeModal()
       await Promise.all([fetchGrid(), fetchToday()])
-    } catch {
-      setApiError('Ошибка отметки выезда')
+    } catch (e) {
+      setApiError(formatApiError(e, 'Не удалось отметить выезд'))
     } finally {
       setSubmitting(false)
     }
@@ -1546,8 +1573,8 @@ export const BookingModal: React.FC = () => {
       await updateActualTimes(booking.id, payload)
       closeModal()
       await Promise.all([fetchGrid(), fetchToday()])
-    } catch {
-      setApiError('Ошибка сохранения фактического времени')
+    } catch (e) {
+      setApiError(formatApiError(e, 'Не удалось сохранить фактическое время'))
     } finally {
       setSubmitting(false)
     }
@@ -1557,12 +1584,15 @@ export const BookingModal: React.FC = () => {
   if (modal.mode === 'move') return null  // Move-режим обрабатывает MoveBookingModal
   if (modal.mode === 'view') return null  // View-режим обрабатывает BookingViewModal
 
-  const isClosed = booking?.status === 'CANCELLED' || booking?.status === 'CHECKED_OUT'
+  const isClosed = bookingClosed
   const isCheckedIn = booking?.status === 'CHECKED_IN'
 
-  // Заезд доступен только если дата заезда брони не позже сегодняшней даты смены
+  // Заезд доступен, только если дата заезда брони не позже рабочей даты И дата
+  // выезда ещё не прошла: заселять «во вчера» бессмысленно, сервер такой заезд
+  // теперь и не примет (400). Кнопку прячем, чтобы не предлагать заведомый отказ.
   const canCheckIn = isEdit && booking?.status === 'CONFIRMED' &&
-    !!booking?.checkIn && booking.checkIn.slice(0, 10) <= effectiveToday
+    !!booking?.checkIn && booking.checkIn.slice(0, 10) <= effectiveToday &&
+    !!booking?.checkOut && booking.checkOut.slice(0, 10) > effectiveToday
   const canCheckOut = isEdit && isCheckedIn
 
   // Фактическое время показываем, когда оно уже есть либо когда статус говорит,
@@ -1581,7 +1611,7 @@ export const BookingModal: React.FC = () => {
       : 'Новая бронь'
 
   const nightsLabel = watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn
-    ? `${calcResult.nights} ночей · ${watchedCheckIn} – ${watchedCheckOut}`
+    ? `${nightsBetween(watchedCheckIn, watchedCheckOut)} ночей · ${watchedCheckIn} – ${watchedCheckOut}`
     : 'Выберите даты'
 
   return (
@@ -1971,7 +2001,7 @@ export const BookingModal: React.FC = () => {
                   background: isSameDayCheckout ? '#fee2e2' : '#fef3c7',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: '1.69rem', flexShrink: 0,
-                }}>{isSameDayCheckout ? '🗑' : '⚠'}</div>
+                }}>{'⚠'}</div>
                 <div>
                   <div style={{ fontSize: '1.23rem', fontWeight: 700, color: 'var(--text)', marginBottom: 2 }}>
                     {isSameDayCheckout ? 'Выезд день в день' : 'Ранний выезд'}
@@ -2010,9 +2040,10 @@ export const BookingModal: React.FC = () => {
                       <span style={{ fontWeight: 600, color: '#d97706' }}>{effectiveToday}</span>
                     </div>
                     {(() => {
-                      const planned = new Date(booking.checkOut.slice(0, 10))
-                      const actual  = new Date(effectiveToday)
-                      const diff    = Math.round((planned.getTime() - actual.getTime()) / 86400_000)
+                      // Ночи между рабочей датой и датой выезда по брони — ровно
+                      // те, что сервер снимет со счёта при выезде (проживание и
+                      // питание за них). Раньше здесь обещали «возврат позже».
+                      const diff = nightsBetween(effectiveToday, booking.checkOut.slice(0, 10))
                       return diff > 0 ? (
                         <div style={{
                           marginTop: 4,
@@ -2023,8 +2054,11 @@ export const BookingModal: React.FC = () => {
                           color: '#92400e',
                           fontWeight: 500,
                         }}>
-                          Неиспользовано {diff} {diff === 1 ? 'ночь' : diff < 5 ? 'ночи' : 'ночей'}.
-                          Возможность возврата за неиспользованные дни будет добавлена позже.
+                          Со счёта будут сняты {diff} {diff === 1 ? 'непрожитая ночь' : diff < 5 ? 'непрожитые ночи' : 'непрожитых ночей'}
+                          {' '}— проживание и питание за них. Итог брони пересчитается.
+                          <div style={{ fontWeight: 400, marginTop: 4 }}>
+                            Штраф за досрочный выезд, если он есть, добавляется ручной строкой в начислениях.
+                          </div>
                         </div>
                       ) : null
                     })()}
@@ -2034,7 +2068,18 @@ export const BookingModal: React.FC = () => {
 
               <div style={{ fontSize: '1rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
                 {isSameDayCheckout
-                  ? 'Гость выезжает в день заезда. Бронь будет удалена — номер освободится немедленно.'
+                  ? (
+                      <>
+                        Гость выезжает в день заезда — номер освободится немедленно.
+                        {' '}Бронь <strong>не удаляется</strong>: она останется в истории со статусом
+                        {' '}«Отменена», начисления будут сняты.
+                        {(moneySummary?.paid ?? 0) > 0 && (
+                          <div style={{ marginTop: 6 }}>
+                            Принятые {fmt(moneySummary?.paid ?? 0)} станут «к возврату» — их видно в «Кассе».
+                          </div>
+                        )}
+                      </>
+                    )
                   : 'Гость выезжает раньше запланированного срока. Дата выезда в брони будет обновлена автоматически.'
                 }
               </div>
@@ -2067,13 +2112,33 @@ export const BookingModal: React.FC = () => {
                   {submitting
                     ? 'Оформляем...'
                     : isSameDayCheckout
-                    ? 'Да, удалить бронь'
+                    ? 'Да, отменить бронь'
                     : 'Да, оформить выезд'
                   }
                 </button>
               </div>
             </div>
           </div>
+        )}
+
+        {/* ── Расчёт с гостем ── открывается вместо простого подтверждения, если
+            по брони уже приняты деньги: отмена и ранний выезд меняют счёт, и
+            разницу надо вернуть здесь же, не уходя в «Кассу». */}
+        {settlement && booking && (
+          <SettlementDialog
+            bookingId={booking.id}
+            action={settlement}
+            guestName={(serverBooking ?? booking).guestName}
+            subtitle={`${roomNumberLabel ? `Номер ${roomNumberLabel} · ` : ''}${fmtDay(watchedCheckIn)} — ${fmtDay(watchedCheckOut)}`}
+            onClose={() => setSettlement(null)}
+            onDone={async () => {
+              // Отмена и выезд закрывают бронь — держать её форму открытой
+              // не на чем: правки в ней уже запрещены статусом.
+              setSettlement(null)
+              closeModal()
+              await Promise.all([fetchGrid(), fetchToday()])
+            }}
+          />
         )}
 
         {/* ── Partner allotment confirmation dialog ── */}
@@ -2120,7 +2185,12 @@ export const BookingModal: React.FC = () => {
                 <ChargesPanel
                   bookingId={booking.id}
                   readOnly={isClosed}
-                  onChanged={(b) => { if (b) setServerBooking(b) }}
+                  onChanged={(b) => {
+                    if (b) setServerBooking(b)
+                    // Ручная строка изменилась — предпросмотр внизу обязан её
+                    // учесть, иначе на экране снова окажутся два разных итога.
+                    setChargesVersion(v => v + 1)
+                  }}
                 />
               )}
 
@@ -2135,11 +2205,11 @@ export const BookingModal: React.FC = () => {
                   title="Оплата"
                   guestName={(serverBooking ?? booking).guestName}
                   subtitle={`${roomNumberLabel ? `Номер ${roomNumberLabel} · ` : ''}${fmtDay(watchedCheckIn)} — ${fmtDay(watchedCheckOut)}`}
-                  // `Booking.paidAmount` — кэш суммы платежей, сервер пересчитал его сам.
-                  // Форма открыта и об этом не знает: без синхронизации сохранение
-                  // брони отправило бы старое «Оплачено» поверх свежего кэша.
-                  onChanged={(s) => setPaidAmount(s.paid)}
-                  onJournalPresence={setHasPayments}
+                  // Единственный источник «принято/долг» в форме: полосу денег
+                  // и так грузит она сама, второй такой же запрос был бы гонкой
+                  // (из-за неё форма и отправляла устаревшее «Оплачено» — D5-011).
+                  onSummary={setMoneySummary}
+                  bookingStatus={(serverBooking ?? booking).status}
                 />
               )}
 
@@ -2256,13 +2326,16 @@ export const BookingModal: React.FC = () => {
                       style={{ ...inputStyle, width: 88, textAlign: 'right' }}
                     />
                   </div>
-                  {/* «Оплачено» — два разных поля в зависимости от того, есть ли
-                      журнал платежей. С журналом это КЭШ его суммы: сервер
-                      пересчитывает число после каждого приёма, возврата и отмены,
-                      и правка руками разъехалась бы с кассой до следующего платежа.
-                      Без журнала (107 старых броней) число хранится само по себе —
-                      там правка это единственный способ поправить ошибку. */}
-                  {hasPayments ? (
+                  {/* «Оплачено» — ВСЕГДА только для чтения (волна 5a). Это кэш
+                      журнала платежей: сервер пересчитывает его после каждого
+                      приёма, возврата и отмены и с волны 5a не принимает это поле
+                      от клиента вовсе. Ручной ввод раньше выглядел как касса, но
+                      мимо неё и проходил: в отчёте смены таких денег не было
+                      (аудит D2-005). Поправить сумму можно только операцией по
+                      журналу — кнопка рядом. Новую бронь оплачивают так же:
+                      сначала создать, потом принять деньги.
+                      У новой брони полосы денег ещё нет, поэтому и поля нет. */}
+                  {isEdit && booking && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                         <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Оплачено (₸)</label>
@@ -2291,26 +2364,16 @@ export const BookingModal: React.FC = () => {
                         </button>
                       </div>
                     </div>
-                  ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <label style={{ fontSize: '0.95rem', color: 'var(--text-muted)' }}>Оплачено (₸)</label>
-                      <input
-                        type="number"
-                        min={0}
-                        value={paidAmount}
-                        onChange={e => setPaidAmount(Math.max(0, Number(e.target.value)))}
-                        className="mono"
-                        style={{ ...inputStyle, width: 128, textAlign: 'right' }}
-                      />
-                    </div>
                   )}
                 </div>
               </CalcSection>
 
             </div>
 
-            {/* Result card (bottom, fixed) */}
-            {/* Итог брони. Раньше здесь были зашитые #fff и #111827 — в тёмной теме
+            {/* Итог брони — ОДИН на экране (D7-009): числа приходят из
+                `POST /bookings/preview`, то есть из того же кода, что выполнит
+                сохранение. Панель начислений выше своего итога больше не печатает.
+                Раньше здесь были зашитые #fff и #111827 — в тёмной теме
                 блок оставался белым островом посреди тёмной формы. */}
             <div style={{
               padding: '18px 22px',
@@ -2318,20 +2381,15 @@ export const BookingModal: React.FC = () => {
               background: 'var(--surface)',
               flexShrink: 0,
             }}>
-              <ResultCard
-                result={calcResult}
-                discountPercent={discountPercent}
+              <PreviewCard
+                preview={preview}
+                loading={previewLoading || loadingBooking}
+                error={previewError}
+                paid={paidAmount}
                 prepaymentPercent={prepaymentPercent}
                 categoryName={categoryName}
-                loading={loadingBooking || ratesLoading}
-                saved={isEdit && !sendTotals ? {
-                  totalAmount: (serverBooking ?? booking)?.totalAmount,
-                  prepaidAmount: (serverBooking ?? booking)?.prepaidAmount,
-                  paidAmount,
-                } : null}
-                onRecalc={() => setRecalc(true)}
-                willRecalc={isEdit && sendTotals}
                 unpricedServices={unpricedServices}
+                closed={isClosed}
               />
             </div>
           </div>

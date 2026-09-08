@@ -17,11 +17,20 @@ const TRACKED_PREFIXES = [
   '/bookings', '/users', '/rooms', '/categories', '/partners', '/allotments',
   '/rates', '/hotel', '/system/backup', '/reports', '/payments', '/room-fund',
 ]
-// POST-запросы, которые ничего не меняют
-const IGNORED = new Set(['/bookings/check-availability'])
+// POST-запросы, которые ничего не меняют.
+// `/bookings/preview` — счёт «сколько выйдет»: форма зовёт его на каждое изменение
+// полей, и в журнале это были бы сотни записей с именем гостя вместо одной правки.
+const IGNORED = new Set(['/bookings/check-availability', '/bookings/preview'])
 // Отчёты: в журнал идут создание/правка/удаление/импорт определений, а не каждый
 // запуск, выгрузка или предпросмотр — иначе журнал утонет в рабочих запросах.
-const IGNORED_PATTERNS = [/^\/reports\/[^/]+\/(run|export)\/?$/, /^\/reports\/(preview|validate)\/?$/]
+// `/bookings/<id>/settlement/preview` — тот же расчёт «сколько выйдет», только для
+// окна расчёта с гостем: диалог зовёт его на каждое изменение суммы штрафа.
+// Само подтверждение (`/settlement`) журналируется.
+const IGNORED_PATTERNS = [
+  /^\/reports\/[^/]+\/(run|export)\/?$/,
+  /^\/reports\/(preview|validate)\/?$/,
+  /^\/bookings\/\d+\/settlement\/preview\/?$/,
+]
 
 const SECRET_FIELDS = new Set(['password', 'currentPassword', 'newPassword'])
 const MAX_DETAILS = 2048

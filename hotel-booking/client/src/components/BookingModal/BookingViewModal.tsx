@@ -273,6 +273,7 @@ export const BookingViewModal: React.FC = () => {
                 full?.room?.number ? `Номер ${full.room.number}` : '',
                 `${fmtDate(booking.checkIn)} — ${fmtDate(booking.checkOut)}`,
               ].filter(Boolean).join(' · ')}
+              bookingStatus={booking.status}
             />
           </Section>
         )}

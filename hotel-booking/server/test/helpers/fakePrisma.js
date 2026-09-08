@@ -109,6 +109,30 @@ function applyData(rec, data) {
   }
 }
 
+/**
+ * Свёртки `_sum` / `_count` над набором строк — общие для groupBy и aggregate.
+ * `nullWhenEmpty`: у Prisma `aggregate` по пустой выборке даёт `_sum: { x: null }`,
+ * и вызывающий код обязан это пережить (`already._sum.amount || 0`).
+ */
+function aggregateOf(items, args, { nullWhenEmpty = false } = {}) {
+  const out = {}
+  if (args._sum) {
+    out._sum = {}
+    for (const f of Object.keys(args._sum)) {
+      out._sum[f] = items.length === 0 && nullWhenEmpty
+        ? null
+        : items.reduce((s, r) => s + (Number(r[f]) || 0), 0)
+    }
+  }
+  if (args._count) {
+    out._count = {}
+    for (const f of Object.keys(args._count)) {
+      out._count[f] = f === '_all' ? items.length : items.filter((r) => r[f] !== null && r[f] !== undefined).length
+    }
+  }
+  return out
+}
+
 function makeModel(name, rows, calls) {
   let seq = rows.reduce((m, r) => Math.max(m, Number(r.id) || 0), 0)
   const select = (args = {}) => applyOrder(rows.filter((r) => matchWhere(r, args.where)), args.orderBy)
@@ -163,6 +187,45 @@ function makeModel(name, rows, calls) {
       const hits = rows.filter((r) => matchWhere(r, args.where))
       for (const r of hits) applyData(r, args.data)
       return { count: hits.length }
+    },
+    // Каскадное удаление по условию. Нужно всему, что пересобирает начисления:
+    // `deleteMany({ where: { bookingId, source: 'auto' } })` — и если модуль
+    // потеряет фильтр по source, ручные строки исчезнут прямо здесь, в тесте.
+    async deleteMany(args = {}) {
+      calls.push({ model: name, op: 'deleteMany', args })
+      const doomed = new Set(rows.filter((r) => matchWhere(r, args.where)))
+      const keep = rows.filter((r) => !doomed.has(r))
+      rows.length = 0
+      rows.push(...keep)
+      return { count: doomed.size }
+    },
+    /**
+     * groupBy(by, where, _sum, _count) — так `utils/bookingMoney.js` считает
+     * «начислено» сразу по сотне броней. Считаем честно по фикстуре, а не
+     * возвращаем заготовку: иначе тест не заметил бы потерянный фильтр.
+     */
+    async groupBy(args = {}) {
+      calls.push({ model: name, op: 'groupBy', args })
+      const by = Array.isArray(args.by) ? args.by : [args.by]
+      const groups = new Map()
+      for (const r of select(args)) {
+        const key = by.map((f) => {
+          if (!(f in r)) throw new Error(`fakePrisma: groupBy по полю «${f}», которого нет в фикстуре`)
+          return String(r[f] instanceof Date ? r[f].getTime() : r[f])
+        }).join(' ')
+        if (!groups.has(key)) {
+          const head = {}
+          for (const f of by) head[f] = r[f]
+          groups.set(key, { head, items: [] })
+        }
+        groups.get(key).items.push(r)
+      }
+      return [...groups.values()].map(({ head, items }) => ({ ...head, ...aggregateOf(items, args) }))
+    },
+    /** aggregate(_sum/_count) — лимит возврата по платежу считается именно им. */
+    async aggregate(args = {}) {
+      calls.push({ model: name, op: 'aggregate', args })
+      return aggregateOf(select(args), args, { nullWhenEmpty: true })
     },
     async delete(args) {
       calls.push({ model: name, op: 'delete', args })

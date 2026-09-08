@@ -1,5 +1,8 @@
 import api from './client'
-import type { Booking, GuestDocType, GuestSex } from '../types'
+import type { Booking, BookingStatus, GuestDocType, GuestSex } from '../types'
+// Расчёт с гостем возвращает те же деньги и те же платежи, что журнал кассы, —
+// свои копии этих типов завели бы вторую правду о деньгах брони.
+import type { BookingMoney, Payment, PaymentMethod } from './payments'
 
 /**
  * Питание и услуги брони. Присылаются ЦЕЛИКОМ: сервер заменяет набор,
@@ -57,9 +60,12 @@ export interface BookingPayload extends GuestDocPayload {
   disabledChildren?: number
   discountPercent?: number
   prepaymentPercent?: number
-  totalAmount?: number
-  prepaidAmount?: number
-  paidAmount?: number
+  // totalAmount / prepaidAmount / paidAmount клиент НЕ отправляет вовсе (волна 5a).
+  // Итог брони — сумма строк начислений, её считает сервер тем же кодом, что и
+  // предпросмотр; `paidAmount` — кэш журнала платежей. Раньше форма слала свои
+  // числа, и они расходились с базой (D5-002, D2-005): в брони оставалось 60 000
+  // при 65 000 по строкам. Сервер эти поля теперь игнорирует — здесь их просто нет,
+  // чтобы никто не отправил их случайно.
   flags?: string[]
   /**
    * Фактические заезд/выезд (ISO datetime или null). Обычно их проставляют кнопки
@@ -75,6 +81,86 @@ export interface BookingPayload extends GuestDocPayload {
   allowAllotmentOverride?: boolean
   /** Явное «Пересчитать по тарифу»: пересобрать автоматические строки начислений */
   recalcCharges?: boolean
+}
+
+// ─── Предпросмотр начислений ─────────────────────────────────────────────────
+// Форма больше НЕ считает деньги сама. Раньше `utils/calculator.ts` повторял
+// правила сервера (`server/src/utils/charges.js`), и копии разъезжались: на
+// экране 106 000 и 99 900, в базе 94 900 (D7-009). Теперь суммы считает тот же
+// код, что и сохранение, а клиент их только показывает.
+
+/** Вид строки начисления — тот же словарь, что у `BookingCharge`. */
+export type PreviewRowKind = 'stay' | 'meal' | 'extra' | 'discount'
+
+export interface PreviewRow {
+  kind: PreviewRowKind
+  label: string
+  quantity: number
+  unitPrice: number
+  amount: number
+  /** Для посуточных строк — за какую ночь начислено ('YYYY-MM-DD'), иначе null */
+  date: string | null
+  /** 'manual' — ручная строка брони (штраф, уступка): её предпросмотр тоже учитывает */
+  source: 'auto' | 'manual'
+}
+
+/** Какие части цены не заполнены в календаре на эту дату. */
+export type MissingPricePart = 'adult' | 'child' | 'extraBed' | 'room'
+
+export interface MissingPrice {
+  date: string
+  parts: MissingPricePart[]
+}
+
+export interface PreviewResult {
+  rows: PreviewRow[]
+  /** Итог со скидкой — ровно то число, что запишется в бронь */
+  total: number
+  /** Предоплата по проценту формы */
+  prepaid: number
+  nights: number
+  /** Ночи с незаполненной ценой: итог неполный, и об этом надо сказать вслух */
+  missingPrices: MissingPrice[]
+}
+
+/** Несохранённая ручная строка — сервер учтёт её в предпросмотре наравне с сохранёнными. */
+export interface PreviewManualCharge {
+  kind: PreviewRowKind
+  label: string
+  quantity: number
+  unitPrice: number
+  amount: number
+}
+
+export interface PreviewPayload {
+  roomId: number
+  checkIn: string
+  checkOut: string
+  adultsWithMeals?: number
+  childrenWithMeals?: number
+  adultsNoMeals?: number
+  childrenNoMeals?: number
+  extraBedsWithMeals?: number
+  extraBedsNoMeals?: number
+  disabledAdults?: number
+  disabledChildren?: number
+  discountPercent?: number
+  prepaymentPercent?: number
+  services?: BookingServicePayload[]
+  /** Правка существующей брони: сервер сам подтянет её ручные строки */
+  bookingId?: number
+  /** Ручные строки, которых ещё нет в базе */
+  manualCharges?: PreviewManualCharge[]
+}
+
+/**
+ * Предпросмотр начислений тем же кодом, что и сохранение.
+ * Ничего не пишет — это чистый расчёт, его можно звать на каждое изменение формы
+ * (в форме он под debounce, а устаревшие ответы отсекаются по номеру запроса).
+ */
+export async function previewBooking(payload: PreviewPayload): Promise<PreviewResult> {
+  const { data } = await api.post('/bookings/preview', payload)
+  return data.data
 }
 
 /** Полная бронь с сервера (гости, суммы, room.category) — объект из сетки может быть частичным. */
@@ -155,5 +241,80 @@ export async function moveBooking(
     moveDate,
     ...(allowAllotmentOverride ? { allowAllotmentOverride: true } : {}),
   })
+  return data.data
+}
+
+// ─── Расчёт с гостем (отмена / ранний выезд / возврат переплаты) ──────────────
+// Один диалог вместо трёх разных мест: то же действие над бронью, тот же
+// калькулятор, что и при сохранении, плюс штраф и возврат — чтобы не уходить
+// из брони в «Кассу» ради возврата переплаты.
+//
+// Считает и раскладывает возврат по конкретным платежам СЕРВЕР: возврат
+// разрешён только по платежу и только в пределах принятого (решение волны 5a,
+// `docs/decisions/data-and-money.md`). Клиент лишь показывает цифры и передаёт
+// намерение администратора.
+
+/** Что делаем с бронью: отменяем, оформляем выезд или ничего (только деньги). */
+export type SettlementAction = 'cancel' | 'checkout' | 'none'
+
+/** Платёж, по которому ещё можно вернуть деньги. `refundable` — остаток по нему. */
+export interface SettlementPayment {
+  id: number
+  paidAt: string
+  method: PaymentMethod
+  amount: number
+  refundable: number
+}
+
+export interface SettlementPreview {
+  action: SettlementAction
+  /** Статус брони, каким он станет после действия */
+  status: BookingStatus
+  /** Счёт ПОСЛЕ действия: при отмене — только ручные строки, при выезде — за прожитые ночи */
+  charged: number
+  /** Принято нетто (приём минус уже сделанные возвраты) */
+  paid: number
+  /** max(0, paid − charged) */
+  toReturn: number
+  /** max(0, charged − paid) */
+  due: number
+  nights: { planned: number; stayed: number; removed: number }
+  /** Строки счёта после действия — тот же вид, что в предпросмотре формы */
+  rows: PreviewRow[]
+  payments: SettlementPayment[]
+}
+
+export interface SettlementPayload {
+  action: SettlementAction
+  /** Ручная строка штрафа: сумма и причина (причина попадает в название строки) */
+  penalty?: { amount: number; reason: string }
+  /** Сколько отдаём гостю. Сервер сам разложит эту сумму по конкретным платежам. */
+  refund?: { amount: number; method?: PaymentMethod; comment?: string }
+}
+
+export interface SettlementResult {
+  booking: Booking
+  /** Деньги брони после операции — тем же видом, что отдаёт журнал платежей */
+  summary: BookingMoney
+  refunds: Payment[]
+  /** Созданная строка штрафа (null — штрафа не было). Клиент её не разбирает. */
+  penalty: { id: number; label: string; amount: number } | null
+}
+
+/** Ничего не пишет: чистый расчёт «что будет, если сделать это действие». */
+export async function previewSettlement(
+  id: number,
+  action: SettlementAction,
+): Promise<SettlementPreview> {
+  const { data } = await api.post(`/bookings/${id}/settlement/preview`, { action })
+  return data.data
+}
+
+/** Действие + штраф + возврат ОДНОЙ транзакцией на сервере. */
+export async function settleBooking(
+  id: number,
+  payload: SettlementPayload,
+): Promise<SettlementResult> {
+  const { data } = await api.post(`/bookings/${id}/settlement`, payload)
   return data.data
 }

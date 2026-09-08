@@ -16,9 +16,15 @@ import { apiErrorText, card, fmtTime, InlinePrompt, money, Stat, td } from './pa
  * нельзя: правка в одном экране молча разошлась бы со вторым, а расходятся
  * такие копии именно там, где это дороже всего.
  *
- * Права: приём оплаты и возврат доступны любому вошедшему, включая STAFF — так же
- * решено на сервере (`server/src/routes/payments.js`), потому что деньги принимает
- * стойка. Отмена ОШИБОЧНОЙ записи правит уже закрытую кассу — только ADMIN.
+ * Права: приём оплаты и возврат доступны любому вошедшему — деньги принимает
+ * стойка (`server/src/routes/payments.js`). Отмена ОШИБОЧНОЙ записи правит уже
+ * закрытую кассу — только ADMIN.
+ *
+ * Возврат делается ТОЛЬКО по конкретному платежу — кнопкой в строке журнала.
+ * «Свободного» возврата из формы приёма больше нет: кнопка стояла вплотную к
+ * «Принять», сумма была предзаполнена всем долгом, и промах записывал «деньги
+ * отданы гостю» (аудит D6-011). Сервер такой запрос теперь и не принимает —
+ * `POST /payments` с `kind: refund` отвечает 400.
  */
 
 const METHODS: PaymentMethod[] = ['cash', 'card', 'transfer']
@@ -92,19 +98,20 @@ export const BookingPaymentPanel: React.FC<Props> = ({
     onChanged?.(d.summary)
   }
 
-  const submitPayment = async (kind: 'payment' | 'refund') => {
+  /** Только приём. Возврат — `doRefund` по строке журнала, см. комментарий выше. */
+  const submitPayment = async () => {
     const value = Number(String(amount).replace(',', '.'))
     if (!Number.isFinite(value) || value <= 0) { setError('Сумма должна быть больше нуля'); return }
     setSaving(true); setError('')
     try {
       const res = await createPayment({
-        bookingId, amount: value, kind, method, comment: comment.trim() || undefined,
+        bookingId, amount: value, kind: 'payment', method, comment: comment.trim() || undefined,
       })
       setSummary(res.summary)
       setJournal((prev) => [res.payment, ...prev])
       setAmount(''); setComment('')
       onChanged?.(res.summary)
-      onFlash(kind === 'refund' ? `Возврат ${money(value)} проведён` : `Принято ${money(value)}`)
+      onFlash(`Принято ${money(value)}`)
     } catch (e) {
       setError(apiErrorText(e, 'Не удалось сохранить платёж'))
     } finally {
@@ -186,20 +193,14 @@ export const BookingPaymentPanel: React.FC<Props> = ({
           <button
             type="button"
             disabled={saving}
-            onClick={() => submitPayment('payment')}
+            onClick={() => submitPayment()}
             style={{ ...primaryBtn, opacity: saving ? 0.6 : 1 }}
           >
             Принять
           </button>
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => submitPayment('refund')}
-            style={secondaryBtn}
-            title="Деньги отданы гостю"
-          >
-            Возврат
-          </button>
+        </div>
+        <div style={{ marginTop: 8, fontSize: '0.76rem', color: 'var(--text-faint)', lineHeight: 1.4 }}>
+          Возврат делается по конкретному платежу — кнопкой «Возврат» в истории ниже.
         </div>
       </div>
 

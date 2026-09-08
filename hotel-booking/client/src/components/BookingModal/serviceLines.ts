@@ -1,13 +1,13 @@
 import type { BookingServiceLink, Service } from '../../types'
-import type { BreakdownLine } from '../../utils/calculator'
 
 /**
- * Питание и услуги брони на стороне формы: состояние трёх блоков и предпросмотр
- * их стоимости.
+ * Питание и услуги брони на стороне формы: состояние трёх блоков.
  *
- * Это ПРЕДПРОСМОТР. Деньги считает сервер — `server/src/utils/charges.js` по строкам
- * `BookingService`. Правила единиц начисления продублированы здесь один в один;
- * правишь там — правь и тут, иначе форма покажет одно, а в бронь запишется другое.
+ * Денег здесь НЕТ. Стоимость услуг считает сервер и присылает готовыми строками
+ * в предпросмотре (`POST /bookings/preview`). Своя копия правил начисления жила
+ * здесь до волны 5a и расходилась с сервером (аудит D7-009): «Полный пансион» на
+ * экране и в базе давал разные суммы. Осталось состояние галочек и число едоков —
+ * это ввод формы, а не расчёт.
  */
 
 /** Одна подключённая услуга в состоянии формы. */
@@ -110,56 +110,4 @@ export function syncLinksWithGuests(
     return { ...l, adults: heads.adults, children: heads.children }
   })
   return changed ? next : links
-}
-
-/**
- * Предпросмотр стоимости услуг. Те же правила, что в генераторе начислений:
- * `childPrice === null` означает «считать по взрослой цене», нулевая цена строки
- * не порождает (ноль — это не цена, а незаполненный тариф).
- */
-export function servicePreviewLines(
-  links: ServiceLink[],
-  servicesById: Map<number, Service>,
-  nights: number,
-): BreakdownLine[] {
-  if (nights <= 0) return []
-  const lines: BreakdownLine[] = []
-
-  for (const link of links) {
-    const s = servicesById.get(link.serviceId)
-    if (!s || !s.isActive) continue
-
-    const kind: 'meal' | 'extra' = s.kind === 'meal' ? 'meal' : 'extra'
-    const adults = Math.max(0, link.adults || 0)
-    const children = Math.max(0, link.children || 0)
-    const times = Math.max(0, link.quantity ?? 1)
-    const splitChildren = s.childPrice != null && children > 0
-    const adultHeads = splitChildren ? adults : adults + children
-
-    const push = (label: string, qty: number, unit: number) => {
-      if (qty <= 0 || !unit || unit <= 0) return
-      lines.push({ label, nights, amount: Math.round(qty * unit), kind, quantity: qty, unitPrice: unit })
-    }
-
-    const childLabel = `${s.name} (дети)`
-    switch (s.unit) {
-      case 'per_person_night':
-        push(s.name, adultHeads * nights, s.price)
-        if (splitChildren) push(childLabel, children * nights, s.childPrice!)
-        break
-      case 'per_night':
-        push(s.name, times * nights, s.price)
-        break
-      case 'per_person':
-        push(s.name, adultHeads, s.price)
-        if (splitChildren) push(childLabel, children, s.childPrice!)
-        break
-      case 'per_booking':
-      default:
-        push(s.name, times, s.price)
-        break
-    }
-  }
-
-  return lines
 }

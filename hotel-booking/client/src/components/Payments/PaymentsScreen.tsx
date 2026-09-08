@@ -28,6 +28,14 @@ interface Props {
   onBack: () => void
 }
 
+/** Бейдж отменённой брони в списке долгов. */
+const cancelledBadge: React.CSSProperties = {
+  fontSize: '0.7rem', fontWeight: 700, whiteSpace: 'nowrap',
+  padding: '1px 7px', borderRadius: 20,
+  background: 'var(--surface-2)', color: 'var(--s-out)',
+  border: '1px solid var(--border-subtle)',
+}
+
 export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
   const admin = useAuthStore((s) => s.admin)
   const canVoid = admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN'
@@ -186,7 +194,19 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
                         }}
                       >
                         <td style={td}>
-                          <div style={{ fontWeight: 600 }}>{b.guestName}</div>
+                          <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap' }}>
+                            <span style={{ fontWeight: 600 }}>{b.guestName}</span>
+                            {/* Отменённая бронь в списке долгов — не ошибка: отмена сняла
+                                начисления, и принятые деньги стали отрицательным долгом,
+                                то есть обязательством вернуть. Без бейджа строка выглядела
+                                бы обычной бронью с переплатой (решение в data-and-money.md). */}
+                            {b.status === 'CANCELLED' && (
+                              <span style={cancelledBadge}>
+                                отменена
+                                {b.due < 0 ? ` · к возврату ${money(-b.due)} ₸` : ''}
+                              </span>
+                            )}
+                          </div>
                           <div style={{ fontSize: '0.76rem', color: 'var(--text-faint)' }}>
                             №{b.room?.number ?? '—'}{b.guestPhone ? ` · ${b.guestPhone}` : ''}
                           </div>

@@ -1,12 +1,17 @@
 const router = require('express').Router()
 const { body, query, param } = require('express-validator')
 const ctrl = require('../controllers/bookingController')
+const settlement = require('../controllers/settlementController')
+const payments = require('../controllers/paymentController')
 const { authenticate, requireRole } = require('../middleware/auth')
 const { validate } = require('../middleware/validate')
 
 router.use(authenticate)
 
 const SOURCES = ['телефон', 'стойка', 'онлайн', 'Каспи', 'ремонт', null]
+
+// Виды строк начислений — общий список для предпросмотра и для правки строк ниже
+const CHARGE_KINDS = ['stay', 'meal', 'extra', 'discount']
 
 // Счётчики гостей, проценты, суммы, метки, смена, статус — общие для POST и PUT.
 // express-validator 7 приводит значение к строке перед isInt/isFloat, поэтому числа из JSON
@@ -132,7 +137,27 @@ const listRules = [
   query('limit').optional().isInt({ min: 1, max: 500 }),
 ]
 
+// Предпросмотр счёта — те же поля, что у POST /, плюс необязательные bookingId
+// (подтянуть сохранённые ручные строки) и manualCharges (ещё не сохранённые).
+// Ничего не пишет, поэтому доступен любому вошедшему и без проверки прошедших дат:
+// форма спрашивает «сколько выйдет» и на датах, которые сохранить не даст.
+const previewRules = [
+  body('roomId').isInt({ min: 1 }).withMessage('roomId обязателен').toInt(),
+  body('checkIn').isDate().withMessage('checkIn обязателен (YYYY-MM-DD)'),
+  body('checkOut').isDate().withMessage('checkOut обязателен (YYYY-MM-DD)'),
+  body('bookingId').optional({ nullable: true }).isInt({ min: 1 }).withMessage('bookingId — целое число'),
+  body('manualCharges').optional().isArray({ max: 100 }).withMessage('manualCharges — массив строк (до 100)'),
+  body('manualCharges.*.kind').optional().isIn(CHARGE_KINDS).withMessage('Недопустимый вид начисления'),
+  body('manualCharges.*.quantity').optional().isFloat({ min: 0 }).withMessage('Количество — неотрицательное число'),
+  body('manualCharges.*.unitPrice').optional().isFloat({ min: -100000000, max: 100000000 })
+    .withMessage('Цена должна быть числом'),
+  body('manualCharges.*.amount').optional().isFloat({ min: -100000000, max: 100000000 })
+    .withMessage('Сумма должна быть числом'),
+  ...bookingNumericRules,
+]
+
 router.get('/', listRules, validate, ctrl.list)
+router.post('/preview', previewRules, validate, ctrl.preview)
 router.post('/check-availability', availabilityRules, validate, ctrl.checkAvailability)
 router.post('/', bookingBodyRules, validate, ctrl.create)
 router.get('/:id', param('id').isInt(), validate, ctrl.getOne)
@@ -143,6 +168,34 @@ router.patch('/:id/checkout', param('id').isInt(), validate, ctrl.checkOut)
 // Правка фактического времени заезда/выезда администратором — работает и на
 // закрытой (CHECKED_OUT/CANCELLED) брони, в отличие от общего PUT /:id.
 router.patch('/:id/actual-times', param('id').isInt(), actualTimesRules, validate, ctrl.updateActualTimes)
+// ─── Расчёт с гостем (отмена / ранний выезд + штраф + возврат) ───────────────
+// Одно окно вместо четырёх экранов: калькулятор показывает, сколько к возврату,
+// администратор правит штраф и сумму возврата. Деньги по закрываемой сделке —
+// только администратору, как и отмена заселённого гостя.
+const settlementRules = [
+  body('action').isIn(settlement.ACTIONS).withMessage('Действие: отмена, выезд или без изменения статуса'),
+]
+const settlementMoneyRules = [
+  ...settlementRules,
+  body('penalty.amount').optional({ nullable: true }).isFloat({ min: 0 })
+    .withMessage('Штраф — неотрицательное число'),
+  body('penalty.reason').optional({ nullable: true }).trim().isLength({ max: 300 })
+    .withMessage('Причина штрафа — до 300 символов'),
+  body('refund.amount').optional({ nullable: true }).isFloat({ min: 0 })
+    .withMessage('Сумма возврата — неотрицательное число'),
+  body('refund.method').optional({ nullable: true }).isIn(payments.METHODS)
+    .withMessage('Неизвестный способ возврата'),
+  body('refund.comment').optional({ nullable: true }).trim().isLength({ max: 500 })
+    .withMessage('Комментарий — до 500 символов'),
+]
+
+router.post('/:id/settlement/preview',
+  requireRole('SUPER_ADMIN', 'ADMIN'),
+  param('id').isInt(), settlementRules, validate, settlement.preview)
+router.post('/:id/settlement',
+  requireRole('SUPER_ADMIN', 'ADMIN'),
+  param('id').isInt(), settlementMoneyRules, validate, settlement.settle)
+
 router.post('/:id/move',
   param('id').isInt(),
   body('newRoomId').isInt({ min: 1 }),
@@ -152,8 +205,6 @@ router.post('/:id/move',
 // ─── Начисления брони ────────────────────────────────────────────────────────
 // Итог брони = сумма строк. Ручная строка обязана нести причину: именно она
 // превращает уступку «беру полсуток» из устной договорённости в запись.
-
-const CHARGE_KINDS = ['stay', 'meal', 'extra', 'discount']
 
 const chargeMoneyRules = [
   body('quantity').optional().isFloat({ min: 0 }).withMessage('Количество — неотрицательное число'),

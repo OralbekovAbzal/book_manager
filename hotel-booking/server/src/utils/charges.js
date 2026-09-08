@@ -63,35 +63,58 @@ function guestLabel({ adults, children, extraBeds }) {
 
 /**
  * Цена одной ночи проживания.
- * @returns {{ amount: number, missing: boolean }} missing — нужное поле цены не заполнено
+ *
+ * `parts` — какие именно составляющие цены не заданы ('room' | 'adult' | 'child' |
+ * 'extraBed'). Раньше флаг `missing` отбрасывался вызывающим кодом, и ночь с ценой
+ * только для взрослых начислялась молча без ребёнка (аудит D2-003). Строку по-прежнему
+ * создаём на частичную сумму — иначе гость не получил бы счёт вовсе, — но факт
+ * «цена не задана» теперь можно показать: он доезжает до предпросмотра.
+ *
+ * @returns {{ amount: number, missing: boolean, parts: string[] }}
  */
 function priceNight(rate, pricingBase, counts) {
-  if (!rate) return { amount: 0, missing: true }
-
   let amount = 0
-  let missing = false
-  const take = (value, qty) => {
+  const parts = []
+  const take = (part, value, qty) => {
     if (qty <= 0) return
-    if (value === null || value === undefined) { missing = true; return }
+    if (!rate || value === null || value === undefined) { parts.push(part); return }
     amount += value * qty
   }
 
   if (pricingBase === 'room') {
-    if (rate.roomPrice === null || rate.roomPrice === undefined) missing = true
+    // Цена за номер нужна всегда, сколько бы гостей ни было
+    if (!rate || rate.roomPrice === null || rate.roomPrice === undefined) parts.push('room')
     else amount += rate.roomPrice
-    take(rate.extraBedPrice, counts.extraBeds)
+    take('extraBed', rate?.extraBedPrice, counts.extraBeds)
   } else {
-    take(rate.adultPrice, counts.adults)
-    take(rate.childPrice, counts.children)
-    take(rate.extraBedPrice, counts.extraBeds)
+    take('adult', rate?.adultPrice, counts.adults)
+    take('child', rate?.childPrice, counts.children)
+    take('extraBed', rate?.extraBedPrice, counts.extraBeds)
   }
 
-  return { amount, missing }
+  return { amount, missing: parts.length > 0, parts }
 }
 
 /** Название услуги для сравнения с ручными строками — регистр и пробелы не считаем. */
 function normLabel(s) {
   return String(s || '').trim().toLowerCase()
+}
+
+/**
+ * Похоже ли название на авто-строку процентной скидки («Скидка 10%», «Скидка 12,5 %»).
+ *
+ * Нужно, чтобы отличить ПРАВЛЕННУЮ авто-скидку от ручной скидки со своим смыслом
+ * («Скидка по инвалидности», «Скидка постоянному гостю»): первая заменяет процентную,
+ * вторая складывается с ней. Признака «эта строка — процентная» в схеме нет, а
+ * `updateCharge` при переводе авто-строки в `manual` сохраняет её название — значит
+ * название и есть единственный доступный след происхождения.
+ *
+ * Процент в шаблоне не фиксируем: администратор мог поправить скидку при 10 %, а потом
+ * сменить процент на 15 — вторую строку всё равно начислять нельзя.
+ */
+const PERCENT_DISCOUNT_LABEL = /^скидка\s*\d+(?:[.,]\d+)?\s*%$/
+function isPercentDiscountLabel(label) {
+  return PERCENT_DISCOUNT_LABEL.test(normLabel(label))
 }
 
 /**
@@ -107,9 +130,10 @@ function normLabel(s) {
  * пересоздать, а чтобы НЕ создать дубль: если администратор поправил ночь «полсуток»,
  * автоматическая строка на ту же дату не нужна — иначе ночь начислится дважды.
  */
-function buildAutoCharges({ booking, pricingBase, ratesByDate, bookingServices, manualCharges = [] }) {
+function buildAutoChargesDetailed({ booking, pricingBase, ratesByDate, bookingServices, manualCharges = [] }) {
+  const missingPrices = []
   const nights = nightsOf(booking.checkIn, booking.checkOut)
-  if (nights.length === 0) return []
+  if (nights.length === 0) return { rows: [], missingPrices, nights: 0 }
 
   // Проживание сопоставляем по дате (на дату ровно одна строка), услуги — по названию.
   const manualStayDates = new Set(
@@ -127,7 +151,8 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, bookingServices, 
   for (const night of nights) {
     const key = dateKey(night)
     if (manualStayDates.has(key)) continue  // ночь уже посчитана вручную
-    const { amount } = priceNight(ratesByDate[key], pricingBase, counts)
+    const { amount, parts } = priceNight(ratesByDate[key], pricingBase, counts)
+    if (parts.length > 0) missingPrices.push({ date: key, parts })
     const value = Math.round(amount)
     if (value === 0) continue  // нет цены на эту ночь — строку не выдумываем, ноль это не цена
     rows.push({
@@ -197,8 +222,17 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, bookingServices, 
   // ── Скидка процентом ──
   // Считаем от всего счёта, включая ручные строки: «скидка 10%» — это 10% с того,
   // что гость реально должен, а не с той части, которую посчитал тариф.
+  //
+  // Ручная строка процентной скидки ПОДАВЛЯЕТ авто-строку — так же, как ручная ночь
+  // подавляет авто-проживание (по дате), а ручная услуга — авто-услугу (по названию).
+  // Без этой сверки правленная администратором «Скидка 10%» (уступка 8 000 вместо
+  // расчётных 11 100) при любой пересборке получала соседку на 11 100, и гость
+  // получал скидку дважды.
   const pct = booking.discountPercent || 0
-  if (pct > 0) {
+  const manualPercentDiscount = manualCharges.some(
+    c => c.kind === 'discount' && isPercentDiscountLabel(c.label),
+  )
+  if (pct > 0 && !manualPercentDiscount) {
     const manualBase = manualCharges
       .filter(c => c.kind !== 'discount')
       .reduce((sum, c) => sum + (c.amount || 0), 0)
@@ -216,21 +250,51 @@ function buildAutoCharges({ booking, pricingBase, ratesByDate, bookingServices, 
     }
   }
 
-  return rows
+  return { rows, missingPrices, nights: nights.length }
+}
+
+/**
+ * Строки начислений без подробностей — форма, которую ждут все существующие вызовы.
+ * Предпросмотр (`POST /bookings/preview`) зовёт `buildAutoChargesDetailed`, чтобы
+ * получить ещё и список ночей с незаданной ценой.
+ */
+function buildAutoCharges(args) {
+  return buildAutoChargesDetailed(args).rows
+}
+
+/**
+ * Календарь цен категории на период и база расчёта объекта.
+ * Вынесено из `loadChargeContext`, потому что предпросмотр (`POST /bookings/preview`)
+ * считает по тем же ценам, но услуги берёт из тела запроса, а не из базы —
+ * брони может ещё не существовать.
+ */
+async function loadRateContext({ categoryId, checkIn, checkOut }, client = prisma) {
+  const [hotel, rates] = await Promise.all([
+    client.hotelSettings.findUnique({ where: { id: 1 } }),
+    categoryId
+      ? client.ratePrice.findMany({
+        where: {
+          categoryId,
+          date: { gte: toUTCDate(checkIn), lt: toUTCDate(checkOut) },
+        },
+      })
+      : Promise.resolve([]),
+  ])
+
+  const ratesByDate = {}
+  for (const r of rates) ratesByDate[dateKey(r.date)] = r
+
+  return { pricingBase: hotel?.pricingBase || 'person', ratesByDate }
 }
 
 /** Тариф, подключённые к брони услуги и настройки объекта, нужные для генерации. */
 async function loadChargeContext(booking, client = prisma) {
-  const [hotel, rates, bookingServices] = await Promise.all([
-    client.hotelSettings.findUnique({ where: { id: 1 } }),
-    booking.room?.categoryId
-      ? client.ratePrice.findMany({
-        where: {
-          categoryId: booking.room.categoryId,
-          date: { gte: toUTCDate(booking.checkIn), lt: toUTCDate(booking.checkOut) },
-        },
-      })
-      : Promise.resolve([]),
+  const [rateCtx, bookingServices] = await Promise.all([
+    loadRateContext({
+      categoryId: booking.room?.categoryId || null,
+      checkIn: booking.checkIn,
+      checkOut: booking.checkOut,
+    }, client),
     // Именно услуги ЭТОЙ брони: сколько человек ест завтрак, знает только она.
     client.bookingService.findMany({
       where: { bookingId: booking.id },
@@ -239,10 +303,7 @@ async function loadChargeContext(booking, client = prisma) {
     }),
   ])
 
-  const ratesByDate = {}
-  for (const r of rates) ratesByDate[dateKey(r.date)] = r
-
-  return { pricingBase: hotel?.pricingBase || 'person', ratesByDate, bookingServices }
+  return { ...rateCtx, bookingServices }
 }
 
 function sumCharges(charges) {
@@ -255,23 +316,90 @@ function sumCharges(charges) {
  * `keepIfEmpty`: если строк нет вообще (тариф на эти даты не заполнен), сумму брони
  * не обнуляем — иначе создание брони в отеле без прайса молча стирало бы деньги,
  * посчитанные вручную. При явных операциях со строками режим строгий.
+ *
+ * Предоплата пересчитывается ВСЕГДА, в том числе у брони без строк: `prepaidAmount` —
+ * это процент от итога, и он обязан сходиться с самим процентом. Раньше функция при
+ * пустом наборе выходила до записи, и у 107 старых броней (см. NOTES) смена процента
+ * предоплаты не меняла сумму предоплаты вовсе — форма и печать показывали 50 %
+ * и сумму от прежних 30 %.
  */
 async function recalcBookingTotals(bookingId, { client = prisma, keepIfEmpty = false } = {}) {
   const charges = await client.bookingCharge.findMany({ where: { bookingId } })
-  if (charges.length === 0 && keepIfEmpty) return null
-
-  const total = sumCharges(charges)
   const booking = await client.booking.findUnique({
     where: { id: bookingId },
-    select: { prepaymentPercent: true },
+    select: { prepaymentPercent: true, totalAmount: true, prepaidAmount: true },
   })
-  const prepaid = Math.round(total * ((booking?.prepaymentPercent || 0) / 100))
+  if (!booking) return null
 
-  await client.booking.update({
-    where: { id: bookingId },
-    data: { totalAmount: total, prepaidAmount: prepaid },
-  })
+  // Итог без строк — прежний кэш `totalAmount`: считать его нечем, но и терять нельзя
+  const keepTotal = charges.length === 0 && keepIfEmpty
+  const total = keepTotal ? Math.round(booking.totalAmount || 0) : sumCharges(charges)
+  const prepaid = Math.round(total * ((booking.prepaymentPercent || 0) / 100))
+
+  if (keepTotal) {
+    // Итог не трогаем СОВСЕМ (даже равной записью — это чужое, посчитанное вручную
+    // число), пишем только предоплату и только если она действительно изменилась
+    if (prepaid !== booking.prepaidAmount) {
+      await client.booking.update({ where: { id: bookingId }, data: { prepaidAmount: prepaid } })
+    }
+  } else {
+    await client.booking.update({
+      where: { id: bookingId },
+      data: { totalAmount: total, prepaidAmount: prepaid },
+    })
+  }
   return { total, prepaidAmount: prepaid, count: charges.length }
+}
+
+const LEGACY_TOTAL_LABEL = 'Проживание · по прежнему расчёту'
+const LEGACY_TOTAL_REASON = 'сумма зафиксирована при первом ручном начислении'
+
+/**
+ * Фиксирует прежний итог брони строкой начислений — ПЕРЕД первой ручной строкой.
+ *
+ * Зачем. Итог брони = сумма строк (`recalcBookingTotals` в строгом режиме), а у 107
+ * старых броней (см. NOTES) строк нет вовсе: их `totalAmount` посчитан когда-то
+ * вручную и живёт только кэшем. Первая же ручная строка — штраф при отмене или
+ * мини-бар — делала эту сумму единственной строкой счёта, и прежние 100 000
+ * превращались в 5 000: та же транзакция открывала возврат оплаты за прожитые ночи.
+ * Терять прежнюю сумму нельзя, а восстановить её потом нечем — поэтому она
+ * записывается строкой ровно в тот момент, когда счёт впервые становится списком.
+ *
+ * `totalAmount = 0` (отель без календаря цен) не фиксируем: фиксировать нечего,
+ * и ручная строка — это и есть весь счёт.
+ *
+ * @returns {object|null} созданная строка либо null, если фиксировать не потребовалось
+ */
+async function pinLegacyTotal(bookingId, { client = prisma, adminId = null } = {}) {
+  // Строки уже есть — счёт живёт списком, и кэш пересчитывается по нему сам
+  const existing = await client.bookingCharge.count({ where: { bookingId } })
+  if (existing > 0) return null
+
+  const booking = await client.booking.findUnique({
+    where: { id: bookingId },
+    select: { totalAmount: true },
+  })
+  const total = Math.round(booking?.totalAmount || 0)
+  if (total <= 0) return null
+
+  return client.bookingCharge.create({
+    data: {
+      bookingId,
+      kind: 'stay',
+      label: LEGACY_TOTAL_LABEL,
+      quantity: 1,
+      unitPrice: total,
+      amount: total,
+      // Без даты: за какие именно ночи была эта сумма — уже неизвестно,
+      // и приписывать ей день значило бы придумать данные.
+      date: null,
+      // Ручная: пересборка по тарифу (`rebuildAutoCharges`) не имеет права её стереть —
+      // иначе прежний расчёт исчезнет так же тихо, как исчезал до этой правки.
+      source: 'manual',
+      reason: LEGACY_TOTAL_REASON,
+      createdById: adminId,
+    },
+  })
 }
 
 /**
@@ -298,6 +426,151 @@ async function rebuildAutoCharges(bookingId, { adminId = null, client = prisma, 
 
   const totals = await recalcBookingTotals(bookingId, { client, keepIfEmpty })
   return { created: rows.length, total: totals ? totals.total : null }
+}
+
+// ─── Планы счёта при отмене и раннем выезде ──────────────────────────────────
+//
+// «План» — чистый ответ на вопрос «какими станут строки после действия»: что
+// останется, что снимется, что начислится заново. Он нужен ДВАЖДЫ — в предпросмотре
+// расчёта с гостем (`POST /bookings/:id/settlement/preview`, ничего не пишет) и при
+// самом действии, — и обязан быть одним кодом: два вычисления «сколько к возврату»
+// разошлись бы на тенге, и администратор вернул бы гостю не ту сумму. Ровно та же
+// история, что с четырьмя определениями «свободно» (см. NOTES, `utils/availability.js`).
+
+/**
+ * План счёта после ОТМЕНЫ: автоматические строки снимаются, ручные остаются.
+ *
+ * Отмена обнуляет счёт (решение владельца 2026-09-08, `docs/decisions/data-and-money.md`):
+ * гость не жил — начислять не за что. Ручные строки не трогаем: именно ими оформляется
+ * удержание или штраф за отмену, и стереть их значило бы стереть решение администратора.
+ *
+ * @param {Array} charges все строки брони
+ * @returns {{ keep: Array, dropIds: number[], create: Array }}
+ */
+function planCancelCharges(charges) {
+  const keep = []
+  const dropIds = []
+  for (const c of charges) {
+    if (c.source === 'auto') dropIds.push(c.id)
+    else keep.push(c)
+  }
+  return { keep, dropIds, create: [] }
+}
+
+/**
+ * План счёта после РАННЕГО ВЫЕЗДА на дату `newCheckOut` — снять со счёта непрожитое
+ * (решение владельца 2026-09-08, «за фактические ночи», как в Opera/Mews/Cloudbeds).
+ *
+ * Почему не полная пересборка: она переоценила бы УЖЕ ПРОЖИТЫЕ ночи по сегодняшнему
+ * календарю цен. Гость прожил их по цене, которая была на момент бронирования, —
+ * менять её задним числом нельзя. Поэтому адресно:
+ *   • auto-строки проживания за ночи `>= newCheckOut` снимаются;
+ *   • прожитые auto-строки проживания остаются со своими суммами — генератору они
+ *     передаются как «уже посчитанные», и он их не трогает;
+ *   • посуточные питание/услуги (`per_person_night`, `per_night`) пересобираются —
+ *     их количество считается от числа ночей, а ночей стало меньше;
+ *   • ручные строки (`source='manual'`) не трогаются вообще: штраф за досрочный выезд
+ *     администратор добавляет именно ими;
+ *   • строка процентной скидки пересобирается от новой базы.
+ *
+ * Брони без строк начислений (107 старых, см. NOTES) не трогаем совсем: у них итог —
+ * число, посчитанное когда-то вручную, и обнулять его выездом нельзя.
+ *
+ * @returns {{ keep: Array, dropIds: number[], create: Array, untouched: boolean }}
+ *   `keep` — строки, которые остаются как есть; `dropIds` — id снимаемых;
+ *   `create` — новые авто-строки (без id, без bookingId).
+ */
+function planEarlyCheckout({ booking, charges, newCheckOut, pricingBase, ratesByDate, bookingServices }) {
+  if (charges.length === 0) return { keep: charges, dropIds: [], create: [], untouched: true }
+
+  const cutTime = toUTCDate(newCheckOut).getTime()
+  // Непрожитая ночь: дата строки >= даты выезда (интервал полуоткрытый)
+  const isUnlivedNight = (c) => (
+    c.source === 'auto' && c.kind === 'stay' && c.date && toUTCDate(c.date).getTime() >= cutTime
+  )
+  // Всё остальное автоматическое (питание, услуги, процентная скидка) пересобирается
+  const isRebuilt = (c) => c.source === 'auto' && c.kind !== 'stay'
+
+  const keep = charges.filter((c) => !isUnlivedNight(c) && !isRebuilt(c))
+  const dropIds = charges.filter((c) => isUnlivedNight(c) || isRebuilt(c)).map((c) => c.id)
+
+  // «Уже посчитанные» строки для генератора: ручные + сохранённые ночи проживания.
+  // Он пропускает ночь, для которой такая строка есть, и включает её сумму в базу
+  // процентной скидки — ровно то, что нужно.
+  const frozen = keep.filter((c) => c.source === 'manual' || c.kind === 'stay')
+  const covered = new Set(frozen.filter((c) => c.kind === 'stay' && c.date).map((c) => dateKey(c.date)))
+  // Ночь без строки (цена на неё не задана) тоже прожита — заглушка на 0 не даёт
+  // генератору выдумать ей цену по сегодняшнему календарю.
+  for (const night of nightsOf(booking.checkIn, newCheckOut)) {
+    const key = dateKey(night)
+    if (!covered.has(key)) frozen.push({ kind: 'stay', date: night, amount: 0 })
+  }
+
+  const create = buildAutoCharges({
+    booking: { ...booking, checkOut: newCheckOut },
+    pricingBase,
+    ratesByDate,
+    bookingServices,
+    manualCharges: frozen,
+  }).filter((r) => r.kind !== 'stay')  // подстраховка: прожитые ночи не переоцениваем
+
+  return { keep, dropIds, create, untouched: false }
+}
+
+/**
+ * Что нужно генератору, чтобы посчитать бронь на срок `checkIn … checkOut`:
+ * календарь цен категории её номера и подключённые услуги.
+ * Отдельно от `loadChargeContext`, потому что срок здесь ДРУГОЙ (укороченный
+ * ранним выездом), а сама бронь в базе ещё со старым выездом.
+ */
+async function loadStayContext(booking, checkOut, client = prisma) {
+  const room = await client.room.findUnique({
+    where: { id: booking.roomId },
+    select: { categoryId: true },
+  })
+  const rateCtx = await loadRateContext(
+    { categoryId: room?.categoryId || null, checkIn: booking.checkIn, checkOut },
+    client,
+  )
+  const bookingServices = await client.bookingService.findMany({
+    where: { bookingId: booking.id },
+    include: { service: true },
+    orderBy: { id: 'asc' },
+  })
+  return { ...rateCtx, bookingServices }
+}
+
+/**
+ * Применяет план отмены: снимает авто-строки и пересчитывает итог.
+ * Режим строгий (без `keepIfEmpty`): у брони без строк итог обязан стать нулём,
+ * иначе отменённая бронь так и висела бы должником со старой суммой (аудит D2-006).
+ */
+async function dropAutoChargesOnCancel(bookingId, tx) {
+  await tx.bookingCharge.deleteMany({ where: { bookingId, source: 'auto' } })
+  await recalcBookingTotals(bookingId, { client: tx })
+}
+
+/** Применяет план раннего выезда (см. `planEarlyCheckout`). */
+async function trimChargesToCheckOut(existing, newCheckOut, tx, adminId) {
+  const bookingId = existing.id
+  const charges = await tx.bookingCharge.findMany({ where: { bookingId } })
+  if (charges.length === 0) return null
+
+  const ctx = await loadStayContext(existing, newCheckOut, tx)
+  const plan = planEarlyCheckout({ booking: existing, charges, newCheckOut, ...ctx })
+
+  if (plan.dropIds.length > 0) {
+    await tx.bookingCharge.deleteMany({ where: { id: { in: plan.dropIds } } })
+  }
+  if (plan.create.length > 0) {
+    await tx.bookingCharge.createMany({
+      data: plan.create.map((r) => ({ ...r, bookingId, source: 'auto', createdById: adminId })),
+    })
+  }
+
+  // Строгий режим: строки у брони были, значит итог обязан стать их новой суммой.
+  await recalcBookingTotals(bookingId, { client: tx })
+  return plan
 }
 
 /**
@@ -400,10 +673,20 @@ module.exports = {
   dateKey,
   nightsOf,
   buildAutoCharges,
+  buildAutoChargesDetailed,
+  priceNight,
   loadChargeContext,
+  loadRateContext,
   rebuildAutoCharges,
   recalcBookingTotals,
+  pinLegacyTotal,
+  LEGACY_TOTAL_LABEL,
   sumCharges,
+  planCancelCharges,
+  planEarlyCheckout,
+  loadStayContext,
+  dropAutoChargesOnCancel,
+  trimChargesToCheckOut,
   chargeInputsChanged,
   normalizeServiceLinks,
   serviceLinksChanged,

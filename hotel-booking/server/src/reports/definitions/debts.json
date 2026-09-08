@@ -2,7 +2,7 @@
   "id": "debts",
   "version": 1,
   "title": "Долги",
-  "description": "Кто сколько должен: начислено, принято по журналу платежей, остаток. По умолчанию — незакрытые долги по неотменённым броням.",
+  "description": "Кто сколько должен: начислено, принято по журналу платежей, остаток. Отменённые брони входят по умолчанию — по ним остаётся вернуть предоплату или дополучить удержание.",
   "icon": "list",
   "dataset": "bookings",
   "params": [
@@ -42,7 +42,7 @@
       "key": "statuses",
       "type": "multiselect",
       "label": "Статусы",
-      "default": ["CONFIRMED", "CHECKED_IN", "CHECKED_OUT"],
+      "default": ["CONFIRMED", "CHECKED_IN", "CHECKED_OUT", "CANCELLED"],
       "options": [
         { "value": "CONFIRMED", "label": "Подтверждена" },
         { "value": "CHECKED_IN", "label": "Заехал" },

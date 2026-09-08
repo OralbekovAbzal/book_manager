@@ -5,6 +5,7 @@ import {
 } from '../../api/charges'
 import type { BookingCharge, ChargeKind, ChargePayload } from '../../api/charges'
 import type { Booking } from '../../types'
+import { useAuthStore } from '../../store/useAuthStore'
 
 /**
  * Строки начислений брони: что начислено, откуда взялось и что правил администратор.
@@ -18,7 +19,13 @@ const fmt = (n: number) => `${Math.round(n).toLocaleString('ru-RU')} ₸`
 
 interface Props {
   bookingId: number
-  /** Закрытая/отменённая бронь — только просмотр */
+  /**
+   * Закрытая/отменённая бронь: существующие строки не правятся и не удаляются,
+   * пересборка по тарифу недоступна. НО администратору оставлена одна дверь —
+   * добавить ручную строку (штраф за отмену или досрочный выезд). Так решено
+   * в `docs/decisions/data-and-money.md`: отдельной настройки штрафа не делаем,
+   * он оформляется строкой с причиной и автором.
+   */
   readOnly?: boolean
   /** Итог изменился: у брони новый totalAmount/prepaidAmount */
   onChanged?: (booking: Booking | null) => void
@@ -41,8 +48,11 @@ const emptyDraft = {
 }
 
 export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }) => {
+  const admin = useAuthStore(s => s.admin)
+  // Штраф на закрытой брони — действие администратора, а не стойки.
+  const canAddOnClosed = !!readOnly && (admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN')
+  const canAdd = !readOnly || canAddOnClosed
   const [charges, setCharges] = useState<BookingCharge[]>([])
-  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -53,7 +63,6 @@ export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }
 
   const apply = useCallback((res: { data: BookingCharge[]; total: number; booking: Booking | null }) => {
     setCharges(res.data)
-    setTotal(res.total)
     onChanged?.(res.booking)
   }, [onChanged])
 
@@ -65,7 +74,6 @@ export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }
       .then(res => {
         if (cancelled) return
         setCharges(res.data)
-        setTotal(res.total)
       })
       .catch(() => { if (!cancelled) setError('Не удалось загрузить начисления') })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -238,8 +246,11 @@ export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }
       <div style={{ padding: '8px 12px' }}>
         {charges.length === 0 && (
           <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', padding: '6px 0' }}>
-            Строк нет. Либо тариф на эти даты не заполнен, либо всё удалено вручную —
-            нажмите «По тарифу» или добавьте строку.
+            {readOnly
+              // У отменённой брони строк нет по делу: отмена снимает начисления.
+              // Предлагать «По тарифу» здесь было бы неправдой — кнопки нет.
+              ? 'Начислений нет: у закрытой брони автоматические строки сняты.'
+              : 'Строк нет. Либо тариф на эти даты не заполнен, либо всё удалено вручную — нажмите «По тарифу» или добавьте строку.'}
           </div>
         )}
 
@@ -275,17 +286,23 @@ export const ChargesPanel: React.FC<Props> = ({ bookingId, readOnly, onChanged }
 
         {otherRows.map(c => renderRow(c))}
 
-        <div style={{
-          display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-          borderTop: '1px solid var(--border-subtle)', marginTop: 8, paddingTop: 8,
-        }}>
-          <span style={{ fontSize: '0.92rem', fontWeight: 700, color: 'var(--text)' }}>Итого по строкам</span>
-          <span className="mono" style={{ fontSize: '1.05rem', fontWeight: 700, color: '#6366f1' }}>{fmt(total)}</span>
-        </div>
+        {/* «Итого по строкам» здесь больше НЕ печатается: тот же итог показывает
+            карточка предпросмотра внизу формы (числа из `POST /bookings/preview`),
+            а «Начислено» — полоса денег сразу под этой панелью. Три числа об одном
+            и том же расходились между собой — аудит D7-009. */}
 
         {error && !edit && !adding && <div style={{ ...errorBoxStyle, marginTop: 8 }}>{error}</div>}
 
-        {!readOnly && (adding ? (
+        {canAddOnClosed && !adding && (
+          <div style={{
+            marginTop: 8, fontSize: '0.78rem', color: 'var(--text-faint)', lineHeight: 1.4,
+          }}>
+            Бронь закрыта: строки не правятся. Добавить можно только ручную —
+            например, штраф за отмену или досрочный выезд.
+          </div>
+        )}
+
+        {canAdd && (adding ? (
           <div style={{ ...editBoxStyle, marginTop: 8 }}>
             <select
               value={draft.kind}

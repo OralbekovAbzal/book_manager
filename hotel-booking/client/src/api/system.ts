@@ -36,11 +36,35 @@ export interface BackupHealth {
   warning: BackupWarning
 }
 
+/** Одна проверенная папка: где именно кончается место. */
+export interface DiskCheck {
+  role: 'data' | 'backup' | 'logs'
+  /** Свободно в МБ; null — папку не удалось опросить (нет доступа, пути ещё нет) */
+  freeMb: number | null
+}
+
+/**
+ * Блок `disk` из `GET /api/system/status` — свободное место под базой, копиями и
+ * логами. Порог задаёт СЕРВЕР (`thresholdMb`), клиент его не пересчитывает: правило
+ * «мало места» обязано быть одно, как и «копия старше двух суток».
+ *
+ * `freeMb` = null означает «узнать не удалось», а не «ноль»: показывать «0 МБ»
+ * в этом случае — врать про катастрофу, которой может и не быть.
+ */
+export interface DiskHealth {
+  freeMb: number | null
+  warning: boolean
+  thresholdMb: number
+  checked: DiskCheck[]
+}
+
 export interface SystemStatus {
   server: string
   db: string
   timestamp: string
   backup: BackupHealth
+  /** null на сервере старой сборки — про место он ничего не знает */
+  disk: DiskHealth | null
 }
 
 /** Список копий вместе со статусом папки; `status` = null на сервере старой сборки. */
@@ -68,7 +92,23 @@ export async function fetchSystemStatus(): Promise<SystemStatus> {
     timestamp: data.timestamp,
     // Сервер старой сборки блока не пришлёт — тогда предупреждать не о чем
     backup: data.backup ?? { lastOkAt: null, ageHours: null, warning: 'none' as const },
+    // Явный null, а не undefined: раздел настроек по нему решает, показывать ли
+    // строку «Свободно на диске» вообще, — молчаливое undefined выглядело бы
+    // как «место есть», хотя мы про него просто не спрашивали.
+    disk: (data.disk as DiskHealth | undefined) ?? null,
   }
+}
+
+/**
+ * Сколько места осталось на самом тесном из проверенных путей. Сервер и так
+ * присылает `freeMb` минимумом, но база, копии и логи могут лежать на разных
+ * дисках — берём минимум ещё раз сами, чтобы цифра в интерфейсе не спорила с
+ * тем, из-за чего зажглось предупреждение.
+ */
+export function minFreeMb(disk: DiskHealth): number | null {
+  const values = [disk.freeMb, ...disk.checked.map(c => c.freeMb)]
+    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+  return values.length > 0 ? Math.min(...values) : null
 }
 
 export async function createBackup(): Promise<BackupResult> {

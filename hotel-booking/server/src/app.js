@@ -30,6 +30,8 @@ const userRoutes = require('./routes/users')
 const { errorHandler } = require('./middleware/errorHandler')
 const { auditMiddleware } = require('./middleware/audit')
 const logger = require('./utils/logger')
+const { prisma } = require('./utils/prisma')
+const { checkDb } = require('./utils/healthCheck')
 
 const app = express()
 
@@ -109,8 +111,18 @@ app.use('/api/payments', apiLimiter, paymentRoutes)
 app.use('/api/setup', apiLimiter, setupRoutes)
 app.use('/api/users', apiLimiter, userRoutes)
 
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() })
+// Health проверяет БАЗУ, а не только живость процесса (D8-002). Раньше он всегда
+// отвечал 200: упавший встроенный Postgres оставался незамеченным — надзор
+// Electron был спокоен, а стойка получала 503 на каждом действии.
+//
+// Намеренные последствия, оба нужные: Electron при старте ждёт `res.ok`, то есть
+// не покажет окно раньше, чем база реально отвечает; а «Проверить связь»
+// (`config:test`) у клиента честно скажет «недоступно», когда на хосте лежит
+// база, — вместо «всё хорошо» при неработающей программе.
+app.get('/api/health', async (_req, res) => {
+  const db = await checkDb(prisma)
+  const body = { status: db === 'ok' ? 'ok' : 'degraded', db, timestamp: new Date().toISOString() }
+  res.status(db === 'ok' ? 200 : 503).json(body)
 })
 
 app.use(errorHandler)

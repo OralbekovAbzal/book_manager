@@ -5,11 +5,31 @@ const os = require('os')
 const crypto = require('crypto')
 const { spawn } = require('child_process')
 
+// Отдельные модули без зависимости от `electron` — их же читают юнит-тесты
+// сервера (`server/test/electron-*.test.js`). Не забыть про `lib/**` в
+// package.json → build.files, иначе упаковка соберётся, а старт упадёт на require.
+const {
+  readJsonFile, writeConfigIfChanged,
+  readSecretSidecar, writeSecretSidecar, secretSidecarPath, reconcileSecret,
+} = require('./lib/config')
+const {
+  listMigrationFolders, pendingMigrations, failedMigrations,
+  copyDataDirBeforeUpdate, describeMigrationFailure,
+} = require('./lib/migrations')
+const { freeBytes, toMb, MB } = require('./lib/disk')
+
 // ─── Пути к ресурсам (dev vs упакованное) ────────────────────────────────────
 const isDev = !app.isPackaged
 // В dev — отдельный userData: иначе dev и установленная версия делят config.json
 // и pgdata. Обязательно ДО первого app.getPath('userData') (CONFIG_PATH ниже).
 if (isDev) app.setPath('userData', app.getPath('userData') + '-dev')
+// Изолированная проверка собранной программы: своя папка данных, не трогающая
+// рабочую установку. Именно переменной приложения, а не APPDATA: Electron на
+// Windows берёт userData из системного пути профиля и подменённый APPDATA
+// игнорирует — проверено 08.09.2026.
+if (process.env.HOTEL_BOOKING_USERDATA) {
+  app.setPath('userData', process.env.HOTEL_BOOKING_USERDATA)
+}
 
 function resourcePath(...p) {
   if (!isDev) return path.join(process.resourcesPath, ...p)   // prod: resources/
@@ -37,12 +57,29 @@ const SCHEMA_MARKER = 'schema-ready.json'
 const APP_VERSION = app.getVersion()
 
 // ─── Конфиг (userData, переживает переустановку) ─────────────────────────────
+//
+// В config.json лежат пароль встроенной базы и секрет JWT. Про пароль базы
+// важны две вещи (D8-004):
+//  1) файл пишется АТОМАРНО и только при изменении — раньше он перезаписывался
+//     на каждом старте хоста, и обрыв питания в этот момент делал данные
+//     недоступными: битый файл читается как {}, а дальше выпускался бы новый
+//     пароль, которого кластер в pgdata не знает;
+//  2) у пароля есть ВТОРАЯ копия — `hotel-booking-secret.json` в самой папке
+//     данных (lib/config.js). Она главнее конфига: спутник лежит рядом с
+//     кластером и описывает именно его. Поэтому «почистили AppData» или
+//     «удалили config.json по телефонной подсказке» больше не означает потерю
+//     доступа к броням.
 const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json')
 function readConfig() {
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) } catch { return {} }
+  return readJsonFile(CONFIG_PATH)
 }
+// Пишем атомарно и только при реальном изменении (D8-004): в config.json лежит
+// пароль встроенной базы, а файл перезаписывался при КАЖДОМ старте хоста —
+// каждый запуск был окном, в котором отключение питания оставляло обрезанный
+// файл. Битый файл читается как {}, и следующий старт выпускал бы новый пароль,
+// которого существующий кластер не знает.
 function writeConfig(cfg) {
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), 'utf8')
+  return writeConfigIfChanged(CONFIG_PATH, cfg)
 }
 // Значения по умолчанию для порта и папок хоста (сисадмин может переопределить).
 function defaultPaths() {
@@ -54,11 +91,25 @@ function defaultPaths() {
 }
 function ensureSecrets(cfg) {
   const d = defaultPaths()
-  if (!cfg.dbPassword) cfg.dbPassword = crypto.randomBytes(18).toString('hex')
-  if (!cfg.jwtSecret)  cfg.jwtSecret  = crypto.randomBytes(48).toString('base64')
+  // ПОРЯДОК ВАЖЕН: сначала папка данных, потом пароль. Пароль базы теперь ищется
+  // и рядом с самим кластером (спутник hotel-booking-secret.json), а где кластер —
+  // знает только dataDir. Раньше пароль существовал единственной копией в
+  // config.json: потеря файла означала потерю доступа к целым данным (D8-004).
   if (!cfg.hostPort)   cfg.hostPort   = d.hostPort
   if (!cfg.dataDir)    cfg.dataDir    = d.dataDir
   if (!cfg.backupDir)  cfg.backupDir  = d.backupDir
+
+  const dataDir = cfg.dataDir || d.dataDir
+  const { source, changed } = reconcileSecret(cfg, {
+    hasPgVersion: fs.existsSync(path.join(dataDir, 'PG_VERSION')),
+    sidecar: readSecretSidecar(dataDir),
+    generate: () => crypto.randomBytes(18).toString('hex'),
+  })
+  // В лог — только ОТКУДА взят пароль. Сам пароль в host-debug.log не пишем:
+  // лог отдают в поддержку.
+  hlog('пароль базы:', source, changed ? '(конфиг обновлён)' : '(без изменений)')
+
+  if (!cfg.jwtSecret)  cfg.jwtSecret  = crypto.randomBytes(48).toString('base64')
   return cfg
 }
 
@@ -107,6 +158,9 @@ function hlog(...a) {
 // Текст ошибки запуска для диалога. embedded-postgres иногда реджектит без объекта
 // ошибки — String(err.message || err) показывал пользователю «undefined».
 function describeStartError(err) {
+  // Ошибка с собственным заголовком (обновление базы) уже несёт готовый текст
+  // для пользователя — путь к логу в нём тоже есть, второй раз не приписываем.
+  if (err && err.title && err.message) return err.message
   const msg = err && (typeof err === 'string' ? err : err.message)
   if (msg) return `${msg}\n\nПодробности: ${DEBUG_LOG}`
   return `База данных не запустилась. Возможно, порт ${DB_PORT} занят или программа уже запущена. ` +
@@ -121,6 +175,11 @@ let mainWindow = null
 let settingsWindow = null
 let splashWindow = null
 let isQuitting = false
+// Путь копии папки данных, снятой перед обновлением схемы, — его показываем в
+// диалоге, если миграция всё-таки не прошла.
+let preUpdateCopyPath = null
+// Идёт перезапуск упавшего Postgres: второй watcher в это время не нужен.
+let pgRestarting = false
 
 // ─── Запуск встроенного Postgres + сервера (режим ХОСТ) ──────────────────────
 async function startHost(cfg) {
@@ -141,6 +200,7 @@ async function startHost(cfg) {
   // первый запуск: решаем по факту существования базы после старта Postgres.
   const markerPath = path.join(dataDir, SCHEMA_MARKER)
   pgDataDir = dataDir
+  preUpdateCopyPath = null   // прошлый запуск хоста в этом же процессе (config:apply)
   hlog('dataDir=', dataDir, 'fresh=', fresh, 'schemaReady=', fs.existsSync(markerPath))
 
   pgInstance = new EmbeddedPostgres({
@@ -150,7 +210,24 @@ async function startHost(cfg) {
     port: DB_PORT,
     persistent: true,
     // UTF8 обязательно — иначе кириллица в именах гостей ломается.
-    initdbFlags: ['--encoding=UTF8', '--locale=C'],
+    //
+    // ЛОКАЛЬ (D8-001). Раньше здесь был `--locale=C`: под ней PostgreSQL
+    // сворачивает регистр только у ASCII, и в упакованной программе поиск
+    // «асель» не находил «Асель Каримову» — ровно та боль стойки, ради которой
+    // поиск и делался. У разработчика база в Russian_Kazakhstan.1251, поэтому
+    // дефект был не виден. Берём ВСТРОЕННЫЙ провайдер `C.UTF-8` (PostgreSQL 17+,
+    // у нас 18.4): он знает регистр всего Юникода, не зависит от версии ICU на
+    // машине клиента и не требует установленных системных локалей. `--locale=C`
+    // остаётся для lc_* (сообщения, деньги, время) — по ним ничего не ищут, а
+    // embedded-postgres разбирает вывод initdb на английском.
+    // Существующие кластеры (у первого клиента — с 05.09) чинит отдельная
+    // миграция коллации, initdb на них уже не выполняется.
+    initdbFlags: [
+      '--encoding=UTF8',
+      '--locale-provider=builtin',
+      '--builtin-locale=C.UTF-8',
+      '--locale=C',
+    ],
     onLog: (m) => hlog('[pg]', String(m)),
     onError: (e) => hlog('[pg-err]', String(e && (e.message || e))),
   })
@@ -159,8 +236,44 @@ async function startHost(cfg) {
     if (fresh) {
       // initdb требует пустую папку — устаревшая отметка без PG_VERSION ему помешает
       try { fs.unlinkSync(markerPath) } catch {}
+      // Спутник с паролем — тоже от прошлого кластера: оставленный, он бы
+      // пережил initdb и врал про пароль новой базы.
+      try { fs.unlinkSync(secretSidecarPath(dataDir)) } catch {}
       hlog('initialise (initdb)...'); await pgInstance.initialise(); hlog('initialise OK')
+      // Кластер создан ЭТИМ паролем — сохраняем его рядом с кластером сразу,
+      // не дожидаясь удачного старта: иначе первое же падение между initdb и
+      // записью оставило бы данные без известного пароля.
+      try { writeSecretSidecar(dataDir, cfg.dbPassword); hlog('спутник с паролем записан') }
+      catch (e) { hlog('спутник записать не удалось:', String(e && (e.message || e))) }
     }
+
+    // Копия папки данных ПЕРЕД миграциями (D8-005) — до старта Postgres, пока
+    // файлы кластера точно никто не пишет. Снимаем только если есть что
+    // применять: на обычном запуске без обновления копировать гигабайты незачем.
+    if (!fresh) {
+      const marker = readJsonFile(markerPath)
+      const pending = pendingMigrations(
+        listMigrationFolders(resourcePath('server', 'prisma', 'migrations')),
+        marker.migrations,
+      )
+      if (pending.length) {
+        hlog('обновление базы, новых миграций', pending.length, ':', pending.join(', '))
+        const copy = copyDataDirBeforeUpdate(dataDir, { freeBytes, log: hlog })
+        if (copy.ok) {
+          preUpdateCopyPath = copy.path
+          hlog('копия до обновления:', copy.path)
+        } else if (copy.reason === 'space') {
+          // Продолжаем без копии осознанно: на PostgreSQL упавшая миграция
+          // откатывается целиком (проверено 08.09.2026), а JSON-копия при
+          // прошлом выходе из программы уже снята. Освобождать место, отказывая
+          // в запуске, было бы хуже.
+          hlog('копия до обновления пропущена: мало места, продолжаем')
+        } else {
+          hlog('копия до обновления не удалась:', copy.reason)
+        }
+      }
+    }
+
     hlog('start postgres...'); await pgInstance.start(); hlog('postgres started')
 
     let needSchema = fresh
@@ -179,27 +292,53 @@ async function startHost(cfg) {
       // Начальные данные (админ, категории, метки) — только для только что
       // созданной базы. На рабочей базе seed не трогаем.
       if (needSchema) await applySeed()
+      // Сюда мы дошли, значит к базе успешно подключились этим паролем
+      // (inspectSchemaState внутри applyMigrations). Только теперь спутник можно
+      // писать: подтверждённый пароль, а не тот, что лежал в конфиге.
+      if (!fresh) {
+        const known = readSecretSidecar(dataDir)
+        if (!known || known.dbPassword !== cfg.dbPassword) {
+          try { writeSecretSidecar(dataDir, cfg.dbPassword); hlog('спутник с паролем обновлён') }
+          catch (e) { hlog('спутник записать не удалось:', String(e && (e.message || e))) }
+        }
+      }
     } catch (e) {
       // Базу, созданную в ЭТОМ запуске, удаляем — иначе пустая база без таблиц
       // при следующем старте считалась бы готовой.
       if (needSchema) {
         hlog('SCHEMA APPLY FAIL, dropping database:', String(e && (e.message || e)))
+        console.error('[host] SCHEMA APPLY FAIL:', String(e && (e.message || e)))
         try { await pgInstance.dropDatabase(DB_NAME) } catch (de) { hlog('dropDatabase fail:', String(de && (de.message || de))) }
       }
       throw e
     }
-    if (needSchema || !fs.existsSync(markerPath)) {
-      fs.writeFileSync(markerPath, JSON.stringify({ appliedAt: new Date().toISOString(), schema: 'prisma-migrate' }, null, 2), 'utf8')
+    // Маркер пишем ВСЕГДА после удачного deploy, а не только на свежей базе:
+    // в нём теперь список применённых миграций, по которому следующий запуск
+    // решает, нужна ли копия папки данных перед обновлением.
+    try {
+      fs.writeFileSync(markerPath, JSON.stringify({
+        appliedAt: new Date().toISOString(),
+        schema: 'prisma-migrate',
+        migrations: listMigrationFolders(resourcePath('server', 'prisma', 'migrations')),
+      }, null, 2), 'utf8')
       hlog('schema marker written:', markerPath)
+    } catch (e) {
+      // Маркер — оптимизация, а не условие работы: без него следующий запуск
+      // просто снимет копию лишний раз.
+      hlog('schema marker write fail:', String(e && (e.message || e)))
     }
   } catch (e) {
     hlog('POSTGRES SETUP FAIL:', e && (e.stack || e.message || String(e)))
+    console.error('[host] POSTGRES SETUP FAIL:', e && (e.stack || e.message || String(e)))
     throw e
   }
 
   spawnServer(cfg)
   await waitForHealth(cfg.hostPort, 30000)
   hlog('health OK on port', cfg.hostPort)
+  // Надзор за процессом базы ставим только после подтверждённого старта:
+  // раньше за postgres.exe не следил никто (D8-002).
+  armPgWatch()
   return `http://localhost:${cfg.hostPort}`
 }
 
@@ -350,9 +489,92 @@ async function applyMigrations(dbUrl) {
     await runPrisma(['migrate', 'resolve', '--applied', BASELINE_MIGRATION], dbUrl)
   }
 
+  // Незакрытые миграции — те, из-за которых deploy отвечает P3009 «failed
+  // migrations… new migrations will not be applied» и программа не поднимается
+  // больше НИКОГДА, включая откат на прежний установщик (D8-005).
+  //
+  // Лечим сами, потому что это безопасно: на PostgreSQL упавшая миграция
+  // откатывается целиком (проверено на клоне 08.09.2026 — схема остаётся
+  // прежней, мешает только строка в журнале). Значит `resolve --rolled-back`
+  // не оставляет полусхему, а честно возвращает базу в состояние «эту миграцию
+  // ещё не применяли», после чего deploy пробует её заново.
+  let stuck = managed ? await loadFailedMigrations() : []
+  if (stuck.length) {
+    try {
+      for (const m of stuck) {
+        hlog('незакрытая миграция:', m.name, '— помечаю откаченной')
+        await runPrisma(['migrate', 'resolve', '--rolled-back', m.name], dbUrl)
+      }
+    } catch (e) {
+      // resolve не смог — обычно потому, что этой миграции нет в папке сборки:
+      // человек откатился на СТАРЫЙ установщик, а база помнит миграцию из новой.
+      hlog('resolve --rolled-back FAIL:', String(e && (e.message || e)))
+      throw migrationFailureError(stuck)
+    }
+  }
+
   hlog('prisma migrate deploy...')
-  await runPrisma(['migrate', 'deploy'], dbUrl)
+  try {
+    await runPrisma(['migrate', 'deploy'], dbUrl)
+  } catch (first) {
+    hlog('migrate deploy FAIL:', String(first && (first.message || first)))
+    stuck = managed ? await loadFailedMigrations() : []
+    // Deploy упал, но незакрытых миграций нет — дело не в P3009 (нет CLI, нет
+    // связи с базой): отдаём исходную ошибку как есть.
+    if (!stuck.length) throw first
+
+    // Повтор ровно один. Миграция, падающая дважды подряд, не пройдёт и на
+    // третий раз — данные клиента ей не подходят, и это уже разговор с
+    // разработчиком, а не бесконечный цикл при каждом запуске.
+    try {
+      for (const m of stuck) {
+        hlog('после падения помечаю откаченной:', m.name)
+        await runPrisma(['migrate', 'resolve', '--rolled-back', m.name], dbUrl)
+      }
+      await runPrisma(['migrate', 'deploy'], dbUrl)
+      hlog('migrations applied (со второй попытки)')
+      return
+    } catch (second) {
+      hlog('повторный deploy FAIL:', String(second && (second.message || second)))
+      throw migrationFailureError(stuck)
+    }
+  }
   hlog('migrations applied')
+}
+
+// Ошибка для диалога: своим заголовком отличается от «Не удалось запустить
+// сервер» — обновление базы это отдельная беда со своими действиями.
+function migrationFailureError(stuck) {
+  const bad = (stuck && stuck[0]) || {}
+  const err = new Error(describeMigrationFailure({
+    name: bad.name,
+    logs: bad.logs,
+    copyPath: preUpdateCopyPath,
+    logPath: DEBUG_LOG,
+  }))
+  err.title = 'Обновление базы не удалось'
+  return err
+}
+
+// Строки `_prisma_migrations`, которые начались и не закончились.
+// Отдельным запросом, а не разбором вывода Prisma: текст сообщений CLI меняется
+// от версии к версии, а таблица — нет.
+async function loadFailedMigrations() {
+  const client = pgInstance.getPgClient(DB_NAME)
+  try {
+    await client.connect()
+    const r = await client.query(
+      `SELECT migration_name, finished_at, rolled_back_at, logs
+         FROM _prisma_migrations
+        WHERE finished_at IS NULL AND rolled_back_at IS NULL`,
+    )
+    return failedMigrations(r.rows)
+  } catch (e) {
+    hlog('не прочитал _prisma_migrations:', String(e && (e.message || e)))
+    return []
+  } finally {
+    try { await client.end() } catch {}
+  }
 }
 
 // Запуск Node-сервера как дочернего процесса + надзор: упавший сервер один раз
@@ -394,6 +616,9 @@ function spawnServer(cfg) {
       LOG_PATH: logPath,
       BACKUP_PATH: backupPath,
       BACKUP_FALLBACK_PATH: backupFallbackPath,
+      // Папка кластера — серверу нужна только чтобы мерить свободное место на
+      // том томе, где лежит база (GET /api/system/status → disk).
+      PG_DATA_DIR: cfg.dataDir || defaultPaths().dataDir,
       // Ночная копия в 03:00 по местному времени хоста, а не по UTC
       BACKUP_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
       // Ноутбук ночью выключают: при старте догоняем пропущенную копию,
@@ -448,6 +673,73 @@ function pgCtlPath() {
     }
   }
   return null
+}
+
+// ─── Надзор за встроенным Postgres (D8-002) ──────────────────────────────────
+// За процессом postgres.exe после старта не следил никто: библиотека слушает
+// 'close' только внутри своего start(). Упавшая база (PANIC при нехватке места,
+// антивирус, ручное убийство) оставалась незамеченной — сервер отвечал 503 на
+// каждое действие, а health говорил «всё хорошо». Хуже того, при закрытии
+// программы stop() вешал обработчик 'exit' на УЖЕ мёртвый процесс и не
+// дожидался его никогда: окно исчезало, процесс висел, и следующий запуск тихо
+// гасился блокировкой единственного экземпляра.
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function armPgWatch() {
+  const proc = pgInstance && pgInstance.process
+  if (!proc) { hlog('[pg] надзор не поставлен: процесса нет'); return }
+  proc.once('exit', (code, sig) => {
+    // Ссылку обнуляем ВСЕГДА, даже при штатном выходе: тогда и stop() библиотеки,
+    // и её exit-хук становятся no-op, и выход из программы не виснет.
+    if (pgInstance && pgInstance.process === proc) pgInstance.process = undefined
+    hlog('[pg] процесс базы завершился, code=', code, 'sig=', String(sig))
+    if (isQuitting || pgRestarting) return
+    console.error('[host] postgres завершился неожиданно, code=', code)
+    restartPostgres()
+  })
+}
+
+// Поднять базу заново. Prisma в серверном процессе переподключится сама —
+// перезапускать сервер не нужно.
+async function restartPostgres() {
+  if (!pgInstance || pgRestarting) return
+  pgRestarting = true
+  hlog('[pg] база остановилась — пробую поднять заново')
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    // Пауза перед попыткой: если база упала из-за нехватки места или конфликта
+    // за файлы кластера, немедленный повтор упрётся в то же самое.
+    await delay(3000)
+    // За время паузы программу могли начать закрывать (тогда база уже не нужна)
+    if (isQuitting || !pgInstance) { pgRestarting = false; return }
+    let timer = null
+    try {
+      await Promise.race([
+        pgInstance.start(),
+        new Promise((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('старт базы не уложился в 60 с')), 60000)
+        }),
+      ])
+      hlog('[pg] база поднята с попытки', attempt)
+      armPgWatch()
+      pgRestarting = false
+      return
+    } catch (e) {
+      // start() реджектит без объекта ошибки, если процесс закрылся сразу
+      hlog('[pg] попытка', attempt, 'не удалась:',
+        String((e && (e.message || e)) || 'процесс базы завершился при старте'))
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  pgRestarting = false
+  dialog.showErrorBox('База данных остановилась',
+    'Встроенная база данных завершилась и не смогла перезапуститься. ' +
+    'Закройте программу и откройте снова. Подробности: ' + DEBUG_LOG)
+  createSettingsWindow()
 }
 
 // Штатная остановка кластера. embedded-postgres на Windows «останавливает» базу
@@ -520,7 +812,11 @@ async function stopHostProcesses() {
   try { serverProc?.kill() } catch {}
   serverProc = null
   if (pgInstance) {
-    const stopped = await stopPostgresGracefully(pgDataDir)
+    // pg_ctl зовём только при живом процессе: у остановившейся базы он ответит
+    // «сервер не запущен», и мы зря подождём его 35 секунд при выходе.
+    let stopped = false
+    if (pgInstance.process) stopped = await stopPostgresGracefully(pgDataDir)
+    else hlog('база уже не работает — pg_ctl stop пропущен')
     if (stopped) {
       // Кластер уже остановлен. Если оставить ссылку на процесс, stop()
       // библиотеки будет ждать события 'exit' от УЖЕ завершившегося процесса
@@ -628,11 +924,42 @@ async function boot() {
     writeConfig(cfg)   // секреты и пути должны быть одинаковыми от запуска к запуску
     const url = await startHost(cfg)
     createMainWindow(url)
+    // Предупреждение о месте — ПОСЛЕ окна и не за сплэшем: иначе модальный
+    // диалог висит поверх заставки, и пользователь думает, что программа
+    // зависла на запуске. Запуску оно не мешает — просто предупреждение.
+    warnLowDisk(cfg)
   } catch (err) {
     hlog('boot HOST FAIL:', String(err && (err.stack || err.message || err)))
+    console.error('[host] boot HOST FAIL:', String(err && (err.stack || err.message || err)))
     closeSplash()
-    dialog.showErrorBox('Не удалось запустить сервер', describeStartError(err))
+    dialog.showErrorBox(err && err.title ? err.title : 'Не удалось запустить сервер', describeStartError(err))
     createSettingsWindow()
+  }
+}
+
+// Мало места на диске (D8-006). Полный диск роняет Postgres по PANIC, оставляет
+// копию недописанной и превращает ошибку записи лога в падение сервера —
+// а до сих пор об этом никто не предупреждал. Показываем один раз при запуске:
+// постоянный контроль — дело статуса системы в самом приложении.
+const LOW_DISK_BYTES = 500 * MB
+function warnLowDisk(cfg) {
+  try {
+    const dataDir = cfg.dataDir || defaultPaths().dataDir
+    const free = freeBytes(dataDir)
+    if (free === null) { hlog('свободное место измерить не удалось:', dataDir); return }
+    hlog('свободно на диске данных:', toMb(free), 'МБ')
+    if (free >= LOW_DISK_BYTES) return
+    // Не await: предупреждение не должно задерживать запуск программы
+    dialog.showMessageBox({
+      type: 'warning',
+      title: 'Мало места на диске',
+      message: `На диске с данными программы осталось ${toMb(free)} МБ.\n\n` +
+        'При заполнении диска база данных остановится, а резервные копии перестанут ' +
+        'записываться. Освободите место или перенесите резервные копии на флешку ' +
+        '(«Настройка системы» → папка резервных копий).',
+    }).catch((e) => hlog('диалог о месте не показан:', String(e && (e.message || e))))
+  } catch (e) {
+    hlog('проверка места не удалась:', String(e && (e.message || e)))
   }
 }
 
@@ -846,10 +1173,12 @@ ipcMain.handle('config:apply', async (_e, payload) => {
     try {
       const url = serverProc ? `http://localhost:${cfg.hostPort}` : await startHost(cfg)
       createMainWindow(url)
+      warnLowDisk(cfg)
     } catch (err) {
       hlog('apply HOST FAIL:', String(err && (err.stack || err.message || err)))
+      console.error('[host] apply HOST FAIL:', String(err && (err.stack || err.message || err)))
       closeSplash()
-      dialog.showErrorBox('Не удалось запустить сервер', describeStartError(err))
+      dialog.showErrorBox(err && err.title ? err.title : 'Не удалось запустить сервер', describeStartError(err))
       createSettingsWindow()
     }
   } else {
@@ -991,9 +1320,17 @@ if (!gotLock) {
   // Корректное завершение: сначала копия (последнее, что успеет попасть на
   // флешку), потом гасим сервер и базу, чтобы не повредить данные.
   app.on('before-quit', async (e) => {
-    if (isQuitting) return
+    // Хост уже остановлен (или его и не было) — выходим без задержки.
     if (!serverProc && !pgInstance) return
+    // Хост ещё жив — выход только после штатной остановки. ПОРЯДОК ВАЖЕН:
+    // раньше первой стояла проверка isQuitting, и второй quit проходил насквозь.
+    // А второй quit приходит всегда: закрытие сплэша «Сохраняю копию…» ниже —
+    // это последнее окно, window-all-closed зовёт app.quit() ещё раз, и
+    // программа завершалась, не дождавшись pg_ctl stop: Postgres погибал вместе
+    // с процессом, в папке оставался postmaster.pid, следующий старт шёл через
+    // восстановление. Найдено на упакованной сборке 08.09.2026.
     e.preventDefault()
+    if (isQuitting) return
     isQuitting = true
     if (serverProc) {
       // Ноутбук закрывают, не выходя из программы, поэтому копия при выходе —

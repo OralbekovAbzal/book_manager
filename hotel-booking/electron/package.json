@@ -26,6 +26,7 @@
     },
     "files": [
       "main.js",
+      "lib/**",
       "preload.js",
       "settings-preload.js",
       "settings.html",

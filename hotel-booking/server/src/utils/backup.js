@@ -346,6 +346,17 @@ function resolveBackupDir() {
   return fallbackDir(problem)
 }
 
+/**
+ * Куда ЛЯЖЕТ следующая копия — без побочных действий.
+ *
+ * `resolveBackupDir` для ответа не годится: он создаёт папку. Статус системы
+ * зовут на каждом экране, и создавать папки при чтении статуса нельзя.
+ * @returns {string}
+ */
+function effectiveBackupDir() {
+  return probeDir(BACKUP_PATH) === null ? BACKUP_PATH : BACKUP_FALLBACK_PATH
+}
+
 function fallbackDir(reason) {
   fs.mkdirSync(BACKUP_FALLBACK_PATH, { recursive: true })
   return { dir: BACKUP_FALLBACK_PATH, fallbackUsed: true, reason }
@@ -1077,6 +1088,7 @@ module.exports = {
   lastBackupLog,
   lastSuccessfulBackupLog,
   backupStatus,
+  effectiveBackupDir,
   shouldCatchUp,
   startBackupScheduler,
   BACKUP_VERSION,

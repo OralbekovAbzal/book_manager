@@ -400,6 +400,34 @@ const BackupTargetStatus: React.FC<{ status: BackupStatus }> = ({ status }) => {
   )
 }
 
+/**
+ * Свободное место — одной строкой под состоянием папки копий.
+ *
+ * Данные берём из общего стора, а не из `/system/backups`: место считает
+ * `/system/status` (его же читает полоса под шапкой), и второй источник правды
+ * тут не нужен. Сервер старой сборки блока `disk` не отдаёт — тогда строки нет
+ * вовсе: «Свободно: —» выглядело бы поломкой, а не «мы не спрашивали».
+ */
+const DiskFreeLine: React.FC = () => {
+  const known = useBackupStatusStore(s => s.diskKnown)
+  const freeMb = useBackupStatusStore(s => s.diskFreeMb)
+  const warning = useBackupStatusStore(s => s.diskWarning)
+
+  if (!known) return null
+
+  return (
+    <div style={{
+      marginTop: 8, fontSize: '0.85rem',
+      color: warning ? 'var(--s-overdue)' : 'var(--text-faint)',
+    }}>
+      Свободно на диске:{' '}
+      {/* null — папку не удалось опросить; честнее сказать это, чем показать 0 */}
+      {freeMb !== null ? `${freeMb.toLocaleString('ru-RU')} МБ` : 'не удалось определить'}
+      {warning && <strong> — мало</strong>}
+    </div>
+  )
+}
+
 const DbBackups: React.FC = () => {
   const { admin } = useAuthStore()
   const canView = admin?.role === 'SUPER_ADMIN' || admin?.role === 'ADMIN'
@@ -624,6 +652,8 @@ const DbBackups: React.FC = () => {
               : `Последняя попытка: ${formatDateTime(last.createdAt)} — ошибка${last.error ? `: ${last.error}` : ''}.`}
         </div>
       )}
+
+      <DiskFreeLine />
 
       {/* Файлы копий на сервере */}
       {info && info.files.length > 0 && (

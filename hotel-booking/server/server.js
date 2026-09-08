@@ -30,3 +30,19 @@ server.on('error', (err) => {
 process.on('unhandledRejection', (reason) => {
   logger.error('Unhandled rejection:', reason)
 })
+
+// Необработанное исключение (D8-006). Без этого обработчика Node печатает стек
+// и умирает мгновенно — а сервер запущен дочерним процессом Electron, и его
+// stderr идёт в host-debug.log. Поэтому сначала пишем стек НАПРЯМУЮ в stderr
+// (winston при полном диске сам может не записаться), потом пробуем в журнал, и
+// только затем выходим с задержкой: без неё асинхронная запись файла не успеет,
+// и причина падения не попадёт никуда. Выход обязателен — процесс после
+// необработанного исключения в неизвестном состоянии, надзор Electron поднимет
+// сервер заново.
+process.on('uncaughtException', (err) => {
+  try {
+    process.stderr.write(`[uncaughtException] ${(err && (err.stack || err.message)) || String(err)}\n`)
+  } catch { /* stderr тоже может быть недоступен */ }
+  try { logger.error('Uncaught exception:', err) } catch { /* журнал недоступен */ }
+  setTimeout(() => process.exit(1), 500)
+})

@@ -14,7 +14,16 @@ const PW = 'localdevpass'
 const DB_URL = `postgresql://postgres:${PW}@127.0.0.1:5433/hotel_booking`
 
 let pg, srv
+let failures = 0
 function log(...a) { console.log('•', ...a) }
+// Проверка с отметкой: любая ✗ доводит выход до кода 1, чтобы прогон нельзя
+// было принять за удачный, пробежав вывод глазами.
+function check(ok, okText, failText) {
+  if (ok) { console.log('  ✓', okText); return true }
+  failures++
+  console.log('  ✗', failText || okText)
+  return false
+}
 
 // Prisma CLI напрямую по build/index.js — как в main.js (node_modules/.bin в сборку не попадает)
 function runPrisma(args) {
@@ -36,9 +45,16 @@ async function main() {
   pg = new EmbeddedPostgres({
     databaseDir: dataDir, user: 'postgres', password: PW,
     port: 5433, persistent: false, onLog: () => {}, onError: () => {},
-    // КРИТИЧНО: UTF8, иначе кириллица в именах гостей ломается (по умолчанию
-    // initdb на Windows берёт WIN1251). locale=C — сортировка по байтам (нам ок).
-    initdbFlags: ['--encoding=UTF8', '--locale=C'],
+    // КРИТИЧНО: те же флаги, что в main.js. UTF8 — иначе кириллица в именах
+    // гостей ломается (initdb на Windows по умолчанию берёт WIN1251).
+    // Встроенная локаль C.UTF-8 вместо прежней libc C — иначе ILIKE не
+    // сворачивает регистр кириллицы и «асель» не находит «Асель» (D8-001).
+    initdbFlags: [
+      '--encoding=UTF8',
+      '--locale-provider=builtin',
+      '--builtin-locale=C.UTF-8',
+      '--locale=C',
+    ],
   })
 
   log('initdb...');          await pg.initialise()
@@ -65,6 +81,33 @@ async function main() {
   const migs = (await client.query('SELECT migration_name FROM _prisma_migrations ORDER BY started_at')).rows
   log(`данные: admins=${admins}, categories=${cats}, constraint booking_no_overlap=${con ? 'ЕСТЬ' : 'НЕТ!'}`)
   log(`схема: Payment=${pay ? 'ЕСТЬ' : 'НЕТ!'}, миграций применено ${migs.length}: ${migs.map(m => m.migration_name).join(', ')}`)
+
+  // ─── Локаль и коллация (D8-001) ────────────────────────────────────────────
+  // Ради этого блока волна и делалась: под прежней libc-локалью C поиск гостя
+  // по кириллице в упакованной программе был чувствителен к регистру.
+  const loc = (await client.query(
+    `SELECT datlocprovider, datcollate FROM pg_database WHERE datname = 'hotel_booking'`)).rows[0] || {}
+  check(loc.datlocprovider === 'b',
+    `провайдер локали базы = builtin (datlocprovider='b', datcollate='${loc.datcollate}')`,
+    `провайдер локали базы '${loc.datlocprovider}', ожидался 'b' (builtin) — initdb-флаги не применились`)
+
+  const ilike = (await client.query(`SELECT ('Асель' COLLATE pg_c_utf8) ILIKE 'асель' AS ok`)).rows[0].ok
+  check(ilike === true,
+    'ILIKE по кириллице не зависит от регистра под pg_c_utf8',
+    'ILIKE по кириллице ЧУВСТВИТЕЛЕН к регистру — «асель» не найдёт «Асель»')
+
+  // Коллация самой колонки: её выставляет миграция коллации (отдельный агент).
+  // Пока миграции нет — это не провал теста, а сообщение.
+  const col = (await client.query(
+    `SELECT attcollation::regcollation AS coll FROM pg_attribute
+      WHERE attrelid = '"Booking"'::regclass AND attname = 'guestName'`)).rows[0]
+  const collName = col ? String(col.coll) : '(колонки нет)'
+  if (collName === 'pg_c_utf8') {
+    check(true, 'Booking.guestName с коллацией pg_c_utf8')
+  } else {
+    log(`ℹ  Booking.guestName: коллация ${collName} — миграции коллации ещё нет в папке миграций`)
+  }
+
   await client.end()
 
   log('запускаю сервер с встроенной базой...')
@@ -99,17 +142,23 @@ async function main() {
   const body = await res.json()
   log(`login: HTTP ${res.status}, token=${body.token ? body.token.slice(0, 12) + '…' : 'НЕТ'}`)
 
-  if (health.status === 'ok' && res.status === 200 && body.token) {
-    console.log('\n✅ ВСЁ РАБОТАЕТ: встроенный Postgres + сервер + Prisma + логин.')
+  check(health.status === 'ok' && health.db === 'ok',
+    `health отвечает ok и видит базу (db=${health.db})`,
+    `health вернул ${JSON.stringify(health)}`)
+  check(res.status === 200 && !!body.token, 'вход admin/admin выдал токен',
+    `вход вернул HTTP ${res.status} без токена`)
+
+  if (failures === 0) {
+    console.log('\n✅ ВСЁ РАБОТАЕТ: встроенный Postgres + сервер + Prisma + логин + локаль C.UTF-8.')
   } else {
-    console.log('\n❌ Что-то не так — см. вывод выше.')
+    console.log(`\n❌ Проверок не прошло: ${failures} — см. ✗ выше.`)
   }
 }
 
 main()
-  .catch(e => { console.error('\n❌ ОШИБКА:', e); })
+  .catch(e => { failures++; console.error('\n❌ ОШИБКА:', e); })
   .finally(async () => {
     try { srv?.kill() } catch {}
     try { await pg?.stop() } catch {}
-    setTimeout(() => process.exit(0), 1000)
+    setTimeout(() => process.exit(failures ? 1 : 0), 1000)
   })

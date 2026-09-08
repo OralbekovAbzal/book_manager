@@ -5,8 +5,9 @@ const { prisma } = require('../utils/prisma')
 const logger = require('../utils/logger')
 const {
   createBackup, restoreBackup, describeRestore, importBackupDump,
-  listBackupFiles, lastBackupLog, backupStatus,
+  listBackupFiles, lastBackupLog, backupStatus, effectiveBackupDir,
 } = require('../utils/backup')
+const { diskStatus } = require('../utils/disk')
 
 // Копия старше этого — повод показать предупреждение в интерфейсе.
 // Двое суток: одна пропущенная ночь ещё не беда, две — уже да.
@@ -62,11 +63,25 @@ router.get('/status', async (_req, res, next) => {
     else if (ageHours !== null && ageHours > STALE_HOURS) warning = 'stale'
     else if (st.fallbackUsed) warning = 'fallback'
 
+    // Место на диске (D8-006): меряем ровно те тома, на которых лежит то, что
+    // программе нужно писать. Пути наружу не отдаём (как и у копий выше) —
+    // только мегабайты и флаг. Приоритет между «мало места» и «копия старая»
+    // решает клиент, поэтому backup.warning здесь не трогаем.
+    const disk = diskStatus({
+      paths: [
+        { role: 'data', path: process.env.PG_DATA_DIR },
+        { role: 'backup', path: effectiveBackupDir() },
+        { role: 'logs', path: process.env.LOG_PATH || 'logs' },
+      ],
+      thresholdMb: Number(process.env.DISK_WARN_MB) || 1024,
+    })
+
     res.json({
       server: 'ok',
       db: 'ok',
       timestamp: new Date().toISOString(),
       backup: { lastOkAt: st.lastOkAt, ageHours, warning },
+      disk,
     })
   } catch (err) {
     next(err)

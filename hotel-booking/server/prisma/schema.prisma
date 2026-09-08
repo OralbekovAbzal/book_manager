@@ -9,6 +9,9 @@ datasource db {
 
 model Room {
   id         Int         @id @default(autoincrement())
+  /// Коллация pg_c_utf8 задана миграцией 20260908140000 (поиск без учёта регистра
+  /// по кириллице во встроенном Postgres); при смене типа колонки COLLATE указать
+  /// в миграции явно.
   number     String      @unique
   categoryId Int
   category   Category    @relation(fields: [categoryId], references: [id])
@@ -142,6 +145,9 @@ model Booking {
   id                 Int           @id @default(autoincrement())
   roomId             Int
   room               Room          @relation(fields: [roomId], references: [id])
+  /// Коллация pg_c_utf8 задана миграцией 20260908140000 (поиск без учёта регистра
+  /// по кириллице во встроенном Postgres); при смене типа колонки COLLATE указать
+  /// в миграции явно.
   guestName          String
   guestPhone         String?
   /// ─── Документ гостя ────────────────────────────────────────────────────────

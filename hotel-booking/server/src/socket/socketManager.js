@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken')
 const { prisma } = require('../utils/prisma')
 const logger = require('../utils/logger')
 const { corsOrigin } = require('../utils/corsOrigin')
+const { stripGuestDoc } = require('../utils/guestDocFields')
 
 let io
 
@@ -13,6 +14,17 @@ const socketsByAdmin = new Map()
 /** Как часто перепроверять активность уже подключённых (страховка на случай,
  *  если сотрудника выключили мимо API — например, правкой в базе). */
 const RECHECK_MS = 5 * 60 * 1000
+
+/**
+ * Сколько миллисекунд осталось жить токену. `null` — срока в токене нет
+ * (такие выпускались до `expiresIn`, и рвать соединение по ним не за что).
+ * Чистая функция с `now` параметром — чтобы её можно было проверить тестом.
+ */
+function msUntilExpiry(payload, now = Date.now()) {
+  const exp = payload && payload.exp
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) return null
+  return exp * 1000 - now // exp в JWT — секунды
+}
 
 function trackSocket(socket) {
   const id = socket.admin.id
@@ -64,7 +76,10 @@ async function recheckConnectedAdmins() {
       const a = byId.get(id)
       if (!a || !a.isActive) { disconnectAdmin(id); continue }
       for (const socket of [...(socketsByAdmin.get(id) || [])]) {
-        if (socket.tokenVersion !== a.tokenVersion) dropSocket(socket, 'session_revoked')
+        if (socket.tokenVersion !== a.tokenVersion) { dropSocket(socket, 'session_revoked'); continue }
+        // Страховка на случай, если персональный таймер соединения не сработал
+        // (спящий процесс, перевод часов): истёкший токен сетку получать не должен.
+        if (socket.tokenExp && socket.tokenExp <= Date.now()) dropSocket(socket, 'token_expired')
       }
     }
   } catch (err) {
@@ -115,6 +130,9 @@ function initSocket(server) {
 
     socket.admin = { id: admin.id, username: admin.username, name: admin.name, role: admin.role }
     socket.tokenVersion = admin.tokenVersion
+    // Срок токена запоминаем на соединении: handshake — единственное место, где
+    // он виден, а разрывать соединение по нему придётся много позже (D1-005).
+    socket.tokenExp = typeof payload.exp === 'number' ? payload.exp * 1000 : null
     next()
   })
 
@@ -123,10 +141,36 @@ function initSocket(server) {
     trackSocket(socket)
     socket.join('bookings')
 
+    // Обработчик разрыва вешаем ДО проверки срока: соединение может быть
+    // разорвано прямо здесь, и без него сокет навсегда остался бы в socketsByAdmin.
     socket.on('disconnect', () => {
+      // Иначе таймер каждого закрытого соединения жил бы до истечения токена.
+      if (socket.expiryTimer) { clearTimeout(socket.expiryTimer); socket.expiryTimer = null }
       untrackSocket(socket)
       logger.info(`Socket disconnected: admin ${socket.admin.id}`)
     })
+
+    // Соединение не должно переживать токен (D1-005): handshake проверяет срок
+    // один раз, а дальше поток booking:* шёл бы до выхода владельца токена или
+    // до перезапуска сервера — то есть в обход восьмичасового срока JWT.
+    if (socket.tokenExp != null) {
+      const ms = socket.tokenExp - Date.now()
+      if (ms <= 0) {
+        dropSocket(socket, 'token_expired')
+        return
+      }
+      // Секунда запаса: рвать ровно в момент истечения — гонка с переподключением
+      // клиента, который к этой секунде уже должен получить новый токен.
+      // Больше 2^31−1 мс setTimeout не умеет (сработал бы сразу); такие сроки
+      // (>24 дней) в наших токенах не встречаются, а если встретятся — соединение
+      // подберёт пятиминутная перепроверка, а не мгновенный ложный разрыв.
+      const delay = ms + 1000
+      if (delay <= 2147483647) {
+        const timer = setTimeout(() => dropSocket(socket, 'token_expired'), delay)
+        if (typeof timer.unref === 'function') timer.unref()
+        socket.expiryTimer = timer
+      }
+    }
   })
 
   // Страховка: сотрудника могли выключить мимо API. unref, чтобы таймер
@@ -166,6 +210,13 @@ function normalizeBookingPayload(data) {
   if (b && typeof b === 'object' && b.roomId == null && b.room?.id != null) {
     payload = { ...payload, booking: { ...b, roomId: b.room.id } }
   }
+  // Паспорт гостя из широковещательной рассылки вырезаем (D1-005): событие уходит
+  // ВСЕМ в комнате `bookings`, а документ попал в payload попутно — BOOKING_SELECT
+  // несёт его ради REST-ответа тому, кто бронь запросил. Кому документ нужен на
+  // экране — перечитает бронь запросом, где право проверяется.
+  if (payload.booking && typeof payload.booking === 'object') {
+    payload = { ...payload, booking: stripGuestDoc(payload.booking) }
+  }
   return payload
 }
 
@@ -195,5 +246,5 @@ function emitReportsChanged() {
 
 module.exports = {
   initSocket, getIO, emitBookingEvent, emitShiftChanged, emitReportsChanged,
-  disconnectAdmin,
+  disconnectAdmin, msUntilExpiry,
 }

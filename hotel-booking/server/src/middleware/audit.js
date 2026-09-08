@@ -1,5 +1,6 @@
 const { prisma } = require('../utils/prisma')
 const logger = require('../utils/logger')
+const { GUEST_DOC_FIELDS } = require('../utils/guestDocFields')
 
 // Журнал действий (модель AuditLog). Подключается в app.js ДО роутов:
 //   app.use('/api', auditMiddleware)
@@ -32,7 +33,16 @@ const IGNORED_PATTERNS = [
   /^\/bookings\/\d+\/settlement\/preview\/?$/,
 ]
 
-const SECRET_FIELDS = new Set(['password', 'currentPassword', 'newPassword'])
+// Что не попадает в `details` журнала.
+// Пароли — очевидно. Документ гостя (D1-007) — потому что журнал не должен
+// становиться второй базой паспортов: номер, срок и дата рождения живут в
+// брони, там их и правят, а в журнале от них нет пользы — «кто и когда менял»
+// видно и без них. `guestPhone` и `guestName` ОСТАВЛЕНЫ намеренно (решение
+// владельца): журнал «кто менял бронь кого» без имени и телефона теряет смысл.
+const SECRET_FIELDS = new Set([
+  'password', 'currentPassword', 'newPassword',
+  ...GUEST_DOC_FIELDS,
+])
 const MAX_DETAILS = 2048
 
 function isTracked(method, routePath) {
@@ -46,7 +56,10 @@ function isTracked(method, routePath) {
 
 // Тело запроса без паролей (на любой глубине), не длиннее 2 КБ в JSON
 function stripSecrets(value, depth = 0) {
-  if (!value || typeof value !== 'object' || depth > 5) return value
+  if (!value || typeof value !== 'object') return value
+  // Глубже пяти уровней не идём, но и как есть не отдаём: там мог бы лежать
+  // документ или пароль (находка тестов волны 8). В журнал — заглушка.
+  if (depth > 5) return '[обрезано: слишком глубокая вложенность]'
   if (Array.isArray(value)) return value.map((v) => stripSecrets(v, depth + 1))
   const out = {}
   for (const [k, v] of Object.entries(value)) {

@@ -3,18 +3,37 @@ import api from '../api/client'
 import type { Admin } from '../types'
 
 /**
- * Почему сессия закончилась. Первые три — payload события `auth:revoked`
+ * Почему сессия закончилась. Первые четыре — payload события `auth:revoked`
  * (socketManager.js); `restored` приходит не от сервера, а из мастера первого
  * запуска: после восстановления копии учётные записи в базе — те, что с прошлого
  * компьютера, и только что созданной среди них нет.
+ *
+ * `token_expired` — сервер сам рвёт сокет по истечении JWT: раньше сокет жил
+ * дольше токена и продолжал слать обновления давно «просроченному» рабочему месту.
  */
-export type SessionEndReason = 'account_disabled' | 'session_revoked' | 'password_changed' | 'restored'
+export type SessionEndReason =
+  | 'account_disabled'
+  | 'session_revoked'
+  | 'password_changed'
+  | 'token_expired'
+  | 'restored'
 
 const SESSION_END_NOTICE: Record<SessionEndReason, string> = {
   account_disabled: 'Учётная запись отключена администратором',
   session_revoked: 'Сессия завершена: выполнен выход на другом устройстве',
   password_changed: 'Пароль изменён — войдите заново с новым паролем',
+  token_expired: 'Сессия истекла — войдите заново',
   restored: 'Данные восстановлены из копии — войдите учётной записью с прошлого компьютера',
+}
+
+/**
+ * Текст по причине. Аргумент — ЛЮБАЯ строка намеренно: причину присылает сервер,
+ * и он может оказаться новее клиента. Индексация `Record<SessionEndReason, …>`
+ * незнакомым значением дала бы `undefined` и пустой баннер на экране входа —
+ * рабочее место осталось бы без объяснения, почему его выкинуло.
+ */
+function sessionEndNotice(reason: string): string {
+  return (SESSION_END_NOTICE as Record<string, string>)[reason] ?? SESSION_END_NOTICE.session_revoked
 }
 
 interface AuthStore {
@@ -55,7 +74,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
     set({
       admin: null,
       token: null,
-      notice: reason ? (SESSION_END_NOTICE[reason] ?? SESSION_END_NOTICE.session_revoked) : null,
+      notice: reason ? sessionEndNotice(reason) : null,
     })
     if (reason || !token) return
     // Токен из localStorage уже стёрт (интерцептор его не подставит) — передаём

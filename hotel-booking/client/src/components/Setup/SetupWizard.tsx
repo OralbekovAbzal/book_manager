@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { useAuthStore } from '../../store/useAuthStore'
-import { completeSetup } from '../../api/setup'
+import { completeSetup, SETUP_DONE_CODE } from '../../api/setup'
 import { parseApiError, type ParsedApiError } from './accountRules'
 import {
   type AdminForm, type FieldErrors, type HotelForm, type StaffDraft,
@@ -11,7 +11,24 @@ import { StepAdmin } from './StepAdmin'
 import { StepUsers } from './StepUsers'
 import { StepReview } from './StepReview'
 import { StepRestore } from './StepRestore'
-import { STEP_TITLES, Stepper, wizardPrimary, wizardSecondary } from './setupUi'
+import { STEP_TITLES, StepHeading, Stepper, wizardPrimary, wizardSecondary } from './setupUi'
+
+/**
+ * Отказ «настройка уже выполнена»: сервер отвечает 409 с кодом `SETUP_DONE`,
+ * когда отметки `setupCompletedAt` нет, а настоящие учётные записи в базе уже
+ * есть (двое прошли мастер одновременно; отметка восстановилась из копии).
+ *
+ * Смотрим ИМЕННО на код, а не на статус: 409 отдаёт ещё и `P2002` из
+ * errorHandler — гонка по занятому логину. Там мастер запрещать нельзя, надо
+ * вернуть человека в форму и дать поменять логин, поэтому «любой 409» здесь
+ * означал бы тупик вместо исправимой ошибки.
+ *
+ * Объявлено ДО компонента намеренно: объявление ниже падало бы при горячей
+ * перезагрузке с «is not defined» (временная мёртвая зона), уже ловились дважды.
+ */
+function isSetupAlreadyDone(err: ParsedApiError): boolean {
+  return err.code === SETUP_DONE_CODE
+}
 
 interface Props {
   /**
@@ -42,8 +59,12 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
    * Настройка сохранена, дальше — предложение перенести данные с прошлого
    * компьютера. Отдельная фаза, а не пятый шаг: назад к формам отсюда нельзя
    * (учётная запись уже создана), и в нумерации шагов такому шагу не место.
+   *
+   * `done-elsewhere` — тупик мастера: сервер ответил 409, настройку выполнили
+   * на другом рабочем месте. Сессии нет и не будет (авто-вход не случился),
+   * единственный выход отсюда — экран входа.
    */
-  const [phase, setPhase] = useState<'form' | 'restore'>('form')
+  const [phase, setPhase] = useState<'form' | 'restore' | 'done-elsewhere'>('form')
 
   const last = STEP_TITLES.length - 1
 
@@ -83,7 +104,13 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
       setSession(res.token, res.admin)
       setPhase('restore')
     } catch (e) {
-      setServerError(parseApiError(e, 'Не удалось завершить настройку'))
+      const err = parseApiError(e, 'Не удалось завершить настройку')
+      // Настройку успели выполнить в другом месте: показывать ошибку под формой
+      // бессмысленно — повторное нажатие «Завершить» даст тот же 409. Уводим в
+      // тупиковую фазу, откуда есть только вход. Сессии здесь нет (авто-вход не
+      // состоялся), поэтому попадаем именно на экран входа, а не в шахматку.
+      if (isSetupAlreadyDone(err)) setPhase('done-elsewhere')
+      else setServerError(err)
     } finally {
       setSubmitting(false)
     }
@@ -163,7 +190,9 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
           </div>
         </div>
 
-        {phase === 'restore' ? (
+        {phase === 'done-elsewhere' ? (
+          <AlreadyDone onGoToLogin={() => onComplete?.()} />
+        ) : phase === 'restore' ? (
           <StepRestore onDone={() => onComplete?.()} />
         ) : (
           <>
@@ -177,3 +206,31 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
     </div>
   )
 }
+
+/**
+ * Мастер закончился ничем: пока его заполняли, настройку выполнили на другом
+ * рабочем месте. Введённые здесь отель и учётная запись не сохранены и уже не
+ * будут — сообщаем об этом прямо, чтобы администратор не искал свой логин.
+ *
+ * Кнопка одна и ведёт ко входу: других осмысленных действий в этом состоянии нет.
+ */
+const AlreadyDone: React.FC<{ onGoToLogin: () => void }> = ({ onGoToLogin }) => (
+  <>
+    <StepHeading
+      title="Настройка уже выполнена"
+      text="Настройка уже выполнена на другом рабочем месте — войдите со своей учётной записью."
+    />
+    <div style={{
+      padding: '12px 14px', borderRadius: 10, fontSize: '0.88rem', lineHeight: 1.5,
+      background: 'var(--surface)', border: '1px solid var(--border-subtle)', color: 'var(--text-muted)',
+    }}>
+      Отель и учётные записи, введённые в этом мастере, не сохранены. Данные системы
+      завела другая машина — войдите логином и паролем, которые задали там.
+    </div>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 28 }}>
+      <button type="button" onClick={onGoToLogin} style={wizardPrimary}>
+        Перейти ко входу
+      </button>
+    </div>
+  </>
+)

@@ -17,6 +17,7 @@ const {
   copyDataDirBeforeUpdate, describeMigrationFailure,
 } = require('./lib/migrations')
 const { freeBytes, toMb, MB } = require('./lib/disk')
+const { stripAnsi, rotateLogFile } = require('./lib/logs')
 
 // ─── Пути к ресурсам (dev vs упакованное) ────────────────────────────────────
 const isDev = !app.isPackaged
@@ -149,6 +150,10 @@ function lanIps() {
 
 // ─── Диагностический лог (host-режим) ────────────────────────────────────────
 const DEBUG_LOG = path.join(app.getPath('userData'), 'host-debug.log')
+// Ротация ДО первой записи: файл открывается на дозапись каждым hlog, и
+// переименовать его проще всего сейчас, пока в нём ничего от этого запуска нет
+// (D8-008 — лог рос без предела, за 2,5 месяца редкого использования 1,2 МБ).
+rotateLogFile(DEBUG_LOG, 5 * 1024 * 1024)
 function hlog(...a) {
   const line = `[${new Date().toISOString()}] ` +
     a.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join(' ') + '\n'
@@ -403,8 +408,8 @@ function runPrisma(args, dbUrl) {
         PRISMA_HIDE_UPDATE_MESSAGE: '1',
       },
     })
-    proc.stdout?.on('data', (d) => hlog('[prisma]', String(d).trim()))
-    proc.stderr?.on('data', (d) => hlog('[prisma-err]', String(d).trim()))
+    proc.stdout?.on('data', (d) => hlog('[prisma]', stripAnsi(String(d)).trim()))
+    proc.stderr?.on('data', (d) => hlog('[prisma-err]', stripAnsi(String(d)).trim()))
     proc.on('error', (e) => reject(new Error(`Не удалось запустить миграции: ${e.message}`)))
     proc.on('exit', (code) => {
       if (code === 0) return resolve()
@@ -628,8 +633,11 @@ function spawnServer(cfg) {
       INTERNAL_TOKEN,
     },
   })
-  proc.stdout?.on('data', (d) => hlog('[server]', String(d).trim()))
-  proc.stderr?.on('data', (d) => hlog('[server-err]', String(d).trim()))
+  // Коды цвета из winston здесь — мусор: консоль сервера это файл, а не терминал.
+  proc.stdout?.on('data', (d) => hlog('[server]', stripAnsi(String(d)).trim()))
+  // Метку [server-err] сохраняем: стек uncaughtException приходит именно сюда,
+  // и по ней в логе находят падение сервера.
+  proc.stderr?.on('data', (d) => hlog('[server-err]', stripAnsi(String(d)).trim()))
   proc.on('error', (e) => hlog('[server] SPAWN ERROR:', String(e && (e.stack || e.message))))
   proc.on('exit', (code, sig) => {
     hlog('[server] EXIT code=', code, 'sig=', sig)
@@ -1257,7 +1265,11 @@ ipcMain.handle('report:savePdf', async (_e, options = {}) => {
       landscape: options.landscape !== false,
       printBackground: true,
       pageSize: 'A4',
-      margins: { marginType: 'custom', top: 0.5, bottom: 0.5, left: 0.4, right: 0.4 },
+      // Поля — в ДЮЙМАХ и только top/bottom/left/right (PrintToPDFMargins).
+      // Ключ marginType сюда попал от webContents.print(): у printToPDF с
+      // Electron 21 набор опций повторяет Chrome DevTools Protocol и такого
+      // поля не знает — лишний ключ молча игнорировался.
+      margins: { top: 0.5, bottom: 0.5, left: 0.4, right: 0.4 },
     })
 
     const { canceled, filePath } = await dialog.showSaveDialog(win, {

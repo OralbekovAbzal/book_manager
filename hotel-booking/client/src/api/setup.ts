@@ -23,7 +23,15 @@ export async function fetchSetupStatus(): Promise<SetupStatus> {
   return data
 }
 
-// Сервер отвечает 403, если настройка уже выполнена.
+/**
+ * Завершение мастера. Два разных отказа, и путать их нельзя:
+ * - **403** — стоит отметка `setupCompletedAt`, мастер вообще не должен был открыться;
+ * - **409** `{ code: 'SETUP_DONE' }` — отметки нет, но в базе уже есть настоящие
+ *   учётные записи (двое прошли мастер одновременно, отметка восстановилась из
+ *   копии). Создавать вторую «главную» учётку поверх чужих — нельзя, надо войти.
+ */
+export const SETUP_DONE_CODE = 'SETUP_DONE'
+
 export async function completeSetup(payload: SetupCompletePayload): Promise<SetupCompleteResult> {
   const { data } = await api.post('/setup/complete', payload)
   return data

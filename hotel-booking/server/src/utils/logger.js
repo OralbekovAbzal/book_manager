@@ -10,17 +10,37 @@ const logger = createLogger({
   ),
   transports: [
     new transports.Console({
+      // colorize только в живом терминале (D8-008). В упаковке сервер запущен
+      // дочерним процессом Electron, и его stdout построчно уходит в
+      // host-debug.log: раскраска превращалась там в тысячи строк с escape-
+      // последовательностями поверх того, что и так лежит в combined.log.
       format: format.combine(
-        format.colorize(),
+        ...(process.stdout.isTTY ? [format.colorize()] : []),
         format.printf(({ timestamp, level, message }) => `${timestamp} [${level}]: ${message}`)
       ),
+      // В упаковке каждый запрос дублировался в host-debug.log через stdout —
+      // тот же поток, только без ротации и в папке пользователя. Поэтому в
+      // production в консоль идут только предупреждения и ошибки; полный поток
+      // остаётся в файлах, у которых есть ротация.
+      level: process.env.NODE_ENV === 'production' ? 'warn' : undefined,
     }),
+    // Ротация: 5 файлов по 5 МБ на каждый лог (D8-008). Без неё оценка стойки
+    // ~2000 запросов в день давала сотни мегабайт за год — и ПД в них жили
+    // вечно. `tailable: true` — свежие записи всегда в error.log/combined.log,
+    // старое уезжает в combined1.log, combined2.log… (winston нумерует перед
+    // расширением): так путь в диалогах и подсказках остаётся верным.
     new transports.File({
       filename: path.join(process.env.LOG_PATH || 'logs', 'error.log'),
       level: 'error',
+      maxsize: 5 * 1024 * 1024,
+      maxFiles: 5,
+      tailable: true,
     }),
     new transports.File({
       filename: path.join(process.env.LOG_PATH || 'logs', 'combined.log'),
+      maxsize: 5 * 1024 * 1024,
+      maxFiles: 5,
+      tailable: true,
     }),
   ],
 })

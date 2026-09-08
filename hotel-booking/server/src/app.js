@@ -30,6 +30,7 @@ const userRoutes = require('./routes/users')
 const { errorHandler } = require('./middleware/errorHandler')
 const { auditMiddleware } = require('./middleware/audit')
 const logger = require('./utils/logger')
+const { safeUrl } = require('./utils/logSafe')
 const { prisma } = require('./utils/prisma')
 const { checkDb } = require('./utils/healthCheck')
 
@@ -63,7 +64,9 @@ app.use(express.json({ limit: '1mb' }))
 app.use(express.urlencoded({ extended: true }))
 
 app.use((req, _res, next) => {
-  logger.info(`${req.method} ${req.url}`)
+  // Только имена query-параметров, без значений: в них ФИО и телефоны гостей,
+  // а лог живёт вне базы и уезжает в поддержку целиком (D1-004).
+  logger.info(`${req.method} ${safeUrl(req.originalUrl || req.url)}`)
   next()
 })
 

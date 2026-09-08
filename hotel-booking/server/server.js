@@ -8,6 +8,8 @@ const http = require('http')
 const app = require('./src/app')
 const { initSocket } = require('./src/socket/socketManager')
 const { startBackupScheduler } = require('./src/utils/backup')
+const { startAuditRetention } = require('./src/utils/auditRetention')
+const { prisma } = require('./src/utils/prisma')
 const logger = require('./src/utils/logger')
 
 const PORT = process.env.PORT || 3001
@@ -20,6 +22,9 @@ initSocket(server)
 server.listen(PORT, HOST, () => {
   logger.info(`Server running on http://${HOST}:${PORT}`)
   startBackupScheduler()
+  // Чистка журнала действий — после копий: расписание 03:30 намеренно стоит
+  // за ночной копией в 03:00 (D1-007).
+  startAuditRetention(prisma)
 })
 
 server.on('error', (err) => {

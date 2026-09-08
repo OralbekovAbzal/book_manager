@@ -76,6 +76,12 @@ export interface ParsedApiError {
   details: ApiFieldError[]
   /** HTTP-статус; null — ответа не было (сеть, сервер не запущен). */
   status: number | null
+  /**
+   * Машинный код отказа из тела (`{ error, code }`) — есть не у всех ответов.
+   * Нужен там, где по одному статусу нельзя понять, что делать: например,
+   * 409 `SETUP_DONE` в мастере первого запуска ведёт на экран входа.
+   */
+  code: string | null
 }
 
 /**
@@ -84,13 +90,13 @@ export interface ParsedApiError {
  */
 export function parseApiError(e: unknown, fallback = 'Ошибка запроса'): ParsedApiError {
   const err = e as { response?: { status?: number; data?: unknown } } | undefined
-  if (!err?.response) return { message: 'Сервер недоступен', details: [], status: null }
+  if (!err?.response) return { message: 'Сервер недоступен', details: [], status: null, code: null }
 
   const status = err.response.status ?? null
   const data = err.response.data
-  if (typeof data === 'string' && data.trim()) return { message: data, details: [], status }
+  if (typeof data === 'string' && data.trim()) return { message: data, details: [], status, code: null }
 
-  const body = (data ?? {}) as { error?: unknown; message?: unknown; details?: unknown }
+  const body = (data ?? {}) as { error?: unknown; message?: unknown; details?: unknown; code?: unknown }
   const message =
     typeof body.error === 'string' ? body.error
     : typeof body.message === 'string' ? body.message
@@ -100,7 +106,7 @@ export function parseApiError(e: unknown, fallback = 'Ошибка запрос�
         (d): d is ApiFieldError => !!d && typeof d === 'object' && typeof (d as ApiFieldError).message === 'string',
       )
     : []
-  return { message, details, status }
+  return { message, details, status, code: typeof body.code === 'string' ? body.code : null }
 }
 
 /** Одной строкой: сообщение + детали по полям (для простых форм). */

@@ -1,7 +1,12 @@
 const logger = require('../utils/logger')
+const { safeUrl, safeError } = require('../utils/logSafe')
 
 function errorHandler(err, req, res, _next) {
-  logger.error(`${req.method} ${req.url} — ${err.message}`, { stack: err.stack })
+  // URL без значений query и ошибка без тела запроса: в error.log ФИО, телефоны
+  // и документы гостей попадать не должны ни из строки запроса (D1-004), ни из
+  // текста ошибки Prisma, который повторяет весь объект `data`.
+  const safe = safeError(err)
+  logger.error(`${req.method} ${safeUrl(req.originalUrl || req.url)} — ${safe.message}`, { stack: safe.stack })
 
   if (err.name === 'ValidationError') {
     return res.status(400).json({ error: err.message })

@@ -114,12 +114,10 @@ function respondMoveBlocked(res, block) {
 //
 // Шесть полей документа ходят всегда вместе — при создании, при правке, при
 // переезде и при подстановке из прошлого визита. Список поэтому ОДИН и живёт
-// здесь: дописать седьмое поле в схему и забыть про него в переезде было бы
-// очень легко, а обнаружилось бы это через месяц пустой строкой в паспорте.
-const GUEST_DOC_FIELDS = [
-  'guestCitizenship', 'guestDocType', 'guestDocNumber',
-  'guestDocExpiry', 'guestBirthDate', 'guestSex',
-]
+// в utils/guestDocFields.js: дописать седьмое поле в схему и забыть про него
+// было бы очень легко, а читателей у списка теперь двое — этот контроллер
+// (пишет поля) и сокет (обязан их вырезать из broadcast'а).
+const { GUEST_DOC_FIELDS } = require('../utils/guestDocFields')
 // Эти два — @db.Date: из формы приходят строкой «ГГГГ-ММ-ДД», Prisma ждёт Date.
 const GUEST_DOC_DATE_FIELDS = ['guestDocExpiry', 'guestBirthDate']
 

@@ -40,11 +40,16 @@ export function useSocket(token: string | null) {
     socket.on('booking:checkout', withBooking(onBookingUpdated))
 
     // Сервер отозвал сессию (учётку отключили, сменили пароль, вышли на другом
-    // устройстве): сокет рвётся и обратно его не пустят. Не ждём, пока в 401
-    // упрётся первый REST-запрос — сразу на экран входа с пояснением, иначе
-    // рабочее место молча «замерзает».
-    socket.on('auth:revoked', (payload?: { reason?: SessionEndReason }) => {
-      useAuthStore.getState().logout(payload?.reason ?? 'account_disabled')
+    // устройстве, истёк токен): сокет рвётся и обратно его не пустят. Не ждём,
+    // пока в 401 упрётся первый REST-запрос — сразу на экран входа с пояснением,
+    // иначе рабочее место молча «замерзает».
+    //
+    // `reason` типизирован как строка, а не как `SessionEndReason`: причину
+    // выбирает сервер, и он может оказаться новее клиента. Текста для незнакомой
+    // причины в сторе нет — `logout` подставит общий («Сессия завершена»),
+    // но выкинуть на экран входа обязан в любом случае.
+    socket.on('auth:revoked', (payload?: { reason?: string }) => {
+      useAuthStore.getState().logout((payload?.reason ?? 'session_revoked') as SessionEndReason)
     })
 
     socket.on('booking:cancelled', (payload: { bookingId?: number } | null | undefined) => {

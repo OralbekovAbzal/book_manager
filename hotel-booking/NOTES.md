@@ -22,6 +22,41 @@ _Последнее обновление: 2026-09-08_
 
 ## 🟢 Активные идеи / направления (что делать дальше)
 
+### 🚪 Точка входа для следующей сессии (2026-09-08, вечер)
+
+**Где мы.** Полный аудит (`docs/audit-2026-09/00-summary.md`) сделан 07.09; по его итогам за 08.09
+закрыты четыре волны, всё в `main` и запушено: `d7131ba` аудит · `2de3249` 5a деньги + расчёт с гостем
+· `1c121bf` 5b брони (роль STAFF, один счёт при переезде, квота-предупреждение, миграция
+`20260908065802`) · `43be4da` переезд перетаскиванием с рваным разломом · `4f0f82c` 6a копии на
+флешку и перенос через мастер. Тесты: 32 файла, 685 зелёных; `tsc` чист. Dev-база мигрирована.
+Решения владельца — в `docs/decisions/*.md` секциями от 2026-09-08 (читать перед работой в области).
+
+**Что осталось из чек-листа аудита** — блок «📋 Аудит 2026-09-07 — новые пункты» ниже (открытые `[ ]`).
+Согласованный порядок волн:
+1. **«Упаковка»** — локаль `C` встроенного Postgres (D8-001: `initdb --locale=C` → `C.UTF-8`/ICU, у первого
+   клиента кластер от 05.09 уже с `C` — перенос через копию при следующей установке), `config.json` как
+   единственная копия пароля базы (D8-004), наблюдение за падением Postgres и P3009 (D8-002/005/006),
+   **пересборка установщика** (`electron/dist` отстаёт на четыре волны; Electron-части 6a — копия при
+   выходе, диалог файла — проверены только кодом). Это важнее всего для показа зимой.
+2. **«Доступ и ПД»** — гейт мастера первого запуска (D1-001), ПД в логах и журнале, сокет дольше
+   токена (D1-004/005/007), `npm audit fix` для `ws`/`socket.io-parser` (D9-001), Electron 31 EOL.
+3. **«Отчёты и клиент»** — Excel/CSV/формулы/UTC (D4-001…004), realtime и деньги по сокету
+   (D5-003/004, D6-001), касса 30 дней, окно «Аудит», каскад услуг, 401 в форме (D6-002/003/005, D7-002).
+4. **«Гигиена»** — CLAUDE.md (19 устаревших утверждений), `.mcp.json` с паролем и чужой
+   `launch.json` в git, мёртвый код, `[::1]` в CORS.
+
+**Как здесь работают волны.** Ведущая сессия пишет план (plan mode) → агенты `hotel-schema`
+(только схема+миграция) ∥ `hotel-tests` (фикстуры заранее) → `hotel-server` ∥ `hotel-client` по
+зафиксированному контракту → `hotel-tests` (находки — `it.fails` + отчёт) → ведущая: правки по
+находкам через `hotel-server`, `npm test`, `tsc`, живая проверка на клоне, журнал, коммит и push
+(владелец разрешил коммитить самому после зелёных тестов и живой проверки). Агенты — Opus 5,
+аудит/критика — Fable 5.1, модель передавать явно. Никто из агентов не коммитит.
+Владелец решает вопросы **по одному** (AskUserQuestion с рекомендацией), не списком.
+
+**Как проверять вживую, не трогая dev-базу и порты 3001/5173/3011** — см. «Операционные
+заметки → Клон для проверки» ниже (pg_dump → `hotel_booking_audit`, тестовые учётки, цены на
+июнь 2024, конфигурации 3012/5175 в `launch.json`, грабли панели браузера).
+
 ### Волна 6a «Копии на флешку и перенос на новый ноутбук» — СДЕЛАНО 2026-09-08
 Решение (вместо базы на флешке — копии на флешку и восстановление в мастере) —
 `docs/decisions/desktop-and-ops.md`. Сделано: догоняющая копия при старте (последняя удачная
@@ -759,6 +794,45 @@ Start-Process -FilePath "npm.cmd" -ArgumentList "run","dev" `
   -WorkingDirectory "...\hotel-booking\client" -WindowStyle Hidden ...
 ```
 Логи: `hotel-booking/.logs/`.
+
+### Клон для проверки (2026-09-08, так проверялись аудит и волны 5–6)
+Правило: **dev-базу `hotel_booking` и порты 3001/5173/3011 не трогать** — там работает владелец.
+Всё живое — на клоне `hotel_booking_audit` (PostgreSQL 17, `C:\Program Files\PostgreSQL\17\bin`,
+пароль — из `DATABASE_URL` в `server/.env`; в Git Bash задавать `PGPASSWORD`).
+1. Клон: `createdb hotel_booking_audit && pg_dump -Fc hotel_booking | pg_restore -d hotel_booking_audit
+   --no-owner --no-privileges` (через `-T` нельзя — MCP держит соединение с dev-базой).
+   Если в схеме есть неприменённая миграция — `DATABASE_URL=<…/hotel_booking_audit> npx prisma migrate deploy`.
+2. Тестовые учётки (пароль у всех `Audit2026qonaq`, хеш bcrypt-12 готовый) — SQL-файлом через `psql -f`
+   (кириллица в `-c` ломается из-за кодировки консоли):
+   ```sql
+   INSERT INTO "Admin" (username, password, name, role, "isActive", "createdAt", "updatedAt", "tokenVersion") VALUES
+    ('audit-super', '$2a$12$D3S7wBp/DGeSaXsIO.PgIu5rGCZY/Q9/PqvXhC1jbSF6l/UEvn11G', 'AUDIT super', 'SUPER_ADMIN', true, NOW(), NOW(), 0),
+    ('audit-admin', '$2a$12$D3S7wBp/DGeSaXsIO.PgIu5rGCZY/Q9/PqvXhC1jbSF6l/UEvn11G', 'AUDIT admin', 'ADMIN', true, NOW(), NOW(), 0)
+   ON CONFLICT (username) DO NOTHING;
+   ```
+3. Факты dev-базы: бизнес-дата 2024-06-23, ~112 броней 2024-06-24…08-12, календарь цен только на 2026.
+   Для сценариев с деньгами — цены на июнь 2024 (категории 9 «Стандарт» и 10 «Комфорт»):
+   ```sql
+   INSERT INTO "RatePrice" ("categoryId", date, "roomPrice", "adultPrice", "childPrice", "extraBedPrice", "updatedAt")
+   SELECT c, d::date, CASE c WHEN 9 THEN 20000 ELSE 30000 END, CASE c WHEN 9 THEN 10000 ELSE 15000 END,
+          CASE c WHEN 9 THEN 5000 ELSE 7000 END, 2000, NOW()
+   FROM generate_series('2024-06-20'::date, '2024-07-10'::date, '1 day') d CROSS JOIN (VALUES (9),(10)) v(c)
+   ON CONFLICT ("categoryId", date) DO NOTHING;
+   ```
+4. Временные конфигурации в `.claude/launch.json` (перед коммитом убрать — файл в git):
+   «Hotel Server (audit 3012)» — `node -e` с `chdir(server)`, `require(dotenv).config()`,
+   `DATABASE_URL.replace('/hotel_booking','/hotel_booking_audit')`, `PORT=3012`, `SNAPSHOT_KEEP_AUTO=200`,
+   `BACKUP_PATH`/`LOG_PATH` во временную папку (иначе копии клона лягут в `C:\HotelBooking\backups`),
+   `INTERNAL_TOKEN=<любой>`, затем `require(server/server.js)`; «Hotel Client (→audit 3012)» —
+   `API_TARGET=http://localhost:3012`, `vite --port 5175 --strictPort`. Запускать через `preview_start`.
+5. Грабли панели браузера: сбросить эмуляцию размера (`resize_window preset desktop`), иначе клики
+   по ref промахиваются; в форму входа значения вводить **клавиатурой** (`form_input` React не видит),
+   кнопку «Войти» иногда нажимать дважды; второй origin для проверки сокетов — `127.0.0.1:5175`
+   (`[::1]` отвергается CORS); фильтры сетки — кликами по подписям чекбоксов, затем «Применить»;
+   файл в `<input type=file>` панель загрузить не умеет — такие пути проверять по API.
+6. Уборка: `DROP DATABASE hotel_booking_audit WITH (FORCE)`, восстановить `launch.json` из копии,
+   удалить временные папки с копиями (в них данные гостей).
+7. Сервер на клоне — `node server.js`, правки не подхватывает: после серверных правок перезапускать.
 
 ### Правила/грабли
 - **Изменение схемы = ОДНА правка: `schema.prisma` + миграция.** (2026-09-04, было —

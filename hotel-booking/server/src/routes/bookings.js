@@ -113,6 +113,11 @@ const bookingUpdateRules = [
   // принесли на стойку. Это основной сценарий, а не побочный.
   ...guestDocRules,
   ...bookingNumericRules,
+  // Версия брони, которую видит форма (её же `updatedAt` из ответа сервера).
+  // Необязательно намеренно: старый клиент и служебные вызовы замка не знают,
+  // и отвечать им 400 значило бы сломать сохранение ради защиты от гонки.
+  body('expectedUpdatedAt').optional({ nullable: true }).isISO8601()
+    .withMessage('expectedUpdatedAt: ISO-дата'),
 ]
 
 const availabilityRules = [

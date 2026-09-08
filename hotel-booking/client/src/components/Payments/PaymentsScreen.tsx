@@ -2,9 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import {
   fetchDebts, fetchCurrentShiftSummary, voidPayment,
   METHOD_LABELS,
-  type DebtRow, type Payment, type ShiftSummary,
+  type DebtRow, type DebtsWindow, type Payment, type ShiftSummary,
 } from '../../api/payments'
 import { useAuthStore } from '../../store/useAuthStore'
+import { useRealtimeStore } from '../../store/useRealtimeStore'
 import { inputStyle, secondaryBtn, formTitle, EmptyBox } from '../Settings/sections/sectionUi'
 import { apiErrorText, card, fmtDate, fmtTime, InlinePrompt, money, Stat, td, th } from './paymentsUi'
 import { BookingPaymentPanel } from './BookingPaymentPanel'
@@ -57,11 +58,27 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
   const [loadingDebts, setLoadingDebts] = useState(true)
   const [onlyDebt, setOnlyDebt] = useState(false)
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  // ── Окно списка долгов (D6-002) ─────────────────────────────────────────────
+  // Сервер по умолчанию отдаёт брони с выездом не старше 30 дней. Про это окно
+  // на экране не было ни слова: турфирма платит за прошлый месяц, кассир ищет
+  // гостя — «Ничего не найдено», и понять, что список обрезан, было неоткуда.
+  const [showAll, setShowAll] = useState(false)
+  const [debtsWindow, setDebtsWindow] = useState<DebtsWindow | null>(null)
+  // Значение в ref, а не во втором параметре `loadDebts`: перечитку зовут из
+  // четырёх мест (поиск, сокет, отмена записи, приём оплаты), и забытый параметр
+  // в любом из них молча сузил бы список обратно до 30 дней.
+  const showAllRef = useRef(showAll)
+  showAllRef.current = showAll
 
   const loadDebts = (q: string) => {
     setLoadingDebts(true)
-    fetchDebts(q)
-      .then((d) => { setDebts(d.bookings); setBusinessDate(d.businessDate) })
+    // `days: 0` — «без окна, все долги». `undefined` — оставить серверное умолчание.
+    fetchDebts(q, showAllRef.current ? 0 : undefined)
+      .then((d) => {
+        setDebts(d.bookings)
+        setBusinessDate(d.businessDate)
+        setDebtsWindow(d.window ?? null)
+      })
       .catch(() => {})
       .finally(() => setLoadingDebts(false))
   }
@@ -71,6 +88,15 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
     const t = window.setTimeout(() => loadDebts(query.trim()), query ? 350 : 0)
     return () => window.clearTimeout(t)
   }, [query])
+
+  // Переключили окно — перечитываем сразу, без дебаунса. Отдельный эффект и
+  // сторож: без него первый рендер послал бы второй такой же запрос.
+  const showAllApplied = useRef(showAll)
+  useEffect(() => {
+    if (showAllApplied.current === showAll) return
+    showAllApplied.current = showAll
+    loadDebts(query.trim())
+  }, [showAll])
 
   const selected = useMemo(() => debts.find((d) => d.id === selectedId) || null, [debts, selectedId])
 
@@ -100,6 +126,38 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
       .finally(() => setLoadingShift(false))
   }
   useEffect(() => { if (tab === 'shift') loadShift() }, [tab])
+
+  // ─── Обновление по сокету ──────────────────────────────────────────────────
+  // Платёж, возврат или отмена записи на другом рабочем месте меняют и список
+  // долгов, и кассу смены. Раньше «Касса» показывала своё до перезахода в раздел
+  // (аудит D6-001/D7-010) — а второй кассир по этим числам принимал деньги ещё раз.
+  //
+  // Дебаунс: одна операция на сервере рассылает несколько событий подряд
+  // (`booking:updated` + пересборка начислений), да и соседи могут работать
+  // очередью. Полсекунды тишины — и один запрос вместо пяти.
+  //
+  // Суммы и историю ВЫБРАННОЙ брони перечитывает сама `BookingPaymentPanel`
+  // по тому же тику: дублировать это здесь значило бы удвоить запросы.
+  const tick = useRealtimeStore((s) => s.tick)
+  const seenTick = useRef(tick)
+  // Перечитку держим в ref: она замыкает текущие `query` и `tab`, а эффект
+  // подписки не должен перезапускаться на каждую букву в поиске.
+  //
+  // Окно списка («показать все») сюда передавать не нужно: его `loadDebts` берёт
+  // из `showAllRef` сам — ровно чтобы перечитка из любого из четырёх мест не
+  // сужала список обратно до 30 дней.
+  const reloadRef = useRef<() => void>(() => {})
+  reloadRef.current = () => {
+    loadDebts(query.trim())
+    if (tab === 'shift') loadShift()
+  }
+
+  useEffect(() => {
+    if (tick === seenTick.current) return
+    seenTick.current = tick
+    const t = window.setTimeout(() => reloadRef.current(), 500)
+    return () => window.clearTimeout(t)
+  }, [tick])
 
   const doVoidInShift = async (p: Payment, reason: string) => {
     if (!reason.trim()) { flash('Причина отмены обязательна'); return }
@@ -164,9 +222,29 @@ export const PaymentsScreen: React.FC<Props> = ({ onBack }) => {
                 <input type="checkbox" checked={onlyDebt} onChange={(e) => setOnlyDebt(e.target.checked)} />
                 только с долгом
               </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
+                показать все долги
+              </label>
             </div>
-            <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginBottom: 8 }}>
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginBottom: 8, lineHeight: 1.5 }}>
               {loadingDebts ? 'Загрузка…' : `Броней: ${visibleDebts.length} · Долг всего: ${money(totalDue)}`}
+              {/* Окно списка называем ВСЕГДА: «Ничего не найдено» без объяснения
+                  читается как «долгов нет», а не «искали не там» (D6-002).
+                  Число дней — от сервера; старый сервер окна не сообщает, тогда
+                  говорим про умолчание в 30 дней. */}
+              {!loadingDebts && (
+                <div>
+                  {debtsWindow?.days == null && showAll
+                    ? 'Показаны все долги, включая давние выезды.'
+                    : `Показаны долги по выездам за последние ${debtsWindow?.days ?? 30} дн. — снимите ограничение галочкой «показать все долги».`}
+                </div>
+              )}
+              {debtsWindow?.truncated && (
+                <div style={{ color: 'var(--s-out)' }}>
+                  Показаны первые {debts.length} — уточните поиск.
+                </div>
+              )}
             </div>
 
             <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', border: '1px solid var(--border-subtle)', borderRadius: 12 }}>

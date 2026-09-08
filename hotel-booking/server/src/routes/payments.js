@@ -1,5 +1,5 @@
 const router = require('express').Router()
-const { body, param } = require('express-validator')
+const { body, param, query } = require('express-validator')
 const ctrl = require('../controllers/paymentController')
 const { authenticate, requireRole } = require('../middleware/auth')
 const { validate } = require('../middleware/validate')
@@ -11,7 +11,22 @@ router.use(authenticate)
 
 // Читать журнал и сводку по кассе может любой вошедший: администратор смены
 // должен видеть, что принял он сам и напарник.
-router.get('/debts', ctrl.debts)
+// `days` — окно «сколько дней после выезда бронь ещё в списке»; 0 или all=1
+// снимают его совсем (D6-002). Мусор в параметре отсекаем здесь: молча
+// подставить умолчание значило бы показать не то окно, о котором просили.
+router.get(
+  '/debts',
+  [
+    query('days').optional({ nullable: true }).isInt({ min: 0 })
+      .withMessage('days — целое число дней, не меньше нуля'),
+    // loose: принимаем 1/0/true/false/yes/no — параметр приходит из ссылки,
+    // а не из формы, и «all=1» тут самая частая запись
+    query('all').optional({ nullable: true }).isBoolean({ loose: true })
+      .withMessage('all — да/нет'),
+  ],
+  validate,
+  ctrl.debts,
+)
 router.get('/booking/:bookingId', param('bookingId').isInt(), validate, ctrl.listByBooking)
 router.get('/shift/current/summary', ctrl.currentShiftSummary)
 router.get('/shift/:shiftId/summary', param('shiftId').isInt(), validate, ctrl.shiftSummary)

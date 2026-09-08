@@ -9,6 +9,10 @@ const canEdit = requireRole('SUPER_ADMIN', 'ADMIN')
 // Смотреть цены может любой вошедший — они нужны для расчёта брони.
 router.get('/', ctrl.list)
 
+// Сколько строк сотрёт «Очистить период» — вопрос перед необратимым действием,
+// поэтому право то же, что у самого удаления (D6-004/D7-011).
+router.get('/count', canEdit, ctrl.countRange)
+
 // Заполнение диапазоном (сезон) и очистка диапазона.
 router.put('/', canEdit, ctrl.applyRange)
 router.delete('/', canEdit, ctrl.clearRange)

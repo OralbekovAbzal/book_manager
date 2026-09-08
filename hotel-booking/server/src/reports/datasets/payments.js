@@ -1,6 +1,7 @@
 const { prisma } = require('../../utils/prisma')
-const { isoDate, isoMonth, weekdayName, toUTCDate } = require('../dateUtils')
+const { isoDate, isoMonth, weekdayName, toUTCDate, DAY } = require('../dateUtils')
 const { round2 } = require('../../utils/bookingMoney')
+const { localDateISO, localDayRangeUTC } = require('../../utils/hotelTz')
 
 /**
  * Датасет «Платежи»: одна строка = одна запись журнала кассы (`Payment`).
@@ -53,7 +54,7 @@ const fields = {
   shiftId:       { label: '№ смены',     type: 'int',  groupable: true },
   paidAt:        { label: 'Момент приёма', type: 'datetime' },
   paidDate:      { label: 'Календарная дата приёма', type: 'date', groupable: true,
-                   description: 'День по часам, а не по смене — может отличаться от рабочей даты' },
+                   description: 'Календарный день по времени отеля (не по смене) — может отличаться от рабочей даты' },
 
   adminName:     { label: 'Кто принял',  type: 'text', groupable: true, optionsFrom: 'admins' },
   comment:       { label: 'Комментарий', type: 'text' },
@@ -108,11 +109,18 @@ async function load({ params }) {
 
   // Период по рабочей дате. Платёж без смены (данные из старых выгрузок)
   // отбираем по календарному моменту приёма — иначе он не попал бы никуда.
+  //
+  // `businessDate` — @db.Date (UTC-полночь), границы такие же. `paidAt` —
+  // настоящий момент: его сутки считаются по зоне отеля (`utils/hotelTz.js`),
+  // иначе ночной приём уехал бы во вчера. Период приходит полуинтервалом
+  // [from, to), поэтому в `localDayRangeUTC` (он ждёт последний день
+  // ВКЛЮЧИТЕЛЬНО) отдаём день перед `to`.
+  const paidAtRange = localDayRangeUTC(isoDate(from), isoDate(to ? new Date(to.getTime() - DAY) : null))
   const rows = await prisma.payment.findMany({
     where: {
       OR: [
         { businessDate: { gte: from, lt: to } },
-        { businessDate: null, paidAt: { gte: from, lt: to } },
+        { businessDate: null, paidAt: paidAtRange },
       ],
     },
     select: {
@@ -134,7 +142,10 @@ async function load({ params }) {
   return rows.map((p) => {
     const b = p.booking
     const voided = !!p.voidedAt
-    const cashDate = p.businessDate || p.paidAt
+    // Платёж без смены: день кассы — местные сутки по времени отеля, как и отбор
+    // по периоду выше; иначе ночной платёж отбирался бы в сентябрь, а подписывался
+    // августом (находка тестов волны 9). `@db.Date` смены остаётся UTC-полночью.
+    const cashDate = p.businessDate || (p.paidAt ? localDateISO(p.paidAt) : null)
     const received = !voided && p.kind === 'payment' ? round2(p.amount) : 0
     const refunded = !voided && p.kind === 'refund' ? round2(p.amount) : 0
     const net = round2(received - refunded)
@@ -151,7 +162,7 @@ async function load({ params }) {
       weekday: weekdayName(cashDate),
       shiftId: p.shiftId,
       paidAt: p.paidAt,
-      paidDate: isoDate(p.paidAt),
+      paidDate: localDateISO(p.paidAt),
       adminName: p.adminName,
       comment: p.comment || '',
       isVoided: voided,

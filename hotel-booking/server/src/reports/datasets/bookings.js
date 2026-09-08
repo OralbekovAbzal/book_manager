@@ -1,6 +1,7 @@
 const { prisma } = require('../../utils/prisma')
-const { isoDate, isoMonth, daysBetween, weekdayName, toUTCDate } = require('../dateUtils')
+const { isoDate, isoMonth, daysBetween, weekdayName, toUTCDate, DAY } = require('../dateUtils')
 const { loadBookingMoney } = require('../../utils/bookingMoney')
+const { localDateISO, localDayRangeUTC } = require('../../utils/hotelTz')
 
 /**
  * Датасет «Брони»: одна строка = одна бронь.
@@ -70,7 +71,8 @@ const fields = {
   discountPercent:{ label: 'Скидка, %',  type: 'number' },
   createdByName: { label: 'Кто создал',  type: 'text', groupable: true, optionsFrom: 'admins' },
   createdAt:     { label: 'Создана',     type: 'datetime' },
-  createdDate:   { label: 'Дата создания', type: 'date', groupable: true },
+  createdDate:   { label: 'Дата создания', type: 'date', groupable: true,
+                   description: 'Календарный день по времени отеля (не по смене)' },
   notes:         { label: 'Примечание',  type: 'text' },
   // Цепочка после переезда: продолжение остаётся строкой реестра (гость жил в этом
   // номере эти ночи), но деньги у него нулевые — они на голове счёта. Поэтому
@@ -115,11 +117,22 @@ const metrics = {
  *  checkIn — заезды за период;
  *  checkOut — выезды за период;
  *  created — брони, созданные за период.
+ *
+ * `checkIn`/`checkOut` — поля @db.Date (UTC-полночь), их границы и остаются
+ * UTC-полуночами. `createdAt` — настоящий момент времени: его границы считаются
+ * по календарным суткам ЗОНЫ ОТЕЛЯ (`utils/hotelTz.js`), иначе бронь, заведённая
+ * ночью, попадала бы в предыдущий день — ровно то, что стойка видит как ошибку.
  */
 function periodWhere(mode, from, to) {
   if (mode === 'checkIn') return { checkIn: { gte: from, lt: to } }
   if (mode === 'checkOut') return { checkOut: { gte: from, lt: to } }
-  if (mode === 'created') return { createdAt: { gte: from, lt: to } }
+  if (mode === 'created') {
+    // Движок отдаёт период полуинтервалом [from, to): `to` — день ПОСЛЕ
+    // последнего. `localDayRangeUTC` ждёт последний день включительно, поэтому
+    // отступаем на сутки — иначе период растянулся бы на день вперёд.
+    const lastDay = to ? new Date(to.getTime() - DAY) : null
+    return { createdAt: localDayRangeUTC(isoDate(from), isoDate(lastDay)) }
+  }
   return { checkIn: { lt: to }, checkOut: { gt: from } }
 }
 
@@ -202,7 +215,7 @@ async function load({ params }) {
       discountPercent: b.discountPercent,
       createdByName: (b.createdBy && b.createdBy.name) || '',
       createdAt: b.createdAt,
-      createdDate: isoDate(b.createdAt),
+      createdDate: localDateISO(b.createdAt),
       notes: b.notes || '',
       isContinuation: b.accountBookingId != null,
       accountOf: b.accountBookingId != null ? `№${b.accountBookingId}` : '',

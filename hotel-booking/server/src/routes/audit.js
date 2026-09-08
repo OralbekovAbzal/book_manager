@@ -1,6 +1,8 @@
 const router = require('express').Router()
 const { authenticate, requireRole } = require('../middleware/auth')
 const { prisma } = require('../utils/prisma')
+const { hotelTz } = require('../utils/hotelTz')
+const { auditPeriodRange } = require('../utils/auditPeriod')
 
 router.use(authenticate)
 
@@ -39,53 +41,60 @@ router.get('/log', requireRole('SUPER_ADMIN', 'ADMIN'), async (req, res, next) =
   } catch (err) { next(err) }
 })
 
-// GET /api/audit?period=today|week|month|shift&shiftId=123
+/**
+ * GET /api/audit?period=today|week|month|shift&shiftId=123 — сколько броней ЗАВЕДЕНО.
+ *
+ * Денег здесь больше нет (аудит D6-003). Суммы `Booking.totalAmount/paidAmount`
+ * выводились под подписями «Выручка / Оплачено / Задолженность», но считались
+ * по броням, СОЗДАННЫМ в период, — независимо от дат проживания, включая брони на
+ * следующий год. Ни с кассой смены, ни с отчётом «Выручка» это не сходилось и
+ * сойтись не могло. Деньги теперь спрашивают у отчётов, где у них есть период
+ * проживания и датасет начислений; здесь остаётся то, ради чего окно и открывают, —
+ * счётчики заведённых броней.
+ *
+ * Периоды — по МЕСТНЫМ суткам отеля, а не по календарю процесса: сервер живёт
+ * в UTC, и «Сегодня» с полуночи до пяти утра по Алматы показывало вчерашний день.
+ */
 router.get('/', async (req, res, next) => {
   try {
     const { period, shiftId } = req.query
-    const now = new Date()
-
-    let dateFrom
-    if (period === 'today') {
-      dateFrom = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-    } else if (period === 'week') {
-      dateFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
-    } else if (period === 'month') {
-      dateFrom = new Date(now.getFullYear(), now.getMonth(), 1)
-    }
+    const tz = hotelTz()
+    const { from } = auditPeriodRange(period, new Date(), tz)
 
     const where = {
       status: { not: 'CANCELLED' },
     }
 
-    if (shiftId) {
-      where.shiftId = parseInt(shiftId)
-    } else if (dateFrom) {
-      where.createdAt = { gte: dateFrom }
+    let byShift = false
+    if (shiftId !== undefined && shiftId !== '') {
+      const id = Number(shiftId)
+      if (!Number.isInteger(id) || id < 0) return res.status(400).json({ error: 'shiftId: целое число' })
+      where.shiftId = id
+      byShift = true
+    } else if (from) {
+      where.createdAt = { gte: from }
     }
 
     const [bookings, counts] = await Promise.all([
       prisma.booking.aggregate({
         where,
-        _sum: { totalAmount: true, prepaidAmount: true, paidAmount: true },
         _count: { id: true },
       }),
       prisma.booking.groupBy({
         by: ['status'],
         where,
         _count: { id: true },
-        _sum: { totalAmount: true },
       }),
     ])
 
     res.json({
       data: {
-        totalAmount: bookings._sum.totalAmount || 0,
-        totalPrepaid: bookings._sum.prepaidAmount || 0,
-        totalPaid: bookings._sum.paidAmount || 0,
-        totalDebt: (bookings._sum.totalAmount || 0) - (bookings._sum.paidAmount || 0),
         bookingCount: bookings._count.id,
         byStatus: counts,
+        // Границу отдаём явно: экран обязан иметь возможность подписать, за какой
+        // именно отрезок показаны числа. `to` всегда «сейчас», поэтому null.
+        // По смене период не применялся — и подписывать цифры смены месяцем нельзя.
+        period: { from: !byShift && from ? from.toISOString() : null, to: null, tz },
       }
     })
   } catch (err) { next(err) }

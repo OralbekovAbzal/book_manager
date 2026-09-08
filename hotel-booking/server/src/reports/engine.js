@@ -156,7 +156,18 @@ function buildFilters(definition, dataset, params) {
     if (f.when && f.when.param !== undefined && !same(params[f.when.param], f.when.eq)) continue
 
     if (f.expr) {
-      active.push({ ast: parse(f.expr), expr: f.expr, negate: !!f.negate, paramGet })
+      // Формула фильтра приходит из определения (в том числе импортированного):
+      // её ошибка — ошибка определения (400), а не сервера.
+      let ast
+      try {
+        ast = parse(f.expr)
+      } catch (err) {
+        if (err instanceof ExprError || err instanceof RangeError) {
+          throw createError(`Отчёт «${definition.id}»: формула фильтра: ${err.message}`, 400)
+        }
+        throw err
+      }
+      active.push({ ast, expr: f.expr, negate: !!f.negate, paramGet })
       continue
     }
 
@@ -260,7 +271,18 @@ function computeAgg(rows, agg) {
  * у исходного поля.
  */
 function deriveType(dataset, field, agg, expr) {
-  if (expr) return inferType(expr)
+  // `inferType` рекурсивен по дереву: на формуле из старой базы он мог бросить
+  // RangeError мимо всех try — и колонка отвечала 500 вместо «формула сложная».
+  if (expr) {
+    try {
+      return inferType(expr)
+    } catch (err) {
+      if (err instanceof ExprError || err instanceof RangeError) {
+        throw createError(`Формула колонки: ${err.message}`, 400)
+      }
+      throw err
+    }
+  }
   if (agg) {
     if (agg.fn === 'count' || agg.fn === 'countDistinct') return 'int'
     if (agg.fn === 'ratio') return agg.scale === 100 ? 'percent' : 'number'
@@ -379,6 +401,9 @@ function evalColumn(col, ctx) {
     return roundTo(evaluate(col.ast, ctx), col.decimals)
   } catch (err) {
     if (err instanceof ExprError) throw createError(`Формула колонки «${col.title}»: ${err.message}`, 400)
+    // Переполнение стека на глубокой формуле — тоже ошибка определения:
+    // 500 «Внутренняя ошибка сервера» здесь ничего не объясняет пользователю.
+    if (err instanceof RangeError) throw createError(`Формула колонки «${col.title}»: формула слишком сложная`, 400)
     throw err
   }
 }

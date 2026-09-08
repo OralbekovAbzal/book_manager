@@ -35,16 +35,26 @@ function matchField(key, value, cond) {
   if (cond === null) return value === null || value === undefined
   if (!isPlainCondition(cond)) return eq(value, cond)
 
+  // `mode: 'insensitive'` — не операция, а модификатор соседних: так Prisma просит
+  // сравнение без учёта регистра. Для нас это не мелочь: поиск гостя «асель» по
+  // «Асель» — тот самый случай, ради которого чинили коллацию базы (D8-001).
+  const insensitive = cond.mode === 'insensitive'
+  const fold = (v) => (insensitive ? String(v ?? '').toLowerCase() : v)
+
   for (const [op, operand] of Object.entries(cond)) {
     switch (op) {
-      case 'equals': if (!eq(value, operand)) return false; break
+      case 'mode': break
+      case 'equals': if (!eq(fold(value), fold(operand))) return false; break
       case 'lt': if (!(cmp(value, operand) < 0)) return false; break
       case 'lte': if (!(cmp(value, operand) <= 0)) return false; break
       case 'gt': if (!(cmp(value, operand) > 0)) return false; break
       case 'gte': if (!(cmp(value, operand) >= 0)) return false; break
-      case 'in': if (!operand.some((o) => eq(value, o))) return false; break
-      case 'notIn': if (operand.some((o) => eq(value, o))) return false; break
-      case 'contains': if (!String(value ?? '').includes(String(operand))) return false; break
+      case 'in': if (!operand.some((o) => eq(fold(value), fold(o)))) return false; break
+      case 'notIn': if (operand.some((o) => eq(fold(value), fold(o)))) return false; break
+      case 'startsWith': if (!String(fold(value) ?? '').startsWith(String(fold(operand)))) return false; break
+      case 'contains':
+        if (!String(fold(value) ?? '').includes(String(fold(operand)))) return false
+        break
       case 'not':
         if (isPlainCondition(operand)) { if (matchField(key, value, operand)) return false }
         else if (eq(value, operand)) return false
@@ -56,6 +66,11 @@ function matchField(key, value, cond) {
   return true
 }
 
+/** Ключи, которые Prisma считает операциями над полем, а не именами полей связи. */
+const FIELD_OPS = new Set([
+  'equals', 'lt', 'lte', 'gt', 'gte', 'in', 'notIn', 'contains', 'startsWith', 'not', 'mode',
+])
+
 function matchWhere(rec, where) {
   for (const [key, cond] of Object.entries(where || {})) {
     if (key === 'AND') { if (!cond.every((w) => matchWhere(rec, w))) return false; continue }
@@ -64,7 +79,18 @@ function matchWhere(rec, where) {
     if (!(key in rec)) {
       throw new Error(`fakePrisma: в фикстуре нет поля «${key}», а запрос по нему фильтрует`)
     }
-    if (!matchField(key, rec[key], cond)) return false
+    // Фильтр ПО СВЯЗИ: `{ room: { number: { contains: q } } }`. Отличается от
+    // условия на поле тем, что все ключи — имена полей, а не операции. Нужен
+    // поиску в кассе (гость / телефон / номер комнаты одним запросом): без него
+    // такой where падал, и поиск оставался непокрытым.
+    const value = rec[key]
+    if (isPlainCondition(cond) && !Object.keys(cond).some((k) => FIELD_OPS.has(k))
+        && (value === null || isPlainCondition(value))) {
+      if (value === null) return false           // связи нет — условию не совпасть
+      if (!matchWhere(value, cond)) return false
+      continue
+    }
+    if (!matchField(key, value, cond)) return false
   }
   return true
 }
@@ -144,7 +170,7 @@ function project(rec, args, virtual = null, rows = null, deep = false) {
     for (const [k, on] of Object.entries(args.select)) {
       if (!on) continue
       if (k in rec) { out[k] = deep ? projectRelation(rec[k], on, null, null) : rec[k]; continue }
-      if (virtual && virtual[k]) { out[k] = projectRelation(virtual[k](rec, rows), on, virtual, rows); continue }
+      if (virtual && virtual[k]) { out[k] = projectRelation(virtual[k](rec, rows, on), on, virtual, rows); continue }
       throw new Error(`fakePrisma: select запрашивает поле «${k}», которого нет в фикстуре`)
     }
     return out
@@ -153,7 +179,7 @@ function project(rec, args, virtual = null, rows = null, deep = false) {
     const extra = {}
     for (const [k, on] of Object.entries(args.include)) {
       if (!on || k in rec) continue
-      if (virtual && virtual[k]) { extra[k] = projectRelation(virtual[k](rec, rows), on, virtual, rows); continue }
+      if (virtual && virtual[k]) { extra[k] = projectRelation(virtual[k](rec, rows, on), on, virtual, rows); continue }
       throw new Error(`fakePrisma: include запрашивает связь «${k}», которой нет в фикстуре`)
     }
     return { ...rec, ...extra }
@@ -193,18 +219,31 @@ function aggregateOf(items, args, { nullWhenEmpty = false } = {}) {
   return out
 }
 
-function makeModel(name, rows, calls) {
+function makeModel(name, rows, calls, extraVirtual = null) {
   let seq = rows.reduce((m, r) => Math.max(m, Number(r.id) || 0), 0)
   const select = (args = {}) => applyOrder(rows.filter((r) => matchWhere(r, args.where)), args.orderBy)
   // Вычислители самоссылок этой таблицы (см. VIRTUAL_RELATIONS): им нужны все
   // строки модели, поэтому они берутся здесь, где эти строки под рукой.
-  const virtual = VIRTUAL_RELATIONS[name] || null
+  // `extraVirtual` — то же самое, но от теста: так покрывается `_count` по связи,
+  // которую фикстура одной таблицы физически хранить не может.
+  const own = { ...(VIRTUAL_RELATIONS[name] || {}), ...(extraVirtual || {}) }
+  const virtual = Object.keys(own).length > 0 ? own : null
   const out = (rec, args) => project(rec, args, virtual, rows)
 
   return {
+    /**
+     * `take`/`skip` применяются ПОСЛЕ `where` и `orderBy` — как у Prisma.
+     *
+     * Без них тест не мог отличить «запрос вернул всё» от «запрос упёрся в
+     * потолок»: список долгов режется `take: 300`, и признак «список обрезан»
+     * без настоящего потолка проверить нечем.
+     */
     async findMany(args = {}) {
       calls.push({ model: name, op: 'findMany', args })
-      return select(args).map((r) => out(r, args))
+      let hits = select(args)
+      if (args.skip) hits = hits.slice(args.skip)
+      if (args.take !== undefined && args.take !== null) hits = hits.slice(0, args.take)
+      return hits.map((r) => out(r, args))
     },
     async findFirst(args = {}) {
       calls.push({ model: name, op: 'findFirst', args })
@@ -312,13 +351,18 @@ function makeModel(name, rows, calls) {
 
 /**
  * @param {Record<string, object[]>} data фикстуры по моделям, напр. { booking: [...] }
+ * @param {{virtual?: Record<string, Record<string, Function>>}} [opts]
+ *        virtual — вычислители связей, которых в фикстуре нет: `(rec, rows, on)`,
+ *        где `on` — то, что запросил `select`/`include`. Так покрывается
+ *        `_count: { select: { … } }`: счётчик живёт в ДРУГОЙ таблице, и класть его
+ *        в строку фикстуры значило бы завести вторую правду о том же числе.
  * @returns {{ prisma: object, calls: object[] }}
  */
-export function createFakePrisma(data = {}) {
+export function createFakePrisma(data = {}, { virtual = {} } = {}) {
   const calls = []
   const prisma = {}
   for (const [model, rows] of Object.entries(data)) {
-    prisma[model] = makeModel(model, rows.map((r) => ({ ...r })), calls)
+    prisma[model] = makeModel(model, rows.map((r) => ({ ...r })), calls, virtual[model])
   }
   // Транзакции здесь без отката: проверяем ПОРЯДОК (проверка доступности стоит
   // до записи и получает тот же клиент), а не поведение Postgres при сбое.

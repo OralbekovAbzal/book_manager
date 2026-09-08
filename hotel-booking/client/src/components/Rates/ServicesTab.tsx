@@ -5,6 +5,7 @@ import {
 } from '../../api/services'
 import type { MealPlan, Service, ServiceKind, ServiceUnit } from '../../types'
 import { inputStyle, labelStyle, errorStyle, primaryBtn, secondaryBtn, formTitle } from '../Settings/sections/sectionUi'
+import { confirmDialog, confirmDanger } from '../ui/ConfirmDialog'
 
 /**
  * Питание и дополнительные услуги.
@@ -39,6 +40,13 @@ const UNIT_HINTS: Record<ServiceUnit, string> = {
  * Обед и ужин приходят из засева именно нулевыми — цены у каждого отеля свои.
  */
 const hasPrice = (s: Service) => s.price > 0
+
+/** «1 брони» / «2 бронях» — число в вопросе об удалении стоит в предложном падеже. */
+const bookingWord = (n: number) => {
+  const t = n % 100
+  if (t >= 11 && t <= 14) return 'бронях'
+  return n % 10 === 1 ? 'брони' : 'бронях'
+}
 /** Ни взрослой цены, ни детской — в брони такая услуга не добавит ничего. */
 const isUnpriced = (s: Service) => !hasPrice(s) && !(s.childPrice != null && s.childPrice > 0)
 
@@ -123,11 +131,58 @@ export const ServicesTab: React.FC<Props> = ({ kind, onToast }) => {
     }
   }
 
-  const remove = async (s: Service) => {
-    if (!confirm(`Удалить «${s.name}»?`)) return
-    try { await deleteService(s.id); load(); onToast('Удалено') }
-    catch { onToast('Не удалось удалить') }
+  /**
+   * Удаление услуги КАСКАДНОЕ: вместе с ней исчезают её строки во всех бронях,
+   * прошлых и будущих (`BookingService … onDelete: Cascade`, D6-005). Прежний
+   * вопрос «Удалить «Завтрак»?» об этом молчал, а рядом всё это время стоит
+   * безопасный выключатель «Доступна для добавления в бронь». Поэтому вопрос
+   * называет число броней и предлагает выключение третьей кнопкой.
+   */
+  const askAndRemove = async (s: Service, usedInBookings: number) => {
+    if (usedInBookings > 0) {
+      const answer = await confirmDialog({
+        title: `Услуга есть в ${usedInBookings} ${bookingWord(usedInBookings)}`,
+        text: [
+          `Строки этой услуги исчезнут из всех ${usedInBookings} ${bookingWord(usedInBookings)} вместе с историей.`,
+          'Надёжнее выключить «Доступна для добавления» — в новые брони услуга попадать перестанет, а старые сохранятся.',
+        ],
+        confirmLabel: 'Удалить всё равно',
+        extraLabel: 'Выключить',
+        danger: true,
+      })
+      if (answer === 'cancel') return
+      if (answer === 'extra') {
+        try { await updateService(s.id, { isActive: false }); load(); onToast('Услуга выключена') }
+        catch { onToast('Не удалось выключить') }
+        return
+      }
+      return doRemove(s, true)
+    }
+
+    const ok = await confirmDanger({
+      title: `Удалить «${s.name}»?`,
+      text: 'Услуга ни в одной брони не используется — удаление ничего не заденет.',
+      confirmLabel: 'Удалить',
+    })
+    if (!ok) return
+    return doRemove(s, false)
   }
+
+  const doRemove = async (s: Service, force: boolean) => {
+    try { await deleteService(s.id, { force }); load(); onToast('Удалено') }
+    catch (e: unknown) {
+      const res = (e as { response?: { status?: number; data?: { code?: string; usedInBookings?: number } } })?.response
+      // Гонка: услугу успели добавить в бронь между списком и удалением.
+      // Задаём тот же вопрос заново — уже с настоящим числом от сервера.
+      if (res?.status === 409 && res.data?.code === 'SERVICE_IN_USE') {
+        await askAndRemove(s, res.data.usedInBookings ?? 1)
+        return
+      }
+      onToast('Не удалось удалить')
+    }
+  }
+
+  const remove = (s: Service) => { void askAndRemove(s, s.usedInBookings ?? 0) }
 
   // ─── Пресеты пансиона ───────────────────────────────────────────────────────
   const startPlan = (p?: MealPlan) => {
@@ -147,7 +202,15 @@ export const ServicesTab: React.FC<Props> = ({ kind, onToast }) => {
   }
 
   const removePlan = async (p: MealPlan) => {
-    if (!confirm(`Удалить пресет «${p.name}»?`)) return
+    // Пресет — только кнопка-ярлык: сами приёмы пищи и брони он не трогает.
+    // Спрашиваем всё равно, но своим диалогом, а не нативным `confirm`: в
+    // Electron тот выглядит чужим системным окном.
+    const ok = await confirmDanger({
+      title: `Удалить пресет «${p.name}»?`,
+      text: 'Исчезнет только кнопка-набор. Приёмы пищи и брони останутся как есть.',
+      confirmLabel: 'Удалить',
+    })
+    if (!ok) return
     try { await deleteMealPlan(p.id); load(); onToast('Пресет удалён') }
     catch { onToast('Не удалось удалить') }
   }
@@ -212,6 +275,10 @@ export const ServicesTab: React.FC<Props> = ({ kind, onToast }) => {
                   </div>
                   <div style={{ fontSize: '0.79rem', color: 'var(--text-faint)', marginTop: 2 }}>
                     {UNIT_LABELS[s.unit]}
+                    {/* Число броней видно ДО нажатия «Удалить»: половина решений
+                        («это лишнее, уберу») принимается именно здесь. */}
+                    {s.usedInBookings != null && s.usedInBookings > 0 &&
+                      ` · в ${s.usedInBookings} ${bookingWord(s.usedInBookings)}`}
                   </div>
                 </div>
 

@@ -10,6 +10,7 @@ const {
   dropAutoChargesOnCancel, trimChargesToCheckOut, pinLegacyTotal,
   loadChainSegments, loadSegmentRates, rebuildChainCharges, segmentsToPrice,
 } = require('../utils/charges')
+const { isStale } = require('../utils/bookingVersion')
 
 /**
  * Услуги из тела запроса должны существовать в справочнике.
@@ -490,6 +491,19 @@ async function update(req, res, next) {
 
     const existing = await prisma.booking.findUnique({ where: { id } })
     if (!existing) return next(createError('Бронь не найдена', 404))
+
+    // Замок версии — ДО любой проверки и любой записи, вне транзакции: если бронь
+    // изменилась на другом рабочем месте, спорить об остальном уже незачем.
+    // Отдаём текущую бронь целиком (как GET /bookings/:id), чтобы форма показала,
+    // что именно изменилось, а не отправляла пользователя перечитывать вручную.
+    if (isStale(req.body.expectedUpdatedAt, existing.updatedAt)) {
+      const current = await prisma.booking.findUnique({ where: { id }, select: BOOKING_DETAIL_SELECT })
+      return res.status(409).json({
+        error: 'Бронь изменена на другом рабочем месте',
+        code: 'BOOKING_STALE',
+        booking: current,
+      })
+    }
 
     if (['CHECKED_OUT', 'CANCELLED'].includes(existing.status)) {
       return next(createError('Нельзя редактировать закрытую бронь', 400))
@@ -1715,4 +1729,7 @@ module.exports = {
   cancelGuard, checkOutGuard, applyCancel, applyCheckOut, bookingDayUTC,
   listCharges, addCharge, updateCharge, removeCharge, rebuildCharges,
   BOOKING_SELECT,
+  // Замок версии (D5-004): само правило — чистая функция в utils/bookingVersion.js,
+  // здесь реэкспорт, чтобы его можно было проверять рядом с самим update.
+  isStale,
 }

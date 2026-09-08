@@ -25,6 +25,18 @@ export function onMaintenanceBlocked(fn: (block: MaintenanceBlock) => void): voi
   maintenanceListener = fn
 }
 
+/**
+ * Обработчик 401 — по той же причине регистрируется, а не импортируется:
+ * `useAuthStore` импортирует этот модуль, обратный импорт замкнул бы цикл.
+ * Регистрируется из `store/useAuthStore.ts`, который грузится вместе с `App`
+ * задолго до первого запроса.
+ */
+let unauthorizedListener: (() => void) | null = null
+
+export function onUnauthorized(fn: () => void): void {
+  unauthorizedListener = fn
+}
+
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) config.headers.Authorization = `Bearer ${token}`
@@ -58,8 +70,16 @@ api.interceptors.response.use(
     const url: string = err.config?.url ?? ''
     const isAuthFlow = url.includes('/auth/login') || url.includes('/auth/logout') || url.includes('/setup/')
     if (status === 401 && !isAuthFlow) {
-      localStorage.removeItem('token')
-      window.location.reload()
+      // Было: стереть токен и перезагрузить страницу. Заполненная форма брони
+      // (имя, документ, услуги) исчезала молча — гость стоит у стойки, вводить
+      // всё заново (аудит D7-002). Теперь приложение остаётся на месте, а поверх
+      // него поднимается оверлей повторного входа.
+      //
+      // Токен из localStorage НЕ стираем намеренно: пока пользователь набирает
+      // пароль, случайный F5 не должен уронить сессию раньше сервера — сервер
+      // и так решает, действует токен или нет. Стирает его `logout`
+      // (кнопка «Выйти из программы» в оверлее) и `restore` при 401 на старте.
+      unauthorizedListener?.()
     }
     return Promise.reject(err)
   }

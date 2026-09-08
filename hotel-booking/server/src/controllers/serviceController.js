@@ -26,16 +26,29 @@ function parsePrice(v, field) {
 
 // ─── Услуги ───────────────────────────────────────────────────────────────────
 
+/** Услуга «используется» = к ней привязаны строки BookingService (`Service.bookings`). */
+const SERVICE_COUNT = { select: { bookings: true } }
+
+/** Наружу отдаём число, а не форму Prisma: `_count.bookings` — деталь запроса. */
+function withUsage(service) {
+  const { _count, ...rest } = service
+  return { ...rest, usedInBookings: _count?.bookings ?? 0 }
+}
+
 // GET /api/services?kind=meal
 async function list(req, res, next) {
   try {
     const where = {}
     if (req.query.kind && KINDS.includes(req.query.kind)) where.kind = req.query.kind
-    const data = await prisma.service.findMany({
+    const rows = await prisma.service.findMany({
       where,
       orderBy: [{ kind: 'asc' }, { order: 'asc' }, { id: 'asc' }],
+      // Сколько броней держит эту услугу — чтобы экран мог сказать, что именно
+      // исчезнет при удалении (BookingService каскадный, аудит D6-005), а не
+      // спрашивать «Удалить „Обед“?» так, будто это строка справочника.
+      include: { _count: SERVICE_COUNT },
     })
-    res.json({ data })
+    res.json({ data: rows.map(withUsage) })
   } catch (err) { next(err) }
 }
 
@@ -72,7 +85,9 @@ async function create(req, res, next) {
     const built = await buildServiceData(req.body, { isCreate: true })
     if (built.error) return next(createError(built.error, 400))
     const service = await prisma.service.create({ data: built.data })
-    res.status(201).json({ data: service })
+    // Экран кладёт ответ прямо в список рядом со строками из list — счётчик
+    // обязан быть в той же форме, иначе строка после правки его теряет.
+    res.status(201).json({ data: { ...service, usedInBookings: 0 } })
   } catch (err) {
     if (err.code === 'P2002') return next(createError('Услуга с таким кодом уже существует', 400))
     next(err)
@@ -89,17 +104,41 @@ async function update(req, res, next) {
     const built = await buildServiceData(req.body, { isCreate: false })
     if (built.error) return next(createError(built.error, 400))
 
-    const service = await prisma.service.update({ where: { id }, data: built.data })
-    res.json({ data: service })
+    const service = await prisma.service.update({
+      where: { id }, data: built.data, include: { _count: SERVICE_COUNT },
+    })
+    res.json({ data: withUsage(service) })
   } catch (err) { next(err) }
 }
 
-// DELETE /api/services/:id
+/** `force=1|true` в query — «да, знаю про брони, удаляй». */
+function isForced(raw) {
+  if (raw === undefined || raw === null) return false
+  return ['1', 'true', 'yes', 'on', ''].includes(String(raw).toLowerCase())
+}
+
+// DELETE /api/services/:id?force=1
 async function remove(req, res, next) {
   try {
     const id = parseInt(req.params.id)
-    const existing = await prisma.service.findUnique({ where: { id } })
+    const existing = await prisma.service.findUnique({
+      where: { id },
+      include: { _count: SERVICE_COUNT },
+    })
     if (!existing) return next(createError('Услуга не найдена', 404))
+
+    // Удаление услуги каскадом уносит `BookingService` ВСЕХ броней — историю
+    // «завтрак у сорока гостей» (аудит D6-005). Первый вызов на используемой
+    // услуге отказывает и называет число: почти всегда администратор хотел не
+    // этого, а выключателя «Доступна для добавления в бронь» (isActive).
+    const usedInBookings = existing._count?.bookings ?? 0
+    if (!isForced(req.query.force) && usedInBookings > 0) {
+      return res.status(409).json({
+        error: 'Услуга используется в бронях',
+        code: 'SERVICE_IN_USE',
+        usedInBookings,
+      })
+    }
 
     // Убираем код из пресетов питания, иначе пресет ссылался бы в пустоту.
     const plans = await prisma.mealPlan.findMany()

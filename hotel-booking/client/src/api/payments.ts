@@ -126,11 +126,26 @@ export async function fetchBookingPayments(
   return data.data
 }
 
-/** «Кто сколько должен» — рабочий список для приёма оплаты. */
+/**
+ * Окно списка долгов, каким его применил сервер.
+ * `days: null` — окна нет, показаны все долги; `truncated` — упёрлись в предел
+ * выдачи (300 строк), и в списке видно НЕ всё.
+ * Поле необязательное: старый сервер его не отдаёт (D6-002).
+ */
+export interface DebtsWindow {
+  days: number | null
+  truncated: boolean
+}
+
+/**
+ * «Кто сколько должен» — рабочий список для приёма оплаты.
+ * `days = 0` — снять окно и показать все долги (турфирма платит за прошлый
+ * месяц, а по умолчанию сервер отдаёт выезды не старше 30 дней).
+ */
 export async function fetchDebts(
   q?: string,
   days?: number,
-): Promise<{ businessDate: string; bookings: DebtRow[] }> {
+): Promise<{ businessDate: string; bookings: DebtRow[]; window?: DebtsWindow }> {
   const params: Record<string, string> = {}
   if (q) params.q = q
   if (days != null) params.days = String(days)

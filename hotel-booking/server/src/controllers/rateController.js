@@ -10,7 +10,10 @@ const PRICE_FIELDS = ['roomPrice', 'adultPrice', 'childPrice', 'extraBedPrice']
 function toUTCDate(s) {
   const [y, m, d] = String(s).split('-').map(Number)
   if (!y || !m || !d) return null
-  return new Date(Date.UTC(y, m - 1, d))
+  const dt = new Date(Date.UTC(y, m - 1, d))
+  // 30 февраля молча становилось 2 марта (находка тестов волны 9).
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null
+  return dt
 }
 
 function parseRange(dateFrom, dateTo) {
@@ -212,26 +215,69 @@ async function clearCells(req, res, next) {
   }
 }
 
+/**
+ * Общий `where` для «очистить период» и для счётчика перед ним.
+ *
+ * Одно построение на два эндпоинта — не ради экономии строк: если счётчик считает
+ * по своему правилу, окно «будет удалено N цен» соврёт ровно в тот момент, когда
+ * на него смотрят (аудит D6-004/D7-011 — удаление календаря цен необратимо,
+ * `RatePrice` в снимки не входит).
+ *
+ * Принимает и тело DELETE (`categoryIds` массивом, `dateFrom`/`dateTo`), и query
+ * GET-счётчика (`categoryIds=1,2`, `from`/`to`).
+ * @returns {{ where: object, range: object }|{ error: string }}
+ */
+function rangeWhere(input = {}) {
+  const raw = input.categoryIds
+  const list = Array.isArray(raw)
+    ? raw
+    : (raw === undefined || raw === null || String(raw).trim() === '' ? [] : String(raw).split(','))
+  if (list.length === 0) return { error: 'Укажите хотя бы одну категорию' }
+
+  const ids = list.map(Number)
+  if (ids.some((n) => !Number.isInteger(n) || n <= 0)) {
+    return { error: 'Некорректный список категорий' }
+  }
+
+  const range = parseRange(input.dateFrom ?? input.from, input.dateTo ?? input.to)
+  if (range.error) return { error: range.error }
+
+  return {
+    where: { categoryId: { in: ids }, date: { gte: range.from, lte: range.to } },
+    range,
+  }
+}
+
 // DELETE /api/rates — очистить цены в диапазоне
 async function clearRange(req, res, next) {
   try {
-    const { categoryIds, dateFrom, dateTo } = req.body
-    if (!Array.isArray(categoryIds) || categoryIds.length === 0) {
-      return next(createError('Укажите хотя бы одну категорию', 400))
-    }
-    const range = parseRange(dateFrom, dateTo)
-    if (range.error) return next(createError(range.error, 400))
+    const built = rangeWhere(req.body)
+    if (built.error) return next(createError(built.error, 400))
 
-    const { count } = await prisma.ratePrice.deleteMany({
-      where: {
-        categoryId: { in: categoryIds.map(Number) },
-        date: { gte: range.from, lte: range.to },
-      },
-    })
+    const { count } = await prisma.ratePrice.deleteMany({ where: built.where })
     res.json({ data: { deleted: count } })
   } catch (err) {
     next(err)
   }
 }
 
-module.exports = { list, applyRange, clearRange, applyCells, clearCells }
+/**
+ * GET /api/rates/count?categoryIds=1,2&from=&to= — сколько цен сотрёт «Очистить период».
+ *
+ * Отдельный запрос, а не «удалить и показать сколько»: подтверждение должно
+ * называть число ДО удаления. Для произвольного выделения ячеек счётчик не нужен —
+ * там клиент видит сам набор.
+ */
+async function countRange(req, res, next) {
+  try {
+    const built = rangeWhere(req.query)
+    if (built.error) return next(createError(built.error, 400))
+
+    const count = await prisma.ratePrice.count({ where: built.where })
+    res.json({ data: { count } })
+  } catch (err) {
+    next(err)
+  }
+}
+
+module.exports = { list, applyRange, clearRange, applyCells, clearCells, countRange, rangeWhere }

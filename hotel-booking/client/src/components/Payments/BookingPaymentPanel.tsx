@@ -1,10 +1,11 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   fetchBookingPayments, createPayment, refundPayment, voidPayment,
   METHOD_LABELS,
   type BookingMoney, type Payment, type PaymentMethod,
 } from '../../api/payments'
 import { useAuthStore } from '../../store/useAuthStore'
+import { useRealtimeStore } from '../../store/useRealtimeStore'
 import { inputStyle, labelStyle, primaryBtn, secondaryBtn, formTitle } from '../Settings/sections/sectionUi'
 import { apiErrorText, card, fmtTime, InlinePrompt, money, Stat, td } from './paymentsUi'
 
@@ -61,6 +62,15 @@ export const BookingPaymentPanel: React.FC<Props> = ({
   const [loading, setLoading] = useState(true)
 
   const [amount, setAmount] = useState('')
+  /**
+   * Трогал ли пользователь поле «Сумма». Пока не трогал — там подставленный
+   * остаток долга, и его можно молча заменить новым. Как только тронул, поле
+   * принадлежит ему: подменять набранное под руками нельзя, поэтому про
+   * изменившийся долг сообщаем подписью рядом.
+   */
+  const [amountDirty, setAmountDirty] = useState(false)
+  /** Долг после чужой операции, когда сумму уже набрали руками; null — молчим. */
+  const [dueChangedTo, setDueChangedTo] = useState<number | null>(null)
   const [method, setMethod] = useState<PaymentMethod>('cash')
   const [comment, setComment] = useState('')
   const [saving, setSaving] = useState(false)
@@ -76,6 +86,7 @@ export const BookingPaymentPanel: React.FC<Props> = ({
     let cancelled = false
     setLoading(true)
     setError(''); setComment(''); setAmount('')
+    setAmountDirty(false); setDueChangedTo(null)
     setJournal([]); setSummary(null)
     setRefunding(null); setVoiding(null)
     fetchBookingPayments(bookingId)
@@ -91,10 +102,52 @@ export const BookingPaymentPanel: React.FC<Props> = ({
     return () => { cancelled = true }
   }, [bookingId])
 
+  // Деньги этой брони изменились на другом рабочем месте: сосед принял оплату,
+  // вернул или отменил запись. Раньше панель показывала свои числа до перевыбора
+  // брони — второй кассир видел «Долг 94 900» и принимал ещё раз (аудит D7-010).
+  //
+  // Родителя (`onChanged`) отсюда НЕ дёргаем: свои списки он перечитывает по
+  // тому же тику сам, и второй запрос за теми же числами был бы холостым.
+  const tick = useRealtimeStore((s) => s.tick)
+  const lastChangedId = useRealtimeStore((s) => s.lastChangedId)
+  // `broadcast` — «устареть могло всё» (связь вернулась, откатили снимок).
+  const broadcast = useRealtimeStore((s) => s.broadcast)
+  const seenTick = useRef(tick)
+  // Свежий флаг «поле трогали» — эффект читает его в момент ответа сервера,
+  // а не в момент подписки.
+  const dirtyRef = useRef(amountDirty)
+  dirtyRef.current = amountDirty
+  useEffect(() => {
+    if (tick === seenTick.current) return
+    seenTick.current = tick
+    if (!broadcast && lastChangedId !== bookingId) return
+    let cancelled = false
+    fetchBookingPayments(bookingId)
+      .then((d) => {
+        if (cancelled) return
+        setJournal(d.payments)
+        setSummary(d.summary)
+        if (dirtyRef.current) {
+          // Набранное не трогаем — только предупреждаем, что долг стал другим.
+          setDueChangedTo(d.summary.due)
+        } else {
+          setAmount(d.summary.due > 0 ? String(d.summary.due) : '')
+          setDueChangedTo(null)
+        }
+      })
+      .catch(() => {
+        // Молчим: панель продолжает показывать прежние числа, а о пропавшем
+        // сервере кричит полоса «Нет связи» — вторая жалоба здесь лишняя.
+      })
+    return () => { cancelled = true }
+  }, [tick, lastChangedId, broadcast, bookingId])
+
   const reload = async () => {
     const d = await fetchBookingPayments(bookingId)
     setJournal(d.payments)
     setSummary(d.summary)
+    // Долг изменил сам пользователь этой панели — предупреждать его не о чем.
+    setDueChangedTo(null)
     onChanged?.(d.summary)
   }
 
@@ -110,6 +163,7 @@ export const BookingPaymentPanel: React.FC<Props> = ({
       setSummary(res.summary)
       setJournal((prev) => [res.payment, ...prev])
       setAmount(''); setComment('')
+      setAmountDirty(false); setDueChangedTo(null)
       onChanged?.(res.summary)
       onFlash(`Принято ${money(value)}`)
     } catch (e) {
@@ -171,11 +225,19 @@ export const BookingPaymentPanel: React.FC<Props> = ({
             <input
               autoFocus={autoFocusAmount}
               value={amount}
-              onChange={(e) => setAmount(e.target.value)}
+              onChange={(e) => { setAmount(e.target.value); setAmountDirty(true) }}
               inputMode="decimal"
               placeholder="0"
               style={inputStyle}
             />
+            {/* Долг уехал, пока сумму набирали руками. Подменить набранное нельзя
+                (кассир смотрит на деньги в руке, а не на экран), но и промолчать
+                нельзя — он примет ту сумму, которой уже нет. */}
+            {dueChangedTo !== null && (
+              <div style={{ marginTop: 5, fontSize: '0.76rem', color: 'var(--s-out)', lineHeight: 1.35 }}>
+                Долг изменился: {money(dueChangedTo)} ₸
+              </div>
+            )}
           </div>
           <div style={{ flex: '1 1 140px' }}>
             <label style={labelStyle}>Способ</label>

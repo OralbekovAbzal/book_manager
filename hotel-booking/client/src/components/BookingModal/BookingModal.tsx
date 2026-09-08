@@ -3,6 +3,8 @@ import { format } from 'date-fns'
 import { useForm, Controller } from 'react-hook-form'
 import { useGridStore } from '../../store/useGridStore'
 import { useSettingsStore, BookingFlagItem } from '../../store/useSettingsStore'
+import { useRealtimeStore } from '../../store/useRealtimeStore'
+import { confirmDialog } from '../ui/ConfirmDialog'
 import { fetchRooms } from '../../api/rooms'
 import { compareRooms } from '../../utils/sortRooms'
 import {
@@ -43,6 +45,8 @@ import {
   syncLinksWithGuests,
 } from './serviceLines'
 import type { ServiceLink, GuestTotals } from './serviceLines'
+import { editableFieldsChanged, docFromBooking, EMPTY_DOC } from './editableFields'
+import type { DocFields } from './editableFields'
 import { DatePicker } from '../ui/DatePicker'
 
 interface FormValues {
@@ -404,19 +408,9 @@ const ActualTimeField: React.FC<{
 // падает при горячей перезагрузке с «is not defined» (временная мёртвая зона).
 // В этом проекте на это наступали дважды.
 
-interface DocFields {
-  guestCitizenship: string
-  guestDocType: string
-  guestDocNumber: string
-  guestDocExpiry: string
-  guestBirthDate: string
-  guestSex: string
-}
-
-const EMPTY_DOC: DocFields = {
-  guestCitizenship: '', guestDocType: '', guestDocNumber: '',
-  guestDocExpiry: '', guestBirthDate: '', guestSex: '',
-}
+// `DocFields`, `EMPTY_DOC` и `docFromBooking` переехали в `editableFields.ts`:
+// сравнение «что изменилось на другом рабочем месте» обязано нормализовать
+// документ ровно так же, как это делает ввод, — иначе две копии правила разойдутся.
 
 const DOC_TYPE_OPTIONS: { value: GuestDocType; label: string }[] = [
   { value: 'passport', label: 'Паспорт' },
@@ -428,20 +422,6 @@ const SEX_OPTIONS: { value: GuestSex; label: string }[] = [
   { value: 'm', label: 'Мужской' },
   { value: 'f', label: 'Женский' },
 ]
-
-/**
- * Бронь → поля формы. Даты РЕЖЕМ строкой: `guestDocExpiry` и `guestBirthDate` —
- * это `@db.Date`, и сервер отдаёт их полным ISO ('1988-11-30T00:00:00.000Z').
- * Разбор в местную зону сдвинул бы день рождения на 29 ноября (грабля проекта).
- */
-const docFromBooking = (b: Partial<Booking>): DocFields => ({
-  guestCitizenship: b.guestCitizenship ?? '',
-  guestDocType: b.guestDocType ?? '',
-  guestDocNumber: b.guestDocNumber ?? '',
-  guestDocExpiry: (b.guestDocExpiry ?? '').slice(0, 10),
-  guestBirthDate: (b.guestBirthDate ?? '').slice(0, 10),
-  guestSex: b.guestSex ?? '',
-})
 
 /** Документ из прошлого визита → поля формы. `from` — служебное, в форму не идёт. */
 const docFromLookup = (d: GuestDocument): DocFields => ({
@@ -909,6 +889,25 @@ export const BookingModal: React.FC = () => {
   // нажал «Продать всё равно») — ждём осознанного подтверждения.
   const [allotmentWarning, setAllotmentWarning] = useState<string | null>(null)
   const pendingValues = useRef<FormValues | null>(null)
+  // ── Замок версии (D5-004) ───────────────────────────────────────────────────
+  // `updatedAt` той брони, которую форма ПОКАЗАЛА пользователю. Уходит в PUT как
+  // `expectedUpdatedAt`: если сосед успел изменить бронь, сервер откажет (409),
+  // а не молча затрёт его питание, метки и счётчики — они уходят целиком.
+  // null — версии нет (новая бронь или полная бронь ещё не загрузилась); тогда
+  // замок не включается, как и на старом сервере.
+  const [versionAt, setVersionAt] = useState<string | null>(null)
+  // Пришло событие про ЭТУ бронь, пока форма открыта. Только предупреждение:
+  // перечитывать самим нельзя — под руками исчез бы недописанный текст.
+  const [changedElsewhere, setChangedElsewhere] = useState(false)
+  // Тик на момент открытия формы: события ДО открытия — это не «только что».
+  const seenTick = useRef(0)
+  // Снимок брони, который форма ПОКАЗАЛА пользователю: с ним сравниваются все
+  // последующие версии (см. `syncQuietly` и `editableFields.ts`). null — полная
+  // бронь ещё не загрузилась, сравнивать не с чем.
+  const baseline = useRef<Booking | null>(null)
+  // Номер тихой сверки: ответ устаревшей не должен затирать свежую, а смена
+  // брони в форме отменяет все начатые.
+  const syncReq = useRef(0)
   // Деньги брони по журналу платежей: «принято» и «долг». Приходят из
   // BookingMoneyBar, который их и загружает. Поле «Оплачено» в форме теперь
   // ТОЛЬКО показывает это число: `Booking.paidAmount` — кэш журнала, и правка
@@ -1035,6 +1034,48 @@ export const BookingModal: React.FC = () => {
     setActualCheckOutAt(isoToLocalInput(b.actualCheckOutAt))
   }
 
+  /** Метки: предустановленные — отдельно, произвольный текст — отдельно. */
+  const applyFlags = (flags: string[] | undefined) => {
+    const all = flags ?? []
+    const knownIds = new Set((roomFund.bookingFlags ?? []).map((f: BookingFlagItem) => f.id))
+    setSelectedFlags(all.filter((f: string) => knownIds.has(f)))
+    setCustomFlag(all.find((f: string) => !knownIds.has(f)) ?? '')
+  }
+
+  /**
+   * Перечитать форму по ПОЛНОЙ брони с сервера — целиком, включая поля, которые
+   * при обычном открытии берутся из объекта сетки.
+   *
+   * Зовётся только из «Перечитать бронь» после 409 «изменена на другом рабочем
+   * месте»: там показанное на экране заведомо неверно, и заполнить надо всё.
+   * Обычное открытие формы этим кодом НЕ пользуется намеренно — при
+   * перетаскивании в объекте сетки уже лежат новые номер и даты, и серверные
+   * значения их бы затёрли.
+   */
+  const fillFromServer = (full: Booking) => {
+    reset({
+      roomId: full.roomId,
+      guestName: full.guestName,
+      guestPhone: full.guestPhone ?? '',
+      checkIn: full.checkIn.slice(0, 10),
+      checkOut: full.checkOut.slice(0, 10),
+      source: full.source ?? 'стойка',
+      notes: full.notes ?? '',
+      immediateCheckIn: false,
+    })
+    setServerBooking(full)
+    applyCalcFields(full)
+    applyFlags(full.flags)
+    setServiceLinks(linksFromBooking(full.services))
+    setDoc(docFromBooking(full))
+    // Версия, которую пользователь теперь видит, — с ней и пойдёт следующее сохранение.
+    setVersionAt(full.updatedAt ?? null)
+    // И новый снимок для сверки: дальше «изменилось» считается от того, что на экране.
+    baseline.current = full
+    setChangedElsewhere(false)
+    seenTick.current = useRealtimeStore.getState().tick
+  }
+
   // Pre-fill form for edit/create mode
   useEffect(() => {
     if (!modal.open) return
@@ -1053,11 +1094,7 @@ export const BookingModal: React.FC = () => {
       })
       // Предварительно — из объекта сетки; ниже перезапишем полной серверной версией
       applyCalcFields(booking)
-      // Флаги: предустановленные отдельно, произвольный текст отдельно
-      const allFlags = booking.flags ?? []
-      const knownIds = new Set((roomFund.bookingFlags ?? []).map((f: BookingFlagItem) => f.id))
-      setSelectedFlags(allFlags.filter((f: string) => knownIds.has(f)))
-      setCustomFlag(allFlags.find((f: string) => !knownIds.has(f)) ?? '')
+      applyFlags(booking.flags)
 
       // Гостей и деньги ВСЕГДА берём с сервера: объект из сетки может быть частичным,
       // и раньше `?? 0` обнулял их при сохранении. Пока грузится — «Сохранить» заблокирована.
@@ -1074,6 +1111,11 @@ export const BookingModal: React.FC = () => {
           if (cancelled) return
           setServerBooking(full)
           applyCalcFields(full)
+          // Версия брони фиксируется тем же ответом, из которого форма взяла
+          // данные: сохранение потом скажет серверу «я правил вот это».
+          setVersionAt(full.updatedAt ?? null)
+          // Тот же ответ — снимок для тихой сверки: всё, что форма показала.
+          baseline.current = full
           // Открыто продолжение — подтягиваем голову ради подписи «номера 12 → 15».
           // Ошибку глотаем: плашка без списка номеров хуже, чем красная ошибка
           // на брони, с которой всё в порядке.
@@ -1119,6 +1161,14 @@ export const BookingModal: React.FC = () => {
     }
     setConflict(null)
     setApiError('')
+    // Версия — про КОНКРЕТНУЮ бронь: с чужой формы она отправила бы сервер
+    // сравнивать не то. Новая появится вместе с ответом GET /bookings/:id.
+    setVersionAt(null)
+    setChangedElsewhere(false)
+    seenTick.current = useRealtimeStore.getState().tick
+    // Снимок — про КОНКРЕТНУЮ бронь; начатые сверки предыдущей отменяем номером.
+    baseline.current = null
+    syncReq.current += 1
     setPickerBlock(null)
     setCheckBlock(null)
     // Диалог «Ранний выезд» не должен переживать закрытие формы и всплывать на другой брони
@@ -1138,6 +1188,96 @@ export const BookingModal: React.FC = () => {
     // Закрыли модалку (или открыли другую бронь) до ответа сервера — ответ игнорируем
     return () => { cancelled = true }
   }, [modal.open, modal.mode, booking?.id])
+
+  // ─── «Изменена на другом рабочем месте» ────────────────────────────────────
+  /**
+   * Тихая сверка: бронь изменилась — но изменилось ли то, что правит форма?
+   *
+   * Перечитываем `GET /bookings/:id` и сравниваем со снимком, который форма
+   * показала (`baseline`). Сравниваются только поля формы — список и причина
+   * в `editableFields.ts`.
+   *  - ничего «своего» не изменилось (приняли оплату, поправили строку
+   *    начислений, сосед провёл платёж) → молча берём новую версию, и
+   *    сохранение проходит. Раньше здесь вылезал 409 на собственную оплату;
+   *  - изменилось → жёлтая полоса, а `versionAt` НЕ трогаем: PUT обязан
+   *    упереться в 409, пока человек не перечитает форму.
+   *
+   * Саму форму не переписываем никогда: подставить чужую версию под руки тому,
+   * кто набирает заметку, — та же тихая потеря правок, от которой защищаемся.
+   */
+  const syncQuietly = async () => {
+    if (!isEdit || !booking) return
+    const snapshot = baseline.current
+    // Полная бронь ещё не загрузилась — сравнивать не с чем, а её собственный
+    // запрос и так принесёт свежую версию.
+    if (!snapshot) return
+    const my = ++syncReq.current
+    let full: Booking
+    try {
+      full = await fetchBooking(booking.id)
+    } catch {
+      // Молчим: о пропавшем сервере кричит полоса «Нет связи», а замок версии
+      // всё равно не даст затереть чужую правку вслепую.
+      return
+    }
+    // Пока ходили — форму закрыли, открыли другую бронь или пришла сверка свежее.
+    if (my !== syncReq.current) return
+    if (editableFieldsChanged(snapshot, full)) {
+      setChangedElsewhere(true)
+      return
+    }
+    baseline.current = full
+    setServerBooking(full)
+    if (full.updatedAt) setVersionAt(full.updatedAt)
+  }
+
+  // Сокет говорит только «событие про бронь N» — что именно изменилось, знает
+  // сверка выше. `broadcast` (связь вернулась, откатили снимок) — тоже повод
+  // перепроверить: за время обрыва события не доигрываются.
+  const realtimeTick = useRealtimeStore((s) => s.tick)
+  const realtimeLastId = useRealtimeStore((s) => s.lastChangedId)
+  const realtimeBroadcast = useRealtimeStore((s) => s.broadcast)
+  useEffect(() => {
+    if (!modal.open || !isEdit || !booking) return
+    // События, которые были ДО открытия формы, — не про неё.
+    if (realtimeTick <= seenTick.current) return
+    seenTick.current = realtimeTick
+    if (!realtimeBroadcast && realtimeLastId !== booking.id) return
+    void syncQuietly()
+  }, [realtimeTick, realtimeLastId, realtimeBroadcast, modal.open, isEdit, booking?.id])
+
+  /**
+   * Перечитать бронь с сервера, потеряв незаписанные правки. Спрашиваем всегда:
+   * в форме может лежать полчаса работы, и «обновить» без вопроса — та же тихая
+   * потеря, от которой мы и защищаемся.
+   *
+   * `fresh` — бронь из ответа 409: сервер уже прислал текущую версию, второй
+   * запрос за тем же был бы лишним (и мог бы принести третью).
+   */
+  const rereadBooking = async (fresh?: Booking | null) => {
+    if (!booking) return
+    const answer = await confirmDialog({
+      title: 'Бронь изменена на другом рабочем месте',
+      text: [
+        'Перечитать бронь с сервера? Всё, что вы ввели и не сохранили, будет потеряно.',
+        'Можно и продолжить редактирование, но сохранить не выйдет, пока форма не перечитана.',
+      ],
+      confirmLabel: 'Перечитать бронь',
+      cancelLabel: 'Продолжить редактирование',
+      danger: true,
+    })
+    if (answer !== 'confirm') {
+      setApiError('Бронь не сохранена: её изменили на другом рабочем месте. Пока форму не перечитать, сохранение будет отклоняться.')
+      return
+    }
+    setApiError('')
+    try {
+      const full = fresh ?? await fetchBooking(booking.id)
+      fillFromServer(full)
+    } catch (e) {
+      setApiError(formatApiError(e, 'Не удалось перечитать бронь'))
+    }
+  }
 
   const guestTotals = useMemo<GuestTotals>(
     () => ({ adults, children, extraBeds }),
@@ -1563,7 +1703,13 @@ export const BookingModal: React.FC = () => {
       }
 
       if (isEdit && booking) {
-        await updateBooking(booking.id, payload)
+        // Замок версии — только у правки и только когда версия известна: при
+        // создании сравнивать не с чем, а без загруженной брони замок отказал бы
+        // на ровном месте (D5-004).
+        await updateBooking(booking.id, {
+          ...payload,
+          ...(versionAt ? { expectedUpdatedAt: versionAt } : {}),
+        })
       } else {
         await createBooking(payload)
       }
@@ -1571,7 +1717,18 @@ export const BookingModal: React.FC = () => {
       closeModal()
       await Promise.all([fetchGrid(), fetchToday()])
     } catch (err: unknown) {
-      const res = (err as { response?: { status?: number; data?: { error?: string; code?: string } } })?.response
+      const res = (err as { response?: { status?: number; data?: { error?: string; code?: string; booking?: Booking } } })?.response
+      // Бронь изменили, пока форма была открыта. Сохранение НЕ прошло — сервер
+      // сберёг чужую правку. Дальше решает человек: перечитать (потеряв своё)
+      // или продолжить и переписать вручную.
+      if (res?.status === 409 && res?.data?.code === 'BOOKING_STALE') {
+        // Кнопку возвращаем в рабочее состояние ДО вопроса: пока открыт диалог,
+        // «Сохранение…» на ней означало бы, что запрос ещё идёт.
+        setSubmitting(false)
+        setChangedElsewhere(true)
+        await rereadBooking(res.data.booking ?? null)
+        return
+      }
       // Номер выделен партнёру. Это не запрет: отель вправе его продать, но осознанно —
       // поэтому спрашиваем подтверждение, а не упираемся в красную ошибку.
       if (res?.status === 409 && res?.data?.code === 'ALLOTMENT_CONFLICT') {
@@ -1836,6 +1993,32 @@ export const BookingModal: React.FC = () => {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6 6 18M6 6l12 12" /></svg>
             </button>
           </div>
+
+          {/* ── Бронь изменили на соседнем рабочем месте ──
+              Только сигнал, без автоперечитки: подставить чужую версию под руки
+              человеку, который набирает заметку, — та же тихая потеря правок,
+              от которой мы и защищаемся (D5-004). */}
+          {changedElsewhere && (
+            <div style={{
+              padding: '10px 28px',
+              borderBottom: '1px solid var(--border-subtle)',
+              background: 'var(--surface-2)',
+              borderLeft: '3px solid var(--s-out)',
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              flexShrink: 0,
+              fontSize: '0.88rem', color: 'var(--text-muted)',
+            }}>
+              <span aria-hidden style={{ fontSize: '1rem' }}>⚠</span>
+              <span style={{ minWidth: 0 }}>Изменена на другом рабочем месте только что</span>
+              <button
+                type="button"
+                onClick={() => { void rereadBooking() }}
+                style={{ ...linkBtnStyle, marginLeft: 'auto' }}
+              >
+                Перечитать бронь
+              </button>
+            </div>
+          )}
 
           {/* ── Счёт цепочки ── у второй части переезда деньги лежат на первой:
               без этой плашки стойка видит форму с чужими (по её мнению) суммами
@@ -2395,8 +2578,18 @@ export const BookingModal: React.FC = () => {
                   // они лежат на голове цепочки (data-and-money.md).
                   bookingId={accountId}
                   readOnly={isClosed}
-                  onChanged={(b) => {
-                    if (b) setServerBooking(b)
+                  onChanged={() => {
+                    // Правка строк начислений — это НАША правка брони: сервер
+                    // пересобрал итог, и `updatedAt` уже другой. Не подхватив
+                    // его, форма получила бы 409 «изменена на другом рабочем
+                    // месте» на собственное же действие (D5-004).
+                    //
+                    // Бронь из ответа панели здесь НЕ используем намеренно: у
+                    // продолжения переезда строки лежат на голове счёта, и
+                    // панель отвечает бронью ГОЛОВЫ — её `updatedAt` замку
+                    // версии этой формы не подходит вовсе. Сверка сама сходит
+                    // за той бронью, которая открыта.
+                    void syncQuietly()
                     // Ручная строка изменилась — предпросмотр внизу обязан её
                     // учесть, иначе на экране снова окажутся два разных итога.
                     setChargesVersion(v => v + 1)
@@ -2421,6 +2614,10 @@ export const BookingModal: React.FC = () => {
                   // и так грузит она сама, второй такой же запрос был бы гонкой
                   // (из-за неё форма и отправляла устаревшее «Оплачено» — D5-011).
                   onSummary={setMoneySummary}
+                  // Приём оплаты и возврат меняют `updatedAt` самой брони —
+                  // без этой сверки следующее «Сохранить» упиралось бы в 409
+                  // из-за нашей же оплаты, принятой минуту назад.
+                  onBookingChanged={() => { void syncQuietly() }}
                   bookingStatus={(serverBooking ?? booking).status}
                 />
               )}

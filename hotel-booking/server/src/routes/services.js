@@ -1,6 +1,8 @@
 const router = require('express').Router()
+const { query } = require('express-validator')
 const ctrl = require('../controllers/serviceController')
 const { authenticate, requireRole } = require('../middleware/auth')
+const { validate } = require('../middleware/validate')
 
 router.use(authenticate)
 
@@ -17,6 +19,8 @@ router.post('/defaults', canEdit, ctrl.createDefaults)
 router.get('/', ctrl.list)
 router.post('/', canEdit, ctrl.create)
 router.put('/:id', canEdit, ctrl.update)
-router.delete('/:id', canEdit, ctrl.remove)
+// `force` — подтверждение «удалять вместе со строками в бронях» (D6-005).
+// Без него удаление используемой услуги отвечает 409 SERVICE_IN_USE.
+router.delete('/:id', canEdit, query('force').optional(), validate, ctrl.remove)
 
 module.exports = router

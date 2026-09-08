@@ -626,6 +626,9 @@ function spawnServer(cfg) {
       PG_DATA_DIR: cfg.dataDir || defaultPaths().dataDir,
       // Ночная копия в 03:00 по местному времени хоста, а не по UTC
       BACKUP_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
+      // Та же зона — для календарных дней отчётов («дата создания», «дата приёма»):
+      // сервер живёт в UTC, и без неё ночные операции уезжали бы на вчера.
+      HOTEL_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
       // Ноутбук ночью выключают: при старте догоняем пропущенную копию,
       // а в течение дня снимаем каждые 4 часа работы.
       BACKUP_MAX_AGE_HOURS: '20',

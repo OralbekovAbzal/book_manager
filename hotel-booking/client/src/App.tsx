@@ -26,6 +26,8 @@ import { useLicenseStore } from './store/useLicenseStore'
 import { useBackupStatusStore } from './store/useBackupStatusStore'
 import { LicenseBanner } from './components/License/LicenseBanner'
 import { BackupBanner } from './components/Backup/BackupBanner'
+import { ConnectionBanner } from './components/Connection/ConnectionBanner'
+import { ReauthOverlay } from './components/Login/ReauthOverlay'
 import { MaintenanceGateScreen } from './components/License/MaintenanceGateScreen'
 import { fetchBookingFlags } from './api/bookingFlags'
 import { fetchSetupStatus } from './api/setup'
@@ -39,7 +41,7 @@ const ROLE_LABELS: Record<string, string> = {
 }
 
 export const App: React.FC = () => {
-  const { admin, token, restore, logout, hotelName, setHotelName } = useAuthStore()
+  const { admin, token, restore, logout, hotelName, setHotelName, reauth } = useAuthStore()
   const { visual, setVisual, setRoomFund } = useSettingsStore()
   const [auditOpen, setAuditOpen] = useState(false)
   const [optimizeOpen, setOptimizeOpen] = useState(false)
@@ -285,6 +287,10 @@ export const App: React.FC = () => {
         </div>
       </header>
 
+      {/* Полоса связи — первой из трёх: пока её видно, всё остальное на экране
+          может оказаться устаревшим, и знать об этом важнее, чем про копии. */}
+      <ConnectionBanner />
+
       {/* Полоса лицензии — под шапкой и над любым разделом: она про программу
           целиком, а не про шахматку, поэтому в обвязку сетки не входит. */}
       <LicenseBanner onOpen={openLicenseSettings} />
@@ -333,6 +339,11 @@ export const App: React.FC = () => {
         onClose={() => setNavOpen(false)}
         onNavigate={handleNavigate}
       />
+
+      {/* Повторный вход — ПОВЕРХ всего дерева, а не вместо него: приложение под
+          оверлеем не размонтируется, и открытая форма брони с введённым
+          остаётся на месте (аудит D7-002). */}
+      {reauth && <ReauthOverlay />}
     </div>
   )
 }

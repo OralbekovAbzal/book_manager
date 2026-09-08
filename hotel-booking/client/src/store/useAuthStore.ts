@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import api from '../api/client'
+import api, { onUnauthorized } from '../api/client'
 import type { Admin } from '../types'
 
 /**
@@ -36,6 +36,20 @@ function sessionEndNotice(reason: string): string {
   return (SESSION_END_NOTICE as Record<string, string>)[reason] ?? SESSION_END_NOTICE.session_revoked
 }
 
+/**
+ * Повторный вход ПОВЕРХ работающего приложения.
+ *
+ * Раньше 401 посреди формы стирал токен и перезагружал страницу — вместе с
+ * заполненной бронью (аудит D7-002). Теперь приложение не размонтируется: над
+ * ним поднимается оверлей с полем пароля, а логин известен — он у `admin`,
+ * которого мы намеренно не обнуляем.
+ */
+export interface ReauthState {
+  username: string
+  /** Почему потребовался вход — для текста в оверлее. */
+  reason: string
+}
+
 interface AuthStore {
   admin: Admin | null
   token: string | null
@@ -43,6 +57,16 @@ interface AuthStore {
   hotelName: string | null
   /** Пояснение на экране входа, почему сессия закончилась (после auth:revoked). */
   notice: string | null
+  /** Не null — над приложением висит оверлей повторного входа. */
+  reauth: ReauthState | null
+  /**
+   * Сессия перестала действовать, но приложение с открытыми формами оставляем.
+   * Токен из localStorage НЕ стираем: случайный F5 до ввода пароля не должен
+   * рвать сессию раньше, чем это сделает сервер.
+   */
+  requireReauth: (reason: string) => void
+  /** Вход из оверлея тем же логином. Ошибку бросает наружу — её показывает форма. */
+  reauthLogin: (password: string) => Promise<void>
   login: (username: string, password: string) => Promise<void>
   /**
    * Без причины — выход по кнопке: сервер отзывает ВСЕ сессии учётной записи
@@ -56,16 +80,40 @@ interface AuthStore {
   setHotelName: (name: string | null) => void
 }
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   admin: null,
   token: localStorage.getItem('token'),
   hotelName: null,
   notice: null,
+  reauth: null,
+
+  requireReauth: (reason) => {
+    const { admin, reauth } = get()
+    // До входа оверлей не нужен: `restore()` на 401 сам чистит токен и показывает
+    // обычный экран входа — иначе старт с просроченным токеном упирался бы в
+    // оверлей поверх пустого приложения, из которого нечего спасать.
+    if (!admin) return
+    // Пока оверлей уже висит, второй и третий 401 (в форме летит несколько
+    // запросов подряд) ничего не меняют — иначе поле пароля пересоздавалось бы
+    // под руками и теряло ввод.
+    if (reauth) return
+    set({ reauth: { username: admin.username, reason } })
+  },
+
+  reauthLogin: async (password) => {
+    const { reauth } = get()
+    if (!reauth) return
+    const { data } = await api.post('/auth/login', { username: reauth.username, password })
+    // Токен в localStorage — его читает интерцептор запросов; в сторе он же
+    // перезапускает сокет (`useSocket` завязан на token).
+    localStorage.setItem('token', data.token)
+    set({ admin: data.admin, token: data.token, notice: null, reauth: null })
+  },
 
   login: async (username, password) => {
     const { data } = await api.post('/auth/login', { username, password })
     localStorage.setItem('token', data.token)
-    set({ admin: data.admin, token: data.token, notice: null })
+    set({ admin: data.admin, token: data.token, notice: null, reauth: null })
   },
 
   logout: (reason) => {
@@ -75,6 +123,10 @@ export const useAuthStore = create<AuthStore>((set) => ({
       admin: null,
       token: null,
       notice: reason ? sessionEndNotice(reason) : null,
+      // Сброс обязателен: оверлей рисуется только внутри вошедшего приложения,
+      // но незакрытый `reauth` всплыл бы поверх шахматки сразу после
+      // следующего входа.
+      reauth: null,
     })
     if (reason || !token) return
     // Токен из localStorage уже стёрт (интерцептор его не подставит) — передаём
@@ -103,8 +155,22 @@ export const useAuthStore = create<AuthStore>((set) => ({
   // Токен кладём в localStorage так же, как login — его читает axios-интерцептор.
   setSession: (token, admin) => {
     localStorage.setItem('token', token)
-    set({ admin, token, notice: null })
+    set({ admin, token, notice: null, reauth: null })
   },
 
   setHotelName: (name) => set({ hotelName: name }),
 }))
+
+/**
+ * 401 из любого запроса поднимает оверлей повторного входа.
+ *
+ * Регистрацией, а не импортом стора внутрь `api/client.ts`: прямой импорт
+ * замкнул бы цикл client → useAuthStore → client, а на горячей перезагрузке
+ * это ровно тот случай, когда модуль ловит «is not defined» из временной
+ * мёртвой зоны (тем же приёмом там разведён обработчик 402). Зависимость
+ * остаётся односторонней, а сам стор берём через `getState()` — на момент
+ * вызова он уже создан.
+ */
+onUnauthorized(() => {
+  useAuthStore.getState().requireReauth('token_expired')
+})

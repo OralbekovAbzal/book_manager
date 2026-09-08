@@ -1,5 +1,6 @@
 const { prisma } = require('../../utils/prisma')
 const { isoDate, isoMonth, daysBetween, weekdayName, toUTCDate } = require('../dateUtils')
+const { localDateISO } = require('../../utils/hotelTz')
 
 /**
  * Датасет «Начисления»: одна строка = одна строка счёта (`BookingCharge`).
@@ -62,7 +63,8 @@ const fields = {
   chargeSourceLabel: { label: 'Откуда строка', type: 'text', groupable: true },
   reason:        { label: 'Причина правки', type: 'text' },
   createdByName: { label: 'Кто добавил',  type: 'text', groupable: true, optionsFrom: 'admins' },
-  createdDate:   { label: 'Дата добавления', type: 'date', groupable: true },
+  createdDate:   { label: 'Дата добавления', type: 'date', groupable: true,
+                   description: 'Календарный день по времени отеля (не по смене)' },
 
   roomNumber:    { label: 'Номер',        type: 'text', groupable: true },
   building:      { label: 'Корпус',       type: 'text', groupable: true, optionsFrom: 'buildings' },
@@ -162,7 +164,7 @@ async function load({ params }) {
       chargeSourceLabel: SOURCE_LABELS[c.source] || c.source,
       reason: c.reason || '',
       createdByName: (c.createdBy && c.createdBy.name) || '',
-      createdDate: isoDate(c.createdAt),
+      createdDate: localDateISO(c.createdAt),
       roomNumber: b.room.number,
       building: b.room.building,
       floor: b.room.floor,

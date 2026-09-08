@@ -43,7 +43,13 @@ const STATUS_LABELS: Record<string, string> = {
   NO_SHOW:     'Не приехал',
 }
 
-const fmt = (n: number) => n.toLocaleString('ru-RU') + ' ₸'
+// Денег на этом экране больше нет (решение владельца по D6-003). «Выручка /
+// Оплачено / Задолженность» здесь считались как сумма `Booking.totalAmount` всех
+// броней, СОЗДАННЫХ в период по календарю UTC, — то есть «на сколько назаводили
+// заявок», включая проживание будущего года. С кассой и финансовыми отчётами
+// такие числа не сходились ни по составу, ни по границам суток, и сверять их
+// пытались всерьёз. Деньги живут в «Кассе» и в отчётах, где правда одна;
+// «Аудит» отвечает на вопрос «сколько броней завели и кто что делал».
 
 // Dates from @db.Date come back as UTC midnight (e.g. "2026-05-20T00:00:00.000Z").
 // Always render with timeZone:'UTC' so local timezone can't shift the displayed day.
@@ -51,6 +57,41 @@ const fmt = (n: number) => n.toLocaleString('ru-RU') + ' ₸'
 function formatDate(iso: string) {
   const d = new Date(iso)
   return d.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', timeZone: 'UTC' })
+}
+
+/**
+ * Границы периода — это МОМЕНТЫ (ISO с временем), а не `@db.Date`, поэтому
+ * `timeZone:'UTC'` здесь был бы неверен. Показываем в часовом поясе ОТЕЛЯ: его
+ * присылает сервер, и именно он задаёт, где кончаются сутки. Зона устройства не
+ * годится — ноутбук стойки может стоять в другой.
+ * Неизвестная зона (старый или странный ответ) не должна ронять окно — тогда
+ * показываем как есть, в зоне устройства.
+ */
+function formatMoment(iso: string, tz?: string) {
+  const opts: Intl.DateTimeFormatOptions = {
+    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+  }
+  try {
+    return new Date(iso).toLocaleString('ru-RU', tz ? { ...opts, timeZone: tz } : opts)
+  } catch {
+    return new Date(iso).toLocaleString('ru-RU', opts)
+  }
+}
+
+/**
+ * «: с 01.09.2026, 00:00» / «: 01.09.2026, 00:00 — 09.09.2026, 18:00» / «».
+ * Концы периода приходят по отдельности и бывают `null` (у смены нижней границы
+ * нет, верхняя — «до сих пор»), поэтому склеиваем то, что есть, а не печатаем
+ * «Invalid Date» там, где сервер честно ничего не сказал.
+ */
+function periodLabel(period?: { from: string | null; to: string | null; tz: string }) {
+  if (!period) return ''
+  const from = period.from ? formatMoment(period.from, period.tz) : ''
+  const to = period.to ? formatMoment(period.to, period.tz) : ''
+  if (from && to) return `: ${from} — ${to}`
+  if (from) return `: с ${from}`
+  if (to) return `: по ${to}`
+  return ''
 }
 
 /** Day-of-week label in Russian */
@@ -106,18 +147,23 @@ const PeriodSummary: React.FC<{ period: 'today' | 'week' | 'month'; shiftId?: nu
 
   const th: React.CSSProperties = { padding: '8px 0', fontSize: '0.92rem', color: 'var(--text-faint)', fontWeight: 600 }
 
+  // Счётчики, а не деньги. Карточка одна: она и есть ответ на вопрос вкладки.
   return (
     <div>
-      {/* Summary cards */}
-      <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
-        <SummaryCard label="Выручка" value={fmt(summary.totalAmount)} color="var(--accent)" />
-        <SummaryCard label="Оплачено" value={fmt(summary.totalPaid)} color="var(--s-in)" />
-        <SummaryCard label="Задолженность" value={fmt(summary.totalDebt)} color="var(--s-overdue)" />
+      <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap' }}>
+        <SummaryCard label="Заведено броней" value={String(summary.bookingCount)} color="var(--accent)" />
       </div>
 
-      {/* Count badge */}
-      <div style={{ marginBottom: 16, fontSize: '1rem', color: 'var(--text-faint)' }}>
-        Всего броней: <strong style={{ color: 'var(--text)' }}>{summary.bookingCount}</strong>
+      {/* Границы периода — от сервера и по времени отеля: «сегодня» на стойке в
+          02:00 — это ещё вчерашний рабочий день, а не календарные сутки UTC. */}
+      <div style={{ marginBottom: 20, fontSize: '0.92rem', color: 'var(--text-faint)', lineHeight: 1.5 }}>
+        {shiftId
+          ? 'Считаются брони, заведённые в эту смену. Отменённые не учитываются.'
+          : <>
+              Считаются брони, заведённые за период — по времени отеля
+              {periodLabel(summary.period)}.
+            </>}
+        {' '}Деньги — в разделе «Касса» и в отчётах.
       </div>
 
       {/* Status breakdown */}
@@ -129,7 +175,6 @@ const PeriodSummary: React.FC<{ period: 'today' | 'week' | 'month'; shiftId?: nu
               <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
                 <th style={{ ...th, textAlign: 'left' }}>Статус</th>
                 <th style={{ ...th, textAlign: 'right' }}>Броней</th>
-                <th style={{ ...th, textAlign: 'right' }}>Сумма</th>
               </tr>
             </thead>
             <tbody>
@@ -140,9 +185,6 @@ const PeriodSummary: React.FC<{ period: 'today' | 'week' | 'month'; shiftId?: nu
                   </td>
                   <td style={{ padding: '10px 0', fontSize: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>
                     {row._count.id}
-                  </td>
-                  <td style={{ padding: '10px 0', fontSize: '1rem', textAlign: 'right', color: 'var(--text-muted)' }}>
-                    {fmt(row._sum.totalAmount ?? 0)}
                   </td>
                 </tr>
               ))}
@@ -269,13 +311,13 @@ const ShiftsPanel: React.FC = () => {
               )}
             </div>
 
+            {/* Счётчика броней здесь больше нет: он был вторым числом про одно и
+                то же и НЕ СХОДИЛСЯ с карточкой ниже. `_count.bookings` — все
+                записи смены, включая отменённые (на живой базе 110 против 94),
+                а «Заведено броней» и разбивка по статусам считаются сервером без
+                отменённых. Два разных числа под похожими подписями — это не
+                информация, а вопрос «какому верить». */}
             <div style={{ display: 'flex', gap: 24, marginBottom: 20 }}>
-              <div>
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginBottom: 2 }}>Броней</div>
-                <div style={{ fontSize: '1.38rem', fontWeight: 700, color: 'var(--text)' }}>
-                  {currentShift._count?.bookings ?? 0}
-                </div>
-              </div>
               <div>
                 <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginBottom: 2 }}>Принял</div>
                 <div style={{ fontSize: '1.08rem', fontWeight: 600, color: 'var(--text-muted)' }}>
@@ -411,8 +453,12 @@ const ShiftsPanel: React.FC = () => {
                           {weekday(s.date)}
                         </span>
                       </div>
+                      {/* Только «кто принял день»: счётчик отсюда убран по той же
+                          причине, что и из карточки текущего дня — он считает и
+                          отменённые, и расходился бы с раскрытой карточкой смены
+                          прямо под собой. Число показывает она. */}
                       <div style={{ fontSize: '0.85rem', color: 'var(--text-faint)', marginTop: 2 }}>
-                        {s._count?.bookings ?? 0} броней · {s.createdBy.name}
+                        {s.createdBy.name}
                       </div>
                     </div>
                     <span style={{ color: 'var(--text-faint)', fontSize: '0.92rem' }}>{expanded ? '▲' : '▼'}</span>

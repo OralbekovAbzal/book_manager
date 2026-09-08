@@ -16,8 +16,14 @@ export async function updateService(id: number, payload: Partial<Service>): Prom
   return data.data
 }
 
-export async function deleteService(id: number): Promise<void> {
-  await api.delete(`/services/${id}`)
+/**
+ * Удаление услуги каскадом уносит её строки из ВСЕХ броней вместе с историей
+ * (`BookingService … onDelete: Cascade`, D6-005). Поэтому сервер отказывает
+ * (409 `SERVICE_IN_USE`), пока услуга где-то используется, а `force` — это
+ * осознанное «да, вместе с историей», подтверждённое в диалоге.
+ */
+export async function deleteService(id: number, opts: { force?: boolean } = {}): Promise<void> {
+  await api.delete(`/services/${id}`, { params: opts.force ? { force: 1 } : {} })
 }
 
 export async function fetchMealPlans(): Promise<MealPlan[]> {

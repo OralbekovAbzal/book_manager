@@ -23,6 +23,25 @@ class ExprError extends Error {
   }
 }
 
+/**
+ * Границы формулы (D4-003). До них разбор и вычисление рекурсивны и без потолка,
+ * а стек у `evaluate`, `analyze` и `inferType` кончается на разной глубине —
+ * отсюда окно, где валидация проходит, определение сохраняется, а КАЖДЫЙ запуск
+ * отвечает 500 (`RangeError` — не `ExprError`, движок его в 400 не переводил).
+ *
+ * Поэтому потолок ставится при РАЗБОРЕ, до всякой рекурсии:
+ *  - `MAX_EXPR_LENGTH` — на текст (заодно кэш `parse` не растёт на 200 КБ);
+ *  - `MAX_NODES` — на размер дерева: ловит и цепочку `1+1+…` (её разбор
+ *    итеративный, длину скобками не измерить), и вложенность;
+ *  - `MAX_DEPTH` — на вложенность скобок и вызовов, где кончается стек Parser'а.
+ *
+ * Числа с большим запасом: самая длинная формула во встроенных отчётах — около
+ * 90 символов и десятка узлов.
+ */
+const MAX_EXPR_LENGTH = 2000
+const MAX_NODES = 2000
+const MAX_DEPTH = 64
+
 // --- Токены -------------------------------------------------------------------
 
 const KEYWORDS = new Set(['and', 'or', 'not'])
@@ -91,13 +110,21 @@ function tokenize(src) {
 // --- Разбор -------------------------------------------------------------------
 
 class Parser {
-  constructor(tokens) { this.toks = tokens; this.i = 0 }
+  constructor(tokens) { this.toks = tokens; this.i = 0; this.nodes = 0; this.depth = 0 }
   peek() { return this.toks[this.i] }
   next() { return this.toks[this.i++] }
   isOp(v) { const t = this.peek(); return t.t === 'op' && t.v === v }
   expect(v) {
     if (!this.isOp(v)) throw new ExprError(`ожидается «${v}»`, this.peek().pos)
     this.next()
+  }
+
+  /** Каждый узел дерева проходит здесь — это и есть счётчик размера формулы. */
+  node(n, pos) {
+    if (++this.nodes > MAX_NODES) {
+      throw new ExprError(`формула слишком сложная (больше ${MAX_NODES} операций)`, pos)
+    }
+    return n
   }
 
   parse() {
@@ -109,76 +136,96 @@ class Parser {
 
   or() {
     let l = this.and()
-    while (this.isOp('or')) { this.next(); l = { t: 'bin', op: 'or', l, r: this.and() } }
+    while (this.isOp('or')) { const p = this.peek().pos; this.next(); l = this.node({ t: 'bin', op: 'or', l, r: this.and() }, p) }
     return l
   }
 
   and() {
     let l = this.not()
-    while (this.isOp('and')) { this.next(); l = { t: 'bin', op: 'and', l, r: this.not() } }
+    while (this.isOp('and')) { const p = this.peek().pos; this.next(); l = this.node({ t: 'bin', op: 'and', l, r: this.not() }, p) }
     return l
   }
 
   not() {
-    if (this.isOp('not')) { this.next(); return { t: 'un', op: 'not', e: this.not() } }
+    if (this.isOp('not')) { const p = this.peek().pos; this.next(); return this.node({ t: 'un', op: 'not', e: this.not() }, p) }
     return this.cmp()
   }
 
   cmp() {
     let l = this.add()
     while (['=', '!=', '<', '<=', '>', '>='].some((o) => this.isOp(o))) {
+      const p = this.peek().pos
       const op = this.next().v
-      l = { t: 'bin', op, l, r: this.add() }
+      l = this.node({ t: 'bin', op, l, r: this.add() }, p)
     }
     return l
   }
 
   add() {
     let l = this.mul()
-    while (this.isOp('+') || this.isOp('-')) { const op = this.next().v; l = { t: 'bin', op, l, r: this.mul() } }
+    while (this.isOp('+') || this.isOp('-')) {
+      const p = this.peek().pos
+      const op = this.next().v
+      l = this.node({ t: 'bin', op, l, r: this.mul() }, p)
+    }
     return l
   }
 
   mul() {
     let l = this.unary()
-    while (this.isOp('*') || this.isOp('/') || this.isOp('%')) { const op = this.next().v; l = { t: 'bin', op, l, r: this.unary() } }
+    while (this.isOp('*') || this.isOp('/') || this.isOp('%')) {
+      const p = this.peek().pos
+      const op = this.next().v
+      l = this.node({ t: 'bin', op, l, r: this.unary() }, p)
+    }
     return l
   }
 
   unary() {
-    if (this.isOp('-')) { this.next(); return { t: 'un', op: 'neg', e: this.unary() } }
+    if (this.isOp('-')) { const p = this.peek().pos; this.next(); return this.node({ t: 'un', op: 'neg', e: this.unary() }, p) }
     if (this.isOp('+')) { this.next(); return this.unary() }
     return this.primary()
   }
 
   primary() {
     const t = this.next()
-    if (t.t === 'num') return { t: 'num', v: t.v }
-    if (t.t === 'str') return { t: 'str', v: t.v }
-    if (t.t === 'param') return { t: 'param', name: t.v, pos: t.pos }
+    if (t.t === 'num') return this.node({ t: 'num', v: t.v }, t.pos)
+    if (t.t === 'str') return this.node({ t: 'str', v: t.v }, t.pos)
+    if (t.t === 'param') return this.node({ t: 'param', name: t.v, pos: t.pos }, t.pos)
     if (t.t === 'id') {
       const lower = t.v.toLowerCase()
-      if (lower === 'true') return { t: 'num', v: true }
-      if (lower === 'false') return { t: 'num', v: false }
-      if (lower === 'null') return { t: 'num', v: null }
+      if (lower === 'true') return this.node({ t: 'num', v: true }, t.pos)
+      if (lower === 'false') return this.node({ t: 'num', v: false }, t.pos)
+      if (lower === 'null') return this.node({ t: 'num', v: null }, t.pos)
       if (this.isOp('(')) {
         this.next()
         const args = []
         if (!this.isOp(')')) {
+          this.enter(t.pos)
           args.push(this.or())
           while (this.isOp(',')) { this.next(); args.push(this.or()) }
+          this.depth--
         }
         this.expect(')')
-        return { t: 'call', name: t.v, args, pos: t.pos }
+        return this.node({ t: 'call', name: t.v, args, pos: t.pos }, t.pos)
       }
-      return { t: 'id', name: t.v, pos: t.pos }
+      return this.node({ t: 'id', name: t.v, pos: t.pos }, t.pos)
     }
     if (t.t === 'op' && t.v === '(') {
+      this.enter(t.pos)
       const e = this.or()
+      this.depth--
       this.expect(')')
       return e
     }
     throw new ExprError(t.t === 'eof' ? 'выражение оборвано' : `неожиданный «${t.v}»`, t.pos)
+  }
+
+  /** Вход внутрь скобок или вызова: восемь кадров стека на уровень. */
+  enter(pos) {
+    if (++this.depth > MAX_DEPTH) {
+      throw new ExprError(`формула слишком сложная (вложенность больше ${MAX_DEPTH})`, pos)
+    }
   }
 }
 
@@ -186,6 +233,11 @@ const cache = new Map()
 
 function parse(src) {
   const key = String(src)
+  // Длину проверяем ДО tokenize: иначе 200 КБ из импортированного файла успеют
+  // превратиться в массив токенов на каждой правке формулы в конструкторе.
+  if (key.length > MAX_EXPR_LENGTH) {
+    throw new ExprError(`формула длиннее ${MAX_EXPR_LENGTH} символов`, 0)
+  }
   let ast = cache.get(key)
   if (!ast) {
     ast = new Parser(tokenize(key)).parse()
@@ -300,6 +352,18 @@ function compare(op, a, b) {
  *             rows === null означает «строчный контекст»: агрегаты запрещены.
  */
 function evaluate(ast, ctx) {
+  // Точка входа ловит переполнение стека: лимиты разбора закрывают формулы,
+  // сохранённые после этой правки, а в базе клиента могут лежать старые.
+  // `RangeError` движок переводил в 500 — превращаем его в ошибку формулы (400).
+  try {
+    return evalNode(ast, ctx)
+  } catch (err) {
+    if (err instanceof RangeError) throw new ExprError('формула слишком сложная')
+    throw err
+  }
+}
+
+function evalNode(ast, ctx) {
   switch (ast.t) {
     case 'num':
     case 'str':
@@ -313,16 +377,16 @@ function evaluate(ast, ctx) {
       return v === undefined ? null : v
     }
     case 'un': {
-      const v = evaluate(ast.e, ctx)
+      const v = evalNode(ast.e, ctx)
       if (ast.op === 'not') return !truthy(v)
       const n = num(v)
       return n === null ? null : -n
     }
     case 'bin': {
-      if (ast.op === 'and') return truthy(evaluate(ast.l, ctx)) ? truthy(evaluate(ast.r, ctx)) : false
-      if (ast.op === 'or') return truthy(evaluate(ast.l, ctx)) ? true : truthy(evaluate(ast.r, ctx))
-      const a = evaluate(ast.l, ctx)
-      const b = evaluate(ast.r, ctx)
+      if (ast.op === 'and') return truthy(evalNode(ast.l, ctx)) ? truthy(evalNode(ast.r, ctx)) : false
+      if (ast.op === 'or') return truthy(evalNode(ast.l, ctx)) ? true : truthy(evalNode(ast.r, ctx))
+      const a = evalNode(ast.l, ctx)
+      const b = evalNode(ast.r, ctx)
       if ('+-*/%'.includes(ast.op)) return arith(ast.op, a, b)
       return compare(ast.op, a, b)
     }
@@ -332,13 +396,13 @@ function evaluate(ast, ctx) {
         if (!ctx.rows) throw new ExprError(`«${ast.name}» — агрегат, здесь нельзя`, ast.pos)
         const rowCtx = (row) => ({ get: (n) => (row[n] === undefined ? ctx.get(n) : row[n]), param: ctx.param, rows: null })
         const arg = ast.args[0]
-        const vals = arg ? ctx.rows.map((row) => evaluate(arg, rowCtx(row))) : []
-        const conds = ast.args[1] ? ctx.rows.map((row) => evaluate(ast.args[1], rowCtx(row))) : []
+        const vals = arg ? ctx.rows.map((row) => evalNode(arg, rowCtx(row))) : []
+        const conds = ast.args[1] ? ctx.rows.map((row) => evalNode(ast.args[1], rowCtx(row))) : []
         return agg(vals, ast.args.length > 0, ctx.rows, conds)
       }
       const fn = SCALARS[ast.name]
       if (!fn) throw new ExprError(`неизвестная функция «${ast.name}»`, ast.pos)
-      return fn(...ast.args.map((a) => evaluate(a, ctx)))
+      return fn(...ast.args.map((a) => evalNode(a, ctx)))
     }
     default:
       return null
@@ -385,7 +449,14 @@ function analyze(src) {
       default: break
     }
   }
-  walk(ast, false)
+  // Обход тоже рекурсивен: старая формула из базы может переполнить стек здесь.
+  // Валидация обязана вернуть внятную проблему, а не английский RangeError.
+  try {
+    walk(ast, false)
+  } catch (err) {
+    if (err instanceof RangeError) out.problems.push('формула слишком сложная')
+    else throw err
+  }
   return out
 }
 
@@ -424,7 +495,14 @@ function inferType(src) {
       default: return 'number'
     }
   }
-  return kind(ast)
+  // `kind` рекурсивен и раньше стоял ВНЕ try: на глубокой формуле из базы
+  // RangeError уходил наверх и становился 500 при построении колонок.
+  try {
+    return kind(ast)
+  } catch (err) {
+    if (err instanceof RangeError) throw new ExprError('формула слишком сложная')
+    throw err
+  }
 }
 
 /** Справочник функций для конструктора (подписи и сигнатуры). */
@@ -461,4 +539,7 @@ const FUNCTIONS = [
   { name: 'str', sig: 'str(x)', label: 'В текст' },
 ]
 
-module.exports = { parse, evaluate, analyze, inferType, ExprError, FUNCTIONS, SCALARS, AGGREGATES, truthy }
+module.exports = {
+  parse, evaluate, analyze, inferType, ExprError, FUNCTIONS, SCALARS, AGGREGATES, truthy,
+  MAX_EXPR_LENGTH, MAX_NODES, MAX_DEPTH,
+}

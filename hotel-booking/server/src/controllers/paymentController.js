@@ -27,6 +27,11 @@ const logger = require('../utils/logger')
  */
 
 const KINDS = ['payment', 'refund']
+// Окно списка долгов: умолчание, потолок и предел выборки. `take` держим общим
+// с ответом — по нему считается признак «список обрезан».
+const DEBTS_DEFAULT_DAYS = 30
+const DEBTS_MAX_DAYS = 365
+const DEBTS_TAKE = 300
 const METHODS = ['cash', 'card', 'transfer']
 const METHOD_LABELS = { cash: 'Наличные', card: 'Карта', transfer: 'Перевод' }
 
@@ -173,7 +178,7 @@ async function currentShiftSummary(req, res, next) {
 }
 
 /**
- * GET /api/payments/debts?q=&days= — «кто сколько должен».
+ * GET /api/payments/debts?q=&days=&all= — «кто сколько должен».
  * Список броней с начислено / принято / долг. Это рабочий экран приёма оплаты:
  * администратор ищет гостя и сразу видит остаток, а не считает его в уме.
  *
@@ -182,17 +187,47 @@ async function currentShiftSummary(req, res, next) {
  * Суммы считаются ГРУППОВЫМИ запросами, а не по строке на бронь: иначе экран
  * на сотне броней делал бы сотни запросов к базе.
  */
+/**
+ * Окно списка долгов: сколько дней после выезда бронь ещё видна в кассе.
+ *
+ * До этого окно было зашито в 30 дней и никак не показывалось на экране: долг
+ * турфирмы за прошлый месяц не находился ни поиском, ни листанием, а «Долг всего»
+ * считался по тем же 30 дням (аудит D6-002). Теперь окно можно снять — `days=0`
+ * или `all=1`, — и оно возвращается в ответе, чтобы экран мог о нём сказать.
+ *
+ * @param {{days?: any, all?: any}} query
+ * @returns {{ days: number|null }} null — без нижней границы («все долги»)
+ */
+function debtsWindow({ days, all } = {}) {
+  const allRaw = all === undefined || all === null ? '' : String(all).toLowerCase()
+  if (all === true || ['1', 'true', 'yes', 'on'].includes(allRaw)) return { days: null }
+
+  if (days === undefined || days === null || days === '') return { days: DEBTS_DEFAULT_DAYS }
+  const n = parseInt(days, 10)
+  if (!Number.isFinite(n)) return { days: DEBTS_DEFAULT_DAYS }
+  // Ноль — это «без границы», а не «только будущие выезды»: просить нулевое окно
+  // осмысленно незачем, а «покажи всё» коротким числом просить удобно.
+  // Отрицательное — мусор, а не «всё»: окно по умолчанию.
+  if (n === 0) return { days: null }
+  if (n < 0) return { days: DEBTS_DEFAULT_DAYS }
+  return { days: Math.min(n, DEBTS_MAX_DAYS) }
+}
+
 async function debts(req, res, next) {
   try {
     const q = (req.query.q || '').trim()
-    const days = Math.min(Math.max(parseInt(req.query.days) || 30, 0), 365)
+    const { days } = debtsWindow(req.query)
 
     const businessDate = await getCurrentBusinessDate()
-    const from = new Date(businessDate.getTime() - days * 24 * 60 * 60 * 1000)
 
     const where = {
       status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
-      checkOut: { gte: from },
+      // days === null — «все долги»: нижней границы по выезду нет вовсе.
+      // Без этого турфирма, платящая за прошлый месяц, в кассе не находилась
+      // ни поиском, ни листанием (аудит D6-002).
+      ...(days !== null && {
+        checkOut: { gte: new Date(businessDate.getTime() - days * 24 * 60 * 60 * 1000) },
+      }),
     }
     if (q) {
       // Телефон в базе записан как попало (+7 701…, 8701…, со скобками), поэтому
@@ -223,14 +258,18 @@ async function debts(req, res, next) {
 
     const [active, cancelled] = await Promise.all([
       prisma.booking.findMany({
-        where, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: 300,
+        where, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: DEBTS_TAKE,
       }),
       prisma.booking.findMany({
-        where: cancelledWhere, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: 300,
+        where: cancelledWhere, select: DEBT_SELECT, orderBy: [{ checkIn: 'asc' }, { id: 'asc' }], take: DEBTS_TAKE,
       }),
     ])
     const matched = [...active, ...cancelled]
-    if (matched.length === 0) return res.json({ data: { businessDate, bookings: [] } })
+    // Признак обрезки — по ИСХОДНЫМ выборкам, до сворачивания цепочек и отсева
+    // отменённых без денег: иначе 400 должников, свернувшихся в 150 строк, выглядели
+    // бы полным списком (находка тестов волны 9).
+    const truncated = active.length >= DEBTS_TAKE || cancelled.length >= DEBTS_TAKE
+    if (matched.length === 0) return res.json({ data: { businessDate, bookings: [], window: { days, truncated: false } } })
 
     // ── Цепочка = одна строка ──
     // Совпасть с фильтром (по дате выезда или по номеру) мог любой отрезок, а
@@ -259,7 +298,7 @@ async function debts(req, res, next) {
     }
 
     const heads = headIds.map((id) => byId.get(id)).filter(Boolean)
-    if (heads.length === 0) return res.json({ data: { businessDate, bookings: [] } })
+    if (heads.length === 0) return res.json({ data: { businessDate, bookings: [], window: { days, truncated: false } } })
 
     const money = await loadBookingMoney(heads)
     const rows = heads
@@ -286,7 +325,7 @@ async function debts(req, res, next) {
       .filter((b) => b.status !== 'CANCELLED' || b.paid !== 0 || b.due !== 0)
       .sort((a, b) => (a.checkIn - b.checkIn) || (a.id - b.id))
 
-    res.json({ data: { businessDate, bookings: rows } })
+    res.json({ data: { businessDate, bookings: rows, window: { days, truncated } } })
   } catch (err) { next(err) }
 }
 
@@ -507,4 +546,8 @@ module.exports = {
   KINDS,
   METHODS,
   METHOD_LABELS,
+  // Окно списка долгов — чистая функция: правило «сколько дней видно» проверяется
+  // без базы и без запроса (D6-002)
+  debtsWindow,
+  DEBTS_TAKE,
 }

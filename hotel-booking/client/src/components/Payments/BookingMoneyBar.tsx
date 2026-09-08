@@ -1,6 +1,7 @@
 import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { fetchBookingPayments, type BookingMoney } from '../../api/payments'
 import { useGridStore } from '../../store/useGridStore'
+import { useRealtimeStore } from '../../store/useRealtimeStore'
 import type { BookingStatus } from '../../types'
 import { BookingPaymentPanel } from './BookingPaymentPanel'
 import { SettlementDialog } from '../BookingModal/SettlementDialog'
@@ -41,6 +42,15 @@ interface Props {
    */
   onSummary?: (summary: BookingMoney) => void
   /**
+   * По брони прошла операция, которая её ИЗМЕНИЛА: приём оплаты, возврат,
+   * отмена ошибочной записи, расчёт с гостем. Сервер при этом трогает
+   * `updatedAt` самой брони, а форма, которая нас показывает, об этом не знает
+   * и получает 409 «изменена на другом рабочем месте» на собственную же
+   * оплату. Колбэк — сигнал «сходи проверь себя»; сумм в нём нет намеренно,
+   * деньги форма и так получает через `onSummary`.
+   */
+  onBookingChanged?: () => void
+  /**
    * Статус брони. Нужен ровно для одного: у ОТМЕНЁННОЙ брони возврат переплаты
    * оформляется окном расчёта при самой отмене, и вторая кнопка здесь только
    * сбивала бы с толку. У живой брони переплата — это «внесли больше, чем
@@ -55,7 +65,7 @@ export interface BookingMoneyBarHandle {
 }
 
 export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function BookingMoneyBar(
-  { bookingId, guestName, subtitle, title, onSummary }, ref,
+  { bookingId, guestName, subtitle, title, onSummary, onBookingChanged }, ref,
 ) {
   const fetchGrid = useGridStore(s => s.fetchGrid)
   const [summary, setSummary] = useState<BookingMoney | null>(null)
@@ -73,6 +83,9 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
   // из родителя перезапустит загрузку журнала на каждый его рендер.
   const summaryRef = useRef(onSummary)
   summaryRef.current = onSummary
+  // По той же причине в ref: колбэк зовут обработчики, а не эффекты.
+  const bookingChangedRef = useRef(onBookingChanged)
+  bookingChangedRef.current = onBookingChanged
 
   useImperativeHandle(ref, () => ({ openPayment: () => setDialog(true) }), [])
 
@@ -96,9 +109,33 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
     load()
   }, [bookingId])
 
+  // Деньги изменились на другом рабочем месте (приём, возврат, отмена записи,
+  // пересборка начислений после правки брони). Раньше полоса держала суммы до
+  // перезахода в бронь: на втором месте висел «Долг 50 000» по уже оплаченной
+  // броне — и его принимали второй раз (аудит D6-001).
+  //
+  // Сравниваем со «своим последним» тиком, а не грузим на любой ненулевой:
+  // событие могло прийти ДО открытия этой брони, и тогда загрузка по монтированию
+  // и эта ушли бы вдвоём за одними и теми же числами.
+  const tick = useRealtimeStore((s) => s.tick)
+  const lastChangedId = useRealtimeStore((s) => s.lastChangedId)
+  const broadcast = useRealtimeStore((s) => s.broadcast)
+  const seenTick = useRef(tick)
+  useEffect(() => {
+    if (tick === seenTick.current) return
+    seenTick.current = tick
+    // Событие не про конкретную бронь — молчим, кроме `broadcast`: после обрыва
+    // и отката снимка устареть могло что угодно, в том числе эта бронь.
+    if (broadcast || lastChangedId === bookingId) load()
+  }, [tick, lastChangedId, broadcast, bookingId])
+
+  // Единственная воронка операций по деньгам: сюда приходит и приём/возврат/
+  // отмена записи из панели платежей, и расчёт с гостем. Значит, и «бронь
+  // изменилась» достаточно сказать здесь — второй точки нет.
   const handleChanged = (s: BookingMoney) => {
     setSummary(s)
     summaryRef.current?.(s)
+    bookingChangedRef.current?.()
   }
 
   // Отрицательный долг и есть переплата — своего поля под неё в сводке нет.

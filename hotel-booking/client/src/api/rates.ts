@@ -33,6 +33,23 @@ export async function clearRates(
   return data.data
 }
 
+/**
+ * Сколько цен лежит в периоде — считает СЕРВЕР.
+ *
+ * Нужно ровно для одного: сказать в диалоге «будет стёрто N цен» ДО удаления.
+ * Календарь цен не входит в снимки, восстановить его можно только из ночной
+ * копии целиком (D6-004), поэтому число обязано быть настоящим, а не оценкой
+ * «категорий × дней»: в периоде почти всегда есть пустые ячейки.
+ */
+export async function fetchRatesCount(
+  categoryIds: number[], dateFrom: string, dateTo: string,
+): Promise<number> {
+  const { data } = await api.get('/rates/count', {
+    params: { categoryIds: categoryIds.join(','), from: dateFrom, to: dateTo },
+  })
+  return data.data.count
+}
+
 /** Ячейка календаря: конкретная категория на конкретную дату. */
 export interface RateCell { categoryId: number; date: string }
 

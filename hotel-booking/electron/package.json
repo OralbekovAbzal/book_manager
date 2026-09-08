@@ -65,6 +65,14 @@
           "**/*",
           "!.bin/**",
           "!nodemon/**",
+          "!vitest/**",
+          "!@vitest/**",
+          "!vite/**",
+          "!rolldown/**",
+          "!@rolldown/**",
+          "!lightningcss/**",
+          "!lightningcss-*/**",
+          "!tinybench/**",
           "!.prisma/client/*.tmp*"
         ]
       }

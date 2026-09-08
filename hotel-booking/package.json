@@ -12,7 +12,6 @@
     "build:electron": "node server/scripts/stamp-build-date.js && cd electron && npm run build",
     "db:migrate": "cd server && npx prisma migrate dev",
     "db:migrate:create": "cd server && npx prisma migrate dev --create-only",
-    "db:migrate:prod": "cd server && npx prisma migrate deploy",
     "db:migrate:deploy": "cd server && npx prisma migrate deploy",
     "db:migrate:status": "cd server && npx prisma migrate status",
     "db:migrate:baseline": "cd server && npx prisma migrate resolve --applied 0_init",

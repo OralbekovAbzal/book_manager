@@ -1,100 +1,125 @@
 # CLAUDE.md
 
-Система управления бронированием отеля (desktop-приложение на Electron + веб-стек).
-Весь код находится в подкаталоге **`hotel-booking/`**.
+Qonaq — система бронирования для небольших отелей и баз отдыха. Desktop-программа
+(Electron) со встроенным PostgreSQL и веб-стеком внутри; один ноутбук — хост, остальные
+рабочие места подключаются к нему по локальной сети. Весь код — в подкаталоге **`hotel-booking/`**.
 
 ## Запуск и команды
 
-Все команды выполняются из `hotel-booking/`:
+Все команды — из `hotel-booking/` (корневые зависимости `concurrently`/`wait-on` ставятся
+`npm install` там же).
 
 | Команда | Что делает |
 |---|---|
-| `npm run dev` | Backend + frontend одновременно (concurrently) |
+| `npm run dev` | Backend + frontend одновременно |
 | `npm run dev:server` | Только backend (nodemon, порт 3001) |
-| `npm run dev:client` | Только frontend (Vite, порт 5173) |
+| `npm run dev:client` | Только frontend (Vite, порт 5173, прокси `/api` и `/socket.io` на 3001) |
 | `npm run dev:electron` | Backend + frontend + Electron-окно |
-| `npm run build` | `build:client` (tsc + vite) затем `build:electron` |
-| `npm run db:migrate` | `prisma migrate dev` |
-| `npm run db:studio` | Prisma Studio (просмотр БД) |
-| `npm run db:seed` | Засев тестовых данных |
-| `npm run db:generate` | Перегенерация Prisma Client |
+| `npm run build` | `build:client` (tsc + vite) → штамп `buildDate` → `build:electron` (electron-builder, NSIS) |
+| `npm run db:migrate` | `prisma migrate dev` (создать и применить миграцию к своей базе) |
+| `npm run db:migrate:create` | только файл миграции, без применения |
+| `npm run db:migrate:deploy` | применить готовые миграции (так делает и установленная программа) |
+| `npm run db:migrate:status` | состояние миграций |
+| `npm run db:seed` | сид: **сбрасывает пароль главного администратора** — на базе с данными не запускать |
+| `npm run db:studio` / `db:generate` | Prisma Studio / перегенерация клиента |
+| `cd server && npm test` | тесты (vitest, ~66 файлов / ~1150 тестов) |
+| `cd client && npx tsc --noEmit` | проверка типов клиента |
+| `cd electron && node test-host.mjs` | связка «встроенный Postgres + миграции + сервер» на временном кластере |
 
-Быстрый старт из корня репозитория: `start-all.bat` (поднимает backend и frontend в отдельных окнах).
+Конфигурации для панели браузера Claude Code — `.claude/launch.example.json` (скопировать в
+`launch.json`, поправить пути; сам `launch.json` в git не входит). MCP-коннекторы —
+`.mcp.json.example` → `.mcp.json` (с паролем, в git не входит).
+
+**Порты 3001/5173 и dev-база `hotel_booking` — рабочие у владельца, их не трогать.**
+Живые проверки — на клоне `hotel_booking_audit` (сервер 3012, клиент 5175), рецепт в
+`hotel-booking/NOTES.md` → «Клон для проверки». Упакованную сборку проверять в изоляции:
+`HOTEL_BOOKING_USERDATA=<временная папка>` (там же в NOTES).
 
 ## Стек
 
-**Backend** (`hotel-booking/server`):
-- Node + Express 4
-- **Prisma 5 ORM + PostgreSQL** (схема: `server/prisma/schema.prisma`)
-- Socket.io — realtime-обновления грида броней
-- JWT-аутентификация (`jsonwebtoken` + `bcryptjs`)
-- helmet, express-rate-limit, express-validator — безопасность/валидация
-- node-cron — фоновые задачи (бэкапы, снапшоты)
-- winston — логирование (`server/logs/`)
+**Backend** (`hotel-booking/server`, CommonJS): Node + Express 4; Prisma 5 + PostgreSQL
+(`prisma/schema.prisma`, 25 моделей, схема живёт только в `prisma/migrations/`); Socket.io;
+JWT (`jsonwebtoken` + `bcryptjs`, версия сессии `Admin.tokenVersion`); helmet, express-rate-limit,
+express-validator; node-cron 4 (ночная копия 03:00, чистка журнала 03:30); winston (ротация
+5 МБ × 5, без значений query и без тел запросов в логах).
 
-**Frontend** (`hotel-booking/client`):
-- React 18 + **TypeScript** + Vite
-- Zustand — глобальное состояние (`client/src/store/`)
-- axios — HTTP (`client/src/api/`)
-- react-hook-form — формы
-- date-fns — работа с датами
-- `@tanstack/react-virtual` — виртуализация грида броней
-- socket.io-client — realtime
+**Frontend** (`hotel-booking/client`, ESM + TypeScript): React 18 + Vite; Zustand
+(`src/store/`: auth, grid, settings, roomFund, license, backupStatus, connection, realtime);
+axios (`src/api/`); react-hook-form; date-fns; `@tanstack/react-virtual`; socket.io-client.
 
-**Desktop** (`hotel-booking/electron`): Electron-обёртка.
+**Desktop** (`hotel-booking/electron`): Electron 44, electron-builder 26, `embedded-postgres`
+(PostgreSQL 18, initdb с builtin-локалью `C.UTF-8`). `main.js` — хост: запуск кластера,
+миграции через Prisma CLI, надзор за сервером и Postgres, копии, спутник пароля базы;
+`lib/` — чистые модули без `electron` (тестируются из `server/test`).
 
 ## Структура
 
 ```
 server/
-  server.js                  # точка входа
-  src/app.js                 # сборка Express-приложения
-  src/controllers/           # бизнес-логика (booking, room, allotment, optimize, ...)
-  src/routes/                # эндпоинты REST API
-  src/middleware/            # auth, validate, errorHandler
-  src/socket/socketManager.js# Socket.io
-  src/utils/                 # overlap, businessDate, snapshot, backup, flagEffects
-  prisma/schema.prisma       # 14 моделей: Room, Category, Booking, Allotment, Release, ...
+  server.js                   # точка входа (TZ=UTC, планировщики)
+  src/app.js                  # Express + health (503 при лежащей базе)
+  src/controllers/            # 22 контроллера: booking, payment, report, license, setup, user, service, rate…
+  src/routes/                 # REST по ресурсам; setup — публичный мастер первого запуска
+  src/middleware/             # auth, validate, errorHandler, audit (журнал действий), license (гейт 402)
+  src/socket/socketManager.js # realtime, разрыв сокета по сроку токена, документы гостей вырезаны
+  src/reports/                # движок отчётов: engine, expr (язык формул), export (csv/xlsx/docx), datasets/, definitions/
+  src/utils/                  # availability (пересечения), businessDate, bookingMoney, charges, backup, snapshot,
+                              # license (Ed25519 офлайн), sessions, hotelTz (местные сутки), setupState, guestDocFields…
+  prisma/schema.prisma, prisma/migrations/   # 0_init + миграции; exclusion-constraint booking_no_overlap в 0_init
+  scripts/license-issue.js    # выпуск лицензий (приватный ключ вне репозитория)
+  test/                       # vitest; helpers/fakePrisma.js — in-memory Prisma для тестов без базы
 client/
-  src/api/                   # клиенты REST (по одному файлу на ресурс)
-  src/components/            # UI; ключевой — BookingGrid/ и BookingModal/
-  src/store/                 # Zustand-сторы (auth, grid, settings)
-  src/types/index.ts         # общие типы
-  src/utils/                 # calculator, sortRooms
+  src/api/                    # клиенты REST (файл на ресурс), client.ts — 401 → оверлей повторного входа
+  src/components/             # BookingGrid/, BookingModal/, Payments/, Reports/, Rates/, Settings/, Setup/, ui/ConfirmDialog
+  src/store/, src/hooks/useSocket.ts, src/types/index.ts, src/utils/
+electron/
+  main.js, lib/{config,migrations,disk,logs}.js, db/seed.sql (только данные), test-host.mjs, SANDBOX-CHECKLIST.md
 ```
 
-## Доменные особенности (важно учитывать)
+## Доменные особенности
 
-- **Пересечения броней** — логика в `server/src/utils/overlap.js`. Любые изменения дат/комнат должны проверяться на overlap.
-- **Бизнес-дата** — `server/src/utils/businessDate.js`. Сутки в отеле не равны календарным; не сравнивай даты «в лоб».
-- **Оптимизатор** размещения — `server/src/controllers/optimizeController.js` (самый сложный модуль). Бэктест: `server/scripts/optimizer-backtest.js`.
-- **Аллотменты и релизы** (`Allotment`, `Release`) — квоты комнат для партнёров.
-- **Снапшоты и бэкапы** — `utils/snapshot.js`, `utils/backup.js`, по расписанию через node-cron.
-- **Realtime** — изменения броней рассылаются через Socket.io; при правках API проверяй, что соответствующее socket-событие тоже эмитится.
-- **Лицензии** — `routes/license.js`, проверка против `LICENSE_SERVER_URL`.
+- **Пересечения броней** — `utils/availability.js` (`findRoomBlock`) плюс constraint
+  `booking_no_overlap` в базе. Даты полуоткрытые: выезд в день заезда следующего — не пересечение.
+- **Бизнес-дата** — `utils/businessDate.js`: сутки отеля ≠ календарные; `@db.Date` хранятся как
+  UTC-полночь (`Date.UTC`, рендер с `timeZone: 'UTC'`). Моменты времени (`createdAt`, `paidAt`)
+  переводятся в местные сутки через `utils/hotelTz.js` (`HOTEL_TZ`, задаёт Electron).
+- **Деньги** — начисления (`BookingCharge`) и журнал платежей (`Payment`); `Booking.paidAmount` —
+  кэш. Предпросмотр сумм считает сервер. Переезд (цепочка) — один счёт на голове.
+- **Замок версии брони** — `PUT /bookings/:id` с `expectedUpdatedAt` → 409 `BOOKING_STALE`.
+- **Оптимизатор** — `controllers/optimizeController.js`; бэктест `scripts/optimizer-backtest.js`.
+- **Аллотменты и релизы** — квоты партнёров (предупреждение, `allotmentOverride`).
+- **Снимки** — по событиям (дебаунс), **копии** — 03:00, при старте (если старше 20 ч), каждые
+  4 ч и при выходе; папка копий — флешка, запасная — локальная.
+- **Realtime** — любое изменение брони эмитит `booking:*`; при правке API проверяй событие.
+- **Лицензия** — офлайн-ключ `QONAQ-…` с подписью Ed25519 (`utils/license.js`), гейт
+  обслуживания по `buildDate` сборки (`middleware/license.js`).
+- **Мастер первого запуска** — только на нетронутой базе (`utils/setupState.js`).
 
 ## Конвенции
 
-- Backend — CommonJS (`.js`), frontend — ESM + TypeScript (`"type": "module"`).
-- На каждый ресурс: контроллер + роут на сервере и зеркальный файл в `client/src/api/`.
-- Состояние UI — только через Zustand-сторы, не локальный useState для общих данных.
-- Все ошибки сервера идут через `middleware/errorHandler.js`.
+- На каждый ресурс: контроллер + роут на сервере и файл в `client/src/api/`.
+- Общее состояние UI — в Zustand-сторах, не в локальном `useState`.
+- Ошибки сервера — через `middleware/errorHandler.js`; ошибки с `code` для клиента (`BOOKING_STALE`, `SETUP_DONE`, `SERVICE_IN_USE`).
+- **Изменение схемы = `schema.prisma` + миграция в одном изменении**; `db push` не используем.
+- Опасные действия в UI подтверждаются `ui/ConfirmDialog` с числом (сколько сотрёт).
 
-## Гочи / на что смотреть
+## Гочи
 
-- **`npm run build` падает на ошибках типов** — билд клиента это `tsc && vite build`. После правок в `client/` проверяй типы: `cd client && npx tsc --noEmit`.
-- **Линтера и тестов в проекте нет** — изменения проверяй запуском приложения и typecheck'ом вручную.
-- Секреты — в `server/.env` (в `.gitignore`). Шаблон — `.env.example`.
-- **Журнал проекта:** живая часть — `hotel-booking/NOTES.md` (что делаем дальше,
-  открытые проблемы, грабли, как запускать). Читать всегда.
-  Принятые решения вынесены по областям в `hotel-booking/docs/decisions/`:
-  `data-and-money` (схема, миграции, цены, начисления, платежи),
-  `bookings` (брони, смены, метки, оптимизатор), `interface` (навигация, разделы),
-  `desktop-and-ops` (Electron, эксплуатация), `reports` (движок отчётов).
-  Исторические аудиты и отчёты по волнам починки — в `hotel-booking/docs/archive/`.
-  Закрыл пункт — пометь `[x]` с датой, не удаляй.
+- `npm run build` падает на ошибках типов — после правок в `client/` гоняй `tsc`.
+- Линтера нет. Тесты есть — прогоняй; слой роутов (валидаторы) без supertest не покрыт.
+- Сервер в dev — `node server.js`, правки не подхватывает: перезапускай (и фоновые задачи тоже).
+- `prisma generate` падает с EPERM при запущенном сервере.
+- `npm run build` штампует `buildDate` в `server/package.json` — после сборки вернуть файл.
+- electron-builder 26 отсекает корневой `node_modules` у `extraResources` — сервер копируется
+  двумя FileSet'ами (`electron/package.json`).
+- Секреты — `server/.env` (шаблон `hotel-booking/.env.example`); приватный ключ лицензий —
+  вне репозитория; `*.pem` игнорируется.
+- **Журнал:** живая часть — `hotel-booking/NOTES.md` (точка входа, открытые проблемы, как
+  запускать, клон, сборка). Решения по областям — `hotel-booking/docs/decisions/`
+  (`data-and-money`, `bookings`, `interface`, `desktop-and-ops`, `reports`). Аудит 2026-09 —
+  `docs/audit-2026-09/`, старое — `docs/archive/`. Закрыл пункт — пометь `[x]` с датой, не удаляй.
 
-## Подключённые MCP-коннекторы (`.mcp.json`)
+## MCP-коннекторы (`.mcp.json`)
 
-- **postgres** — прямой доступ к схеме и данным локальной БД (read-only). Используй для проверки структуры таблиц и реальных данных вместо догадок.
-- **context7** — актуальная документация библиотек под их версии (Prisma 5, react-virtual 3, socket.io 4 и т.д.). Вызывай при работе с API этих библиотек.
+- **postgres** — dev-база, только чтение: проверять структуру и реальные данные вместо догадок.
+- **context7** — актуальная документация библиотек под их версии.

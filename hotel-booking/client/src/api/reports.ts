@@ -261,11 +261,9 @@ export async function runReport(id: string, params: Record<string, any>): Promis
   return data.data
 }
 
-/** Описание источников данных — основа будущего конструктора отчётов. */
-export async function fetchDatasets(): Promise<DatasetInfo[]> {
-  const { data } = await api.get('/reports/datasets')
-  return data.data
-}
+// `GET /reports/datasets` (основа будущего конструктора отчётов) с клиента пока
+// не зовётся: список датасетов приходит в `fetchReportMeta`. Обёртка убрана как
+// мёртвая (D9-013), роут на сервере остался.
 
 export async function fetchReportMeta(): Promise<ReportMeta> {
   const { data } = await api.get('/reports/meta')

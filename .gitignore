@@ -41,6 +41,10 @@ _design_import/
 
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json
+# Пароль dev-базы и абсолютные пути машины — в git не место, образцы рядом:
+# .mcp.json.example и .claude/launch.example.json
+.mcp.json
+.claude/launch.json
 
 # OS
 Thumbs.db

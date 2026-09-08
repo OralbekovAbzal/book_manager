@@ -19,7 +19,7 @@
         "npx",
         "-y",
         "@modelcontextprotocol/server-postgres",
-        "postgresql://postgres:password@localhost:5432/hotel_booking"
+        "postgresql://postgres:<пароль>@localhost:5432/hotel_booking"
       ],
       "env": {}
     }

@@ -1,0 +1,47 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Hotel Server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "-e",
+        "process.env.SNAPSHOT_KEEP_AUTO=process.env.SNAPSHOT_KEEP_AUTO||\"60\";process.env.SNAPSHOT_KEEP_SAFETY=process.env.SNAPSHOT_KEEP_SAFETY||\"30\";process.chdir(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/server\");require(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/server/server.js\")"
+      ],
+      "port": 3001,
+      "autoPort": false
+    },
+    {
+      "name": "Hotel Server (3011)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "-e",
+        "process.env.PORT=\"3011\";process.env.SNAPSHOT_KEEP_AUTO=process.env.SNAPSHOT_KEEP_AUTO||\"60\";process.env.SNAPSHOT_KEEP_SAFETY=process.env.SNAPSHOT_KEEP_SAFETY||\"30\";process.chdir(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/server\");require(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/server/server.js\")"
+      ],
+      "port": 3011,
+      "autoPort": false
+    },
+    {
+      "name": "Hotel Client (→3011)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "-e",
+        "process.env.API_TARGET=\"http://localhost:3011\";process.chdir(\"C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/client\");process.argv.push(\"vite\",\"--port\",\"5174\",\"--strictPort\");import(\"file:///C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/client/node_modules/vite/bin/vite.js\")"
+      ],
+      "port": 5174,
+      "autoPort": false
+    },
+    {
+      "name": "Hotel Client",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/client/node_modules/vite/bin/vite.js",
+        "C:/Users/abzal/OneDrive/Desktop/Book_manager/hotel-booking/client",
+        "--port",
+        "5173"
+      ],
+      "port": 5173,
+      "autoPort": false
+    }
+  ]
+}

@@ -159,10 +159,8 @@ export async function fetchCurrentShiftSummary(): Promise<ShiftSummary> {
   return data.data
 }
 
-export async function fetchShiftSummary(shiftId: number): Promise<ShiftSummary> {
-  const { data } = await api.get(`/payments/shift/${shiftId}/summary`)
-  return data.data
-}
+// Касса произвольной смены (`GET /payments/shift/:id/summary`) с клиента не
+// запрашивается — экран кассы показывает только текущую смену (D9-013).
 
 export interface CreatePaymentPayload {
   bookingId: number

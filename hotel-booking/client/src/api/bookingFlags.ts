@@ -21,16 +21,6 @@ export async function fetchBookingFlags(): Promise<BookingFlagItem[]> {
   return (data.data as FlagRow[]).map(toItem)
 }
 
-export async function createBookingFlag(payload: { label: string; effects?: FlagEffects; order?: number }): Promise<BookingFlagItem> {
-  const { data } = await api.post('/booking-flags', payload)
-  return toItem(data.data)
-}
-
-export async function updateBookingFlag(code: string, payload: { label?: string; effects?: FlagEffects | null; order?: number }): Promise<BookingFlagItem> {
-  const { data } = await api.put(`/booking-flags/${code}`, payload)
-  return toItem(data.data)
-}
-
-export async function deleteBookingFlag(code: string): Promise<void> {
-  await api.delete(`/booking-flags/${code}`)
-}
+// Создание, правка и удаление меток с клиента не вызываются: в интерфейсе метки
+// только выбираются из справочника. Роуты `POST/PUT/DELETE /booking-flags` на
+// сервере остались — обёртки убраны как мёртвые (D9-013).

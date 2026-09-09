@@ -16,6 +16,7 @@
     "db:migrate:status": "cd server && npx prisma migrate status",
     "db:migrate:baseline": "cd server && npx prisma migrate resolve --applied 0_init",
     "db:seed": "cd server && npm run seed",
+    "db:demo": "cd server && node scripts/demo-seed.js",
     "db:studio": "cd server && npx prisma studio",
     "db:generate": "cd server && npx prisma generate",
     "install:all": "npm install && cd server && npm install && cd ../client && npm install && cd ../electron && npm install"

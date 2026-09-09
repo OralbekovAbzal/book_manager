@@ -769,7 +769,7 @@ function validateDump(dump) {
   return dump
 }
 
-const NOT_A_BACKUP = 'Это не файл резервной копии Qonaq'
+const NOT_A_BACKUP = 'Это не файл резервной копии Roomline PMS'
 
 /** Исходное имя файла → безопасный хвост имени в папке копий (см. FILE_RE). */
 function safeImportName(originalName) {

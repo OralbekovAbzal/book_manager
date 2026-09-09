@@ -72,7 +72,7 @@ export const StepRestore: React.FC<Props> = ({ onDone }) => {
       setAgreed(false)
     } catch (e) {
       // Текст сервера объясняет причину лучше нашей заглушки: «это не файл копии
-      // Qonaq», «файл повреждён», «слишком большой».
+      // Roomline PMS», «файл повреждён», «слишком большой».
       setError(readRestoreFailure(e, 'Сервер не принял этот файл').message)
       setAccepted(null)
     } finally {
@@ -232,7 +232,7 @@ export const StepRestore: React.FC<Props> = ({ onDone }) => {
     <div>
       <StepHeading
         title="Перенос данных с прошлого компьютера"
-        text="Если у вас есть файл резервной копии Qonaq (обычно на флешке, backup_*.json), выберите его — брони, касса и настройки восстановятся."
+        text="Если у вас есть файл резервной копии Roomline PMS (обычно на флешке, backup_*.json), выберите его — брони, касса и настройки восстановятся."
       />
       <div style={noteStyle}>
         Ничего переносить не нужно, если это первая установка: пропустите шаг и начните с чистой базы.

@@ -76,11 +76,11 @@ export const AboutSection: React.FC = () => {
 
       <div style={formCard}>
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 10 }}>
-          <span style={{ fontSize: '1.08rem', fontWeight: 700 }}>Hotel Booking</span>
+          <span style={{ fontSize: '1.08rem', fontWeight: 700 }}>Roomline PMS</span>
           <span className="mono" style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>версия {version}</span>
         </div>
         <div style={{ fontSize: '0.86rem', color: 'var(--text-faint)', lineHeight: 1.5 }}>
-          Система бронирования отеля: шахматка, брони, тарифы, справочник, оптимизатор размещения.
+          Roomline PMS — система бронирования отеля: шахматка, брони, тарифы, справочник, оптимизатор размещения.
         </div>
       </div>
 

@@ -57,7 +57,7 @@ afterEach(() => {
 })
 
 /** Путь на заведомо отсутствующем диске: ровно «флешку вынули». */
-const NO_DRIVE = process.platform === 'win32' ? 'Q:\\nope\\Qonaq' : '/nope-drive/Qonaq'
+const NO_DRIVE = process.platform === 'win32' ? 'Q:\\nope\\Roomline' : '/nope-drive/Roomline'
 const isWin = process.platform === 'win32'
 
 const jsonFiles = (dir) => (fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.json')) : [])
@@ -304,7 +304,7 @@ describe('копия при недоступной BACKUP_PATH', () => {
     const busy = path.join(root, 'not-a-dir')
     fs.writeFileSync(busy, 'я файл, а не папка', 'utf8')
     const { prisma, logs } = makeDb()
-    const backup = loadBackup({ prisma, target: path.join(busy, 'Qonaq') })
+    const backup = loadBackup({ prisma, target: path.join(busy, 'Roomline') })
 
     const res = await backup.createBackup()
 
@@ -346,7 +346,7 @@ describe('копия при недоступной BACKUP_PATH', () => {
   })
 
   it('несуществующая папка на СУЩЕСТВУЮЩЕМ диске создаётся сама — это первая настройка', async () => {
-    const fresh = path.join(root, 'usb', 'Qonaq-копии')
+    const fresh = path.join(root, 'usb', 'Roomline-копии')
     const { prisma } = makeDb()
     const backup = loadBackup({ prisma, target: fresh })
 
@@ -646,12 +646,12 @@ describe('загрузка копии с другого компьютера', (
     expect(impact.requiresConfirmation).toBe(true)
   })
 
-  it('мусор вместо копии — 400 «Это не файл резервной копии Qonaq»', async () => {
+  it('мусор вместо копии — 400 «Это не файл резервной копии Roomline PMS»', async () => {
     const { prisma } = makeDb()
     const backup = loadBackup({ prisma })
 
     expect(() => backup.importBackupDump({ hello: 1 }, 'hello.json'))
-      .toThrow('Это не файл резервной копии Qonaq')
+      .toThrow('Это не файл резервной копии Roomline PMS')
     try { backup.importBackupDump({ hello: 1 }, 'hello.json') } catch (e) { expect(e.status).toBe(400) }
     expect(jsonFiles(usb)).toHaveLength(0)
   })
@@ -663,7 +663,7 @@ describe('загрузка копии с другого компьютера', (
     // Формально форма верна (version + tables), но ни одной нашей таблицы нет
     expect(() => backup.importBackupDump(
       { version: 2, tables: { Users: [{ id: 1 }], Orders: [] } }, 'other-app.json',
-    )).toThrow('Это не файл резервной копии Qonaq')
+    )).toThrow('Это не файл резервной копии Roomline PMS')
     expect(jsonFiles(usb)).toHaveLength(0)
   })
 

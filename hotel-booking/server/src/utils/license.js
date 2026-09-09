@@ -1,5 +1,5 @@
 /**
- * Офлайн-лицензия Qonaq.
+ * Офлайн-лицензия Roomline PMS.
  *
  * Почему так, а не онлайн-проверка: программа стоит в отеле, где интернета может
  * не быть неделями. Любой поход на сервер лицензий превращается в «программа не
@@ -12,9 +12,14 @@
  * так делает. Ключ привязан к НАЗВАНИЮ объекта: скопировать его соседней базе
  * отдыха технически можно, но там будет чужое название в шапке программы.
  *
- * Формат ключа:  QONAQ-<payload>.<signature>
+ * Формат ключа:  ROOMLINE-<payload>.<signature>
  *   payload   — base64url(JSON { v, id, hotel, rooms, issuedAt, maintenanceUntil })
  *   signature — base64url(Ed25519-подпись над СТРОКОЙ payload как она передана)
+ *
+ * Продукт переименован Qonaq → Roomline PMS 09.09.2026. Новые ключи выпускаются с
+ * префиксом ROOMLINE-, старые QONAQ- принимаются навсегда: подпись покрывает только
+ * payload, префикс — метка для человека. У первого клиента на руках ключ старого
+ * образца, и «перевыпустите ключ» по телефону дороже одной строки кода.
  *
  * Подписывается именно строка base64url, а не разобранный JSON: так проверка не
  * зависит от порядка полей и от того, как конкретный JSON.stringify расставит
@@ -25,7 +30,9 @@ const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 
-const KEY_PREFIX = 'QONAQ-'
+const KEY_PREFIX = 'ROOMLINE-'
+/** Префиксы прежних имён продукта — только на чтение, новые ключи ими не выпускаются. */
+const LEGACY_KEY_PREFIXES = ['QONAQ-']
 const SUPPORTED_VERSION = 1
 
 /**
@@ -191,9 +198,11 @@ function parseLicenseKey(rawKey, { publicKeyPem = PUBLIC_KEY_PEM } = {}) {
   // Ключ администратор копирует из письма или из .txt — пробелы и переносы строк
   // прилипают почти всегда. В base64url их быть не может, так что выкидываем молча.
   const key = rawKey.replace(/\s+/g, '')
-  if (!key.startsWith(KEY_PREFIX)) return bad('malformed')
+  // Префикс подписью не покрыт — срезаем любой известный, старый ключ остаётся годным.
+  const prefix = [KEY_PREFIX, ...LEGACY_KEY_PREFIXES].find((p) => key.startsWith(p))
+  if (!prefix) return bad('malformed')
 
-  const body = key.slice(KEY_PREFIX.length)
+  const body = key.slice(prefix.length)
   const dot = body.indexOf('.')
   if (dot <= 0 || dot === body.length - 1) return bad('malformed')
   const payloadB64 = body.slice(0, dot)
@@ -252,14 +261,15 @@ function buildDateFromPackage() {
  * Штамп ставится в server/package.json при упаковке (scripts/stamp-build-date.js,
  * вызывается из `npm run build:electron`), поэтому в установленной у клиента
  * программе дата настоящая и не меняется от того, какое сегодня число.
- * QONAQ_BUILD_DATE — ручной обход для тестов и разбора обращений.
+ * ROOMLINE_BUILD_DATE — ручной обход для тестов и разбора обращений; прежнее имя
+ * QONAQ_BUILD_DATE читается как запасное, чтобы чужие .env не перестали работать.
  *
  * null (в репозитории поля нет) означает «дата неизвестна» — и тогда гейт
  * обслуживания НЕ включается. Это сознательный выбор в пользу клиента: доказать,
  * что сборка новее оплаченного обслуживания, мы в этом случае не можем.
  */
 function getBuildDate() {
-  const fromEnv = process.env.QONAQ_BUILD_DATE
+  const fromEnv = process.env.ROOMLINE_BUILD_DATE || process.env.QONAQ_BUILD_DATE
   if (isIsoDate(fromEnv)) return fromEnv
   return buildDateFromPackage()
 }
@@ -357,6 +367,7 @@ const roomLimitMessage = (limit) =>
 
 module.exports = {
   KEY_PREFIX,
+  LEGACY_KEY_PREFIXES,
   SUPPORTED_VERSION,
   PUBLIC_KEY_PEM,
   issueLicense,

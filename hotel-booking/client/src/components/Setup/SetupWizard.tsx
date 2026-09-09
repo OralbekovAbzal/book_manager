@@ -183,9 +183,9 @@ export const SetupWizard: React.FC<Props> = ({ onComplete }) => {
           <div style={{
             width: 32, height: 32, borderRadius: 8, background: 'var(--accent)', color: '#fff',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: '1.1rem',
-          }}>H</div>
+          }}>R</div>
           <div style={{ lineHeight: 1.2 }}>
-            <div style={{ fontWeight: 600, fontSize: '1rem' }}>Hotel Booking</div>
+            <div style={{ fontWeight: 600, fontSize: '1rem' }}>Roomline PMS</div>
             <div style={{ fontSize: '0.8rem', color: 'var(--text-faint)' }}>Первичная настройка</div>
           </div>
         </div>

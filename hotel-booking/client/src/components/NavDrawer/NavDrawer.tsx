@@ -76,9 +76,9 @@ export const NavDrawer: React.FC<Props> = ({ open, active, hotelName, adminName,
       }}>
         {/* Шапка панели */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 11, height: 52, flexShrink: 0, padding: '0 16px', borderBottom: '1px solid var(--border-subtle)' }}>
-          <div style={{ width: 26, height: 26, borderRadius: 7, background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 14 }}>H</div>
+          <div style={{ width: 26, height: 26, borderRadius: 7, background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 700, fontSize: 14 }}>R</div>
           <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
-            <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-0.01em' }}>Hotel Booking</span>
+            <span style={{ fontSize: 13, fontWeight: 600, letterSpacing: '-0.01em' }}>Roomline PMS</span>
             <span style={{ fontSize: 10.5, color: 'var(--text-faint)' }}>{hotelName}</span>
           </div>
           <span style={{ flex: 1 }} />

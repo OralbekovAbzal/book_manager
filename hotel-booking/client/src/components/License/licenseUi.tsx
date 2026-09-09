@@ -138,7 +138,7 @@ export const LicenseKeyForm: React.FC<KeyFormProps> = ({ canEdit, autoFocus, onA
           onChange={e => setKey(e.target.value)}
           autoFocus={autoFocus}
           spellCheck={false}
-          placeholder="QONAQ-…"
+          placeholder="ROOMLINE-…"
           style={keyAreaStyle}
         />
         <div style={{ fontSize: '0.78rem', color: 'var(--text-faint)', marginTop: 5, lineHeight: 1.45 }}>

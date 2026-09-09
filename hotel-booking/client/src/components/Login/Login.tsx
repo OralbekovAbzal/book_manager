@@ -74,7 +74,7 @@ export const Login: React.FC<Props> = ({ serverError }) => {
         <div style={{ textAlign: 'center', marginBottom: 28 }}>
           <div style={{ fontSize: 40, marginBottom: 8 }}>🏨</div>
           <h1 style={{ margin: 0, fontSize: '1.54rem', fontWeight: 700, color: 'var(--text)' }}>
-            Система бронирования
+            Roomline PMS
           </h1>
           <p style={{ margin: '6px 0 0', fontSize: '1rem', color: 'var(--text-faint)' }}>
             Войдите в аккаунт

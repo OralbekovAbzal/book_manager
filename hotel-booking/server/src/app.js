@@ -55,7 +55,7 @@ app.use('/api/system/backup/upload', (err, _req, res, next) => {
     return res.status(413).json({ error: 'Файл копии слишком большой (максимум 200 МБ)' })
   }
   if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
-    return res.status(400).json({ error: 'Это не файл резервной копии Qonaq' })
+    return res.status(400).json({ error: 'Это не файл резервной копии Roomline PMS' })
   }
   return next(err)
 })

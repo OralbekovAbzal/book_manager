@@ -2,8 +2,8 @@
   "name": "hotel-booking-desktop",
   "version": "1.0.0",
   "private": true,
-  "description": "Система бронирования отеля — десктоп (хост/клиент)",
-  "author": "Hotel Booking",
+  "description": "Roomline PMS — система бронирования (хост/клиент)",
+  "author": "Roomline",
   "main": "main.js",
   "scripts": {
     "dev": "electron .",
@@ -20,7 +20,7 @@
   },
   "build": {
     "appId": "com.hotelbooking.desktop",
-    "productName": "Система бронирования",
+    "productName": "Roomline PMS",
     "directories": {
       "output": "dist"
     },
@@ -92,7 +92,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Система бронирования"
+      "shortcutName": "Roomline PMS"
     }
   }
 }

@@ -242,10 +242,10 @@ export const App: React.FC = () => {
               letterSpacing: '-0.02em', cursor: 'pointer',
             }}
           >
-            H
+            R
           </button>
           <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
-            Hotel Booking
+            Roomline PMS
           </span>
           {!narrow && (
             <>

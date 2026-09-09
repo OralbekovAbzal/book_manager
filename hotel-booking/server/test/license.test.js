@@ -4,7 +4,7 @@ import { loadCjs, silentLogger } from './helpers/loadCjs.js'
 import { createFakePrisma } from './helpers/fakePrisma.js'
 
 /**
- * Лицензия Qonaq.
+ * Лицензия Roomline PMS.
  *
  * Стеречь здесь нужно две вещи, у которых цена ошибки разная:
  *  1) подпись — если её можно подделать или обойти, весь механизм бессмыслен;
@@ -54,7 +54,7 @@ describe('ключ: выпуск и проверка подписи', () => {
 
   it('свой ключ проходит проверку и отдаёт те поля, что в него положили', () => {
     const key = makeKey(lib)
-    expect(key.startsWith('QONAQ-')).toBe(true)
+    expect(key.startsWith('ROOMLINE-')).toBe(true)
 
     const res = lib.parseLicenseKey(key, opts)
     expect(res.valid).toBe(true)
@@ -70,14 +70,14 @@ describe('ключ: выпуск и проверка подписи', () => {
 
   it('подделанный payload не проходит — цифру номеров подписью не прикроешь', () => {
     const key = makeKey(lib)
-    const [head, sig] = key.slice('QONAQ-'.length).split('.')
+    const [head, sig] = key.slice('ROOMLINE-'.length).split('.')
     const payload = JSON.parse(Buffer.from(head, 'base64url').toString('utf8'))
 
     // Ровно то, что попробует сделать человек с текстовым редактором: 45 → 500.
     payload.rooms = 500
     const forged = Buffer.from(JSON.stringify(payload)).toString('base64url')
 
-    const res = lib.parseLicenseKey(`QONAQ-${forged}.${sig}`, opts)
+    const res = lib.parseLicenseKey(`ROOMLINE-${forged}.${sig}`, opts)
     expect(res.valid).toBe(false)
     expect(res.code).toBe('bad_signature')
     expect(res.message).toBe('Подпись не сходится')
@@ -98,28 +98,52 @@ describe('ключ: выпуск и проверка подписи', () => {
     ).toString('base64url')
     const sig = crypto.sign(null, Buffer.from(payload, 'utf8'), TEST_PRIVATE).toString('base64url')
 
-    const res = lib.parseLicenseKey(`QONAQ-${payload}.${sig}`, opts)
+    const res = lib.parseLicenseKey(`ROOMLINE-${payload}.${sig}`, opts)
     expect(res.valid).toBe(false)
     expect(res.code).toBe('unknown_version')
   })
 
   it('самодельный v: 2 БЕЗ подписи получает «подпись не сходится», а не подсказку про версию', () => {
     const payload = Buffer.from(JSON.stringify({ v: 2, rooms: 999 })).toString('base64url')
-    const res = lib.parseLicenseKey(`QONAQ-${payload}.AAAA`, opts)
+    const res = lib.parseLicenseKey(`ROOMLINE-${payload}.AAAA`, opts)
     expect(res.code).toBe('bad_signature')
   })
 
   it.each([
     ['пустая строка', ''],
     ['без префикса', 'eyJ2IjoxfQ.AAAA'],
-    ['без подписи', 'QONAQ-eyJ2IjoxfQ'],
-    ['пустая подпись', 'QONAQ-eyJ2IjoxfQ.'],
-    ['пустой payload', 'QONAQ-.AAAA'],
-    ['не base64url', 'QONAQ-не-base64!!.AAAA'],
-    ['не JSON внутри', `QONAQ-${Buffer.from('просто текст').toString('base64url')}.AAAA`],
-    ['не объект', `QONAQ-${Buffer.from('[1,2,3]').toString('base64url')}.AAAA`],
+    ['без подписи', 'ROOMLINE-eyJ2IjoxfQ'],
+    ['пустая подпись', 'ROOMLINE-eyJ2IjoxfQ.'],
+    ['пустой payload', 'ROOMLINE-.AAAA'],
+    ['не base64url', 'ROOMLINE-не-base64!!.AAAA'],
+    ['не JSON внутри', `ROOMLINE-${Buffer.from('просто текст').toString('base64url')}.AAAA`],
+    ['не объект', `ROOMLINE-${Buffer.from('[1,2,3]').toString('base64url')}.AAAA`],
   ])('повреждённый ключ (%s) — «Ключ повреждён»', (_name, key) => {
     const res = lib.parseLicenseKey(key, opts)
+    expect(res.valid).toBe(false)
+    expect(res.code).toBe('malformed')
+  })
+
+  // Продукт переименован Qonaq → Roomline PMS 09.09.2026. Префикс подписью не
+  // покрыт, поэтому старый ключ остаётся годным навсегда: у первого клиента на
+  // руках именно такой, и «перевыпустите ключ» по телефону мы ему не скажем.
+  it('новые ключи выпускаются с ROOMLINE-, а QONAQ- остаётся в списке читаемых', () => {
+    expect(lib.KEY_PREFIX).toBe('ROOMLINE-')
+    expect(lib.LEGACY_KEY_PREFIXES).toEqual(['QONAQ-'])
+    expect(makeKey(lib).startsWith('ROOMLINE-')).toBe(true)
+  })
+
+  it('ключ прежнего образца QONAQ- проверяется как валидный', () => {
+    const key = makeKey(lib)
+    const legacy = `QONAQ-${key.slice(lib.KEY_PREFIX.length)}`
+    const res = lib.parseLicenseKey(legacy, opts)
+    expect(res.valid).toBe(true)
+    expect(res.payload.rooms).toBe(45)
+  })
+
+  it('выдуманный префикс не принимается — «Ключ повреждён»', () => {
+    const key = makeKey(lib)
+    const res = lib.parseLicenseKey(`FOO-${key.slice(lib.KEY_PREFIX.length)}`, opts)
     expect(res.valid).toBe(false)
     expect(res.code).toBe('malformed')
   })
@@ -142,7 +166,7 @@ describe('ключ: выпуск и проверка подписи', () => {
       JSON.stringify({ v: 1, id: 'x', hotel: '', rooms: 0, issuedAt: '2026-13-40', maintenanceUntil: 'позже' }),
     ).toString('base64url')
     const sig = crypto.sign(null, Buffer.from(payload, 'utf8'), TEST_PRIVATE).toString('base64url')
-    expect(lib.parseLicenseKey(`QONAQ-${payload}.${sig}`, opts).code).toBe('malformed')
+    expect(lib.parseLicenseKey(`ROOMLINE-${payload}.${sig}`, opts).code).toBe('malformed')
   })
 
   it('issueLicense не выпускает ключ с бессмысленными данными', () => {
@@ -176,21 +200,38 @@ describe('ключ: выпуск и проверка подписи', () => {
 
 describe('дата сборки', () => {
   const lib = loadLicense()
-  const saved = process.env.QONAQ_BUILD_DATE
+  const saved = process.env.ROOMLINE_BUILD_DATE
+  const savedLegacy = process.env.QONAQ_BUILD_DATE
 
   afterEach(() => {
-    if (saved === undefined) delete process.env.QONAQ_BUILD_DATE
-    else process.env.QONAQ_BUILD_DATE = saved
+    if (saved === undefined) delete process.env.ROOMLINE_BUILD_DATE
+    else process.env.ROOMLINE_BUILD_DATE = saved
+    if (savedLegacy === undefined) delete process.env.QONAQ_BUILD_DATE
+    else process.env.QONAQ_BUILD_DATE = savedLegacy
   })
 
-  it('QONAQ_BUILD_DATE перебивает package.json', () => {
-    process.env.QONAQ_BUILD_DATE = '2028-01-31'
+  it('ROOMLINE_BUILD_DATE перебивает package.json', () => {
+    process.env.ROOMLINE_BUILD_DATE = '2028-01-31'
     expect(lib.getBuildDate()).toBe('2028-01-31')
   })
 
-  it('мусор в QONAQ_BUILD_DATE игнорируется, а не ломает сравнение', () => {
+  // Переменная переименована вместе с продуктом; чужой .env с прежним именем
+  // должен продолжать работать, иначе разбор обращения начнётся с «а почему гейт».
+  it('прежнее имя QONAQ_BUILD_DATE читается как запасное', () => {
+    delete process.env.ROOMLINE_BUILD_DATE
+    process.env.QONAQ_BUILD_DATE = '2029-03-04'
+    expect(lib.getBuildDate()).toBe('2029-03-04')
+  })
+
+  it('новое имя главнее прежнего', () => {
+    process.env.QONAQ_BUILD_DATE = '2029-03-04'
+    process.env.ROOMLINE_BUILD_DATE = '2028-01-31'
+    expect(lib.getBuildDate()).toBe('2028-01-31')
+  })
+
+  it('мусор в ROOMLINE_BUILD_DATE игнорируется, а не ломает сравнение', () => {
     for (const v of ['вчера', '2028-13-01', '2028-02-30', '31.01.2028', '']) {
-      process.env.QONAQ_BUILD_DATE = v
+      process.env.ROOMLINE_BUILD_DATE = v
       expect(lib.getBuildDate()).not.toBe(v)
     }
   })
@@ -231,7 +272,7 @@ describe('состояние лицензии', () => {
   })
 
   it('битый ключ — invalid, но это не «expired»: ограничивать за него нечего', () => {
-    expect(state('QONAQ-мусор.мусор', '2030-01-01')).toBe('invalid')
+    expect(state('ROOMLINE-мусор.мусор', '2030-01-01')).toBe('invalid')
   })
 
   it('describeLicense отдаёт клиенту весь контракт', () => {
@@ -283,7 +324,7 @@ describe('лимит номеров', () => {
   })
 
   it('битый ключ тоже не ограничивает (не наказываем отель за испорченную строку в базе)', async () => {
-    const { lib } = setup('QONAQ-мусор.мусор')
+    const { lib } = setup('ROOMLINE-мусор.мусор')
     expect(await lib.getRoomLimit()).toBeNull()
   })
 
@@ -293,13 +334,13 @@ describe('лимит номеров', () => {
   })
 
   it('после конца обслуживания лимит остаётся — ключ на 45 номеров и есть ключ на 45', async () => {
-    process.env.QONAQ_BUILD_DATE = '2030-01-01'
+    process.env.ROOMLINE_BUILD_DATE = '2030-01-01'
     try {
       const { lib } = setup(makeKey(signer, { rooms: 45, maintenanceUntil: '2027-09-06' }))
       expect((await lib.getLicenseState()).state).toBe('expired')
       expect(await lib.getRoomLimit()).toBe(45)
     } finally {
-      delete process.env.QONAQ_BUILD_DATE
+      delete process.env.ROOMLINE_BUILD_DATE
     }
   })
 
@@ -420,10 +461,10 @@ describe('контроллер /api/license', () => {
 
   it('POST с подделанным ключом → 400 и внятная причина, база не меняется', async () => {
     const key = makeKey(signer)
-    const [head, sig] = key.slice('QONAQ-'.length).split('.')
+    const [head, sig] = key.slice('ROOMLINE-'.length).split('.')
     const payload = JSON.parse(Buffer.from(head, 'base64url').toString('utf8'))
     payload.rooms = 500
-    const forged = `QONAQ-${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${sig}`
+    const forged = `ROOMLINE-${Buffer.from(JSON.stringify(payload)).toString('base64url')}.${sig}`
 
     const { ctrl, prisma } = setup()
     const { err } = await invoke(ctrl.activate, { body: { key: forged } })

@@ -311,8 +311,8 @@ describe('migrations.js — что показать человеку при уп
     const text = describeMigrationFailure({
       name: '20260908065802_wave5b_account_and_quota',
       logs: 'ERROR: column "accountBookingId" of relation "Booking" already exists\nSTATEMENT: ALTER TABLE',
-      copyPath: 'C:\\Users\\admin\\AppData\\Roaming\\Qonaq\\pgdata-before-update',
-      logPath: 'C:\\Users\\admin\\AppData\\Roaming\\Qonaq\\logs\\migrate.log',
+      copyPath: 'C:\\Users\\admin\\AppData\\Roaming\\hotel-booking-desktop\\pgdata-before-update',
+      logPath: 'C:\\Users\\admin\\AppData\\Roaming\\hotel-booking-desktop\\logs\\migrate.log',
     })
 
     expect(typeof text).toBe('string')

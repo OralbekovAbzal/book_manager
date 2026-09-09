@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Выпуск лицензионных ключей Qonaq — инструмент РАЗРАБОТЧИКА.
+ * Выпуск лицензионных ключей Roomline PMS — инструмент РАЗРАБОТЧИКА.
  *
  * Папка scripts/ исключена из сборки Electron (electron/package.json → filter),
  * поэтому к клиенту этот файл не уезжает. Приватного ключа в репозитории нет и
@@ -16,7 +16,8 @@
  *   node scripts/license-issue.js --keygen
  *   node scripts/license-issue.js --hotel "База отдыха «Туран»" --rooms 45 --until 2027-09-06
  *   … --out "C:\путь\Туран.key.txt"      сохранить ключ в файл
- *   … --check "QONAQ-…"                  проверить готовый ключ этой сборкой
+ *   … --check "ROOMLINE-…"               проверить готовый ключ этой сборкой
+ *                                        (ключи QONAQ-… прежнего образца тоже принимаются)
  */
 
 const fs = require('fs')
@@ -31,11 +32,17 @@ const {
 
 // Куда кладём приватный ключ. OneDrive — сознательно: единственная копия на
 // локальном диске умрёт вместе с диском.
+// Прежние имена переменных (QONAQ_*) читаются как запасные: переименование продукта
+// не повод искать, почему у разработчика перестал находиться приватный ключ.
+// Имя самого файла .pem НЕ меняем — это существующий файл, а не текст для человека.
 const KEYS_DIR =
+  process.env.ROOMLINE_LICENSE_KEYS_DIR ||
   process.env.QONAQ_LICENSE_KEYS_DIR ||
-  path.join('C:', 'Users', 'abzal', 'OneDrive', 'Desktop', 'Qonaq — документы', '03 Ключи')
+  path.join('C:', 'Users', 'abzal', 'OneDrive', 'Desktop', 'Roomline — документы', '03 Ключи')
 const PRIVATE_KEY_PATH =
-  process.env.QONAQ_LICENSE_PRIVATE_KEY || path.join(KEYS_DIR, 'qonaq-license-private.pem')
+  process.env.ROOMLINE_LICENSE_PRIVATE_KEY ||
+  process.env.QONAQ_LICENSE_PRIVATE_KEY ||
+  path.join(KEYS_DIR, 'qonaq-license-private.pem')
 
 function parseArgs(argv) {
   const out = { _: [] }
@@ -64,7 +71,7 @@ function die(msg) {
 
 function usage() {
   console.log(`
-  Выпуск лицензионных ключей Qonaq
+  Выпуск лицензионных ключей Roomline PMS
 
     node scripts/license-issue.js --keygen
         Создаёт пару ключей ОДИН РАЗ. Приватный → ${PRIVATE_KEY_PATH}
@@ -74,7 +81,7 @@ function usage() {
         Выпускает ключ. Необязательно: --issued 2026-09-06, --id <свой-id>,
         --out "путь\\к\\файлу.txt"
 
-    node scripts/license-issue.js --check "QONAQ-…"
+    node scripts/license-issue.js --check "ROOMLINE-…"
         Проверяет ключ публичным ключом ЭТОЙ сборки (что вставлен верный).
 `)
 }
@@ -157,7 +164,7 @@ ${key}
     const outPath = path.resolve(args.out)
     fs.mkdirSync(path.dirname(outPath), { recursive: true })
     const text = [
-      `Qonaq — лицензионный ключ`,
+      `Roomline PMS — лицензионный ключ`,
       `Объект:        ${payload.hotel}`,
       `Номеров:       ${payload.rooms}`,
       `Выпущен:       ${formatRu(payload.issuedAt)}`,

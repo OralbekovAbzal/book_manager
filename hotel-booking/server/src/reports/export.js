@@ -125,7 +125,7 @@ function csvSafe(s) {
   if (!str) return str
   // Excel при импорте отбрасывает ведущие пробельные символы, поэтому смотрим на
   // первый непробельный знак (OWASP; находка тестов волны 9).
-  // \u0422\u0430\u0431\u0443\u043b\u044f\u0446\u0438\u044f \u0438 \u0432\u043e\u0437\u0432\u0440\u0430\u0442 \u043a\u0430\u0440\u0435\u0442\u043a\u0438 \u2014 \u0442\u0440\u0438\u0433\u0433\u0435\u0440\u044b \u0441\u0430\u043c\u0438 \u043f\u043e \u0441\u0435\u0431\u0435 (\u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 \u043f\u0435\u0440\u0432\u043e\u043c\u0443 \u0437\u043d\u0430\u043a\u0443).
+  // Табуляция и возврат каретки — триггеры сами по себе (по сырому первому знаку).
   if (str[0] === '\t' || str[0] === '\r') return `'${str}`
   const ch = str.replace(/^[\s\u00a0]+/, '')[0]
   if (ch === '=' || ch === '@') return `'${str}`
@@ -193,7 +193,7 @@ function safeSheetName(title) {
 async function buildXlsx(result, totalsLabel) {
   const { columns, rows } = result
   const wb = new ExcelJS.Workbook()
-  wb.creator = result.meta.hotelName || 'Hotel Booking'
+  wb.creator = result.meta.hotelName || 'Roomline PMS'
   wb.created = new Date()
 
   const ws = wb.addWorksheet(safeSheetName(result.report.title), {

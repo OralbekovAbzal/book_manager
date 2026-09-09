@@ -70,6 +70,12 @@ const APP_VERSION = app.getVersion()
 //     кластером и описывает именно его. Поэтому «почистили AppData» или
 //     «удалили config.json по телефонной подсказке» больше не означает потерю
 //     доступа к броням.
+// Папка данных — от `name` в electron/package.json (`hotel-booking-desktop`), а НЕ
+// от productName. Поэтому при переименовании продукта Qonaq → Roomline PMS
+// (09.09.2026) сменили только видимые человеку строки: `name` и `appId`
+// (`com.hotelbooking.desktop`) остались прежними. Тронешь их — установленная копия
+// перестанет находить свой config.json, pgdata и лицензию, то есть у клиента
+// «пропадут все брони». Имя базы `hotel_booking` техническое по той же причине.
 const CONFIG_PATH = path.join(app.getPath('userData'), 'config.json')
 function readConfig() {
   return readJsonFile(CONFIG_PATH)
@@ -864,7 +870,7 @@ function createSplash(text) {
   splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`
     <body style="margin:0;display:flex;align-items:center;justify-content:center;height:100vh;
       font-family:'Segoe UI',sans-serif;background:#1f2430;color:#fff;text-align:center">
-      <div><div style="font-size:16px;font-weight:600">Система бронирования</div>
+      <div><div style="font-size:16px;font-weight:600">Roomline PMS</div>
       <div style="margin-top:10px;font-size:13px;color:#9aa4b2">${text}</div></div>
     </body>`))
 }
@@ -873,7 +879,7 @@ function closeSplash() { if (splashWindow) { splashWindow.close(); splashWindow 
 function createMainWindow(serverUrl) {
   mainWindow = new BrowserWindow({
     width: 1400, height: 900, minWidth: 1024, minHeight: 640, show: false,
-    title: 'Система бронирования',
+    title: 'Roomline PMS',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,

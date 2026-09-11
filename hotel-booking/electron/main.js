@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu, shell, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, Menu, shell, dialog, powerMonitor } = require('electron')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -18,6 +18,11 @@ const {
 } = require('./lib/migrations')
 const { freeBytes, toMb, MB } = require('./lib/disk')
 const { stripAnsi, rotateLogFile } = require('./lib/logs')
+const {
+  isPortFree, findFreePort, readPostmasterPid, isProcessAlive,
+  describePortOwner, describePortBusy,
+} = require('./lib/ports')
+const { findHosts, makeNonce } = require('./lib/discovery')
 
 // ─── Пути к ресурсам (dev vs упакованное) ────────────────────────────────────
 const isDev = !app.isPackaged
@@ -39,9 +44,21 @@ function resourcePath(...p) {
   if (head === 'db') return path.join(__dirname, 'db', ...rest)
   return path.join(__dirname, '..', head, ...rest)
 }
-const DB_PORT = 5433
 const DB_NAME = 'hotel_booking'
-const DEFAULT_HOST_PORT = 3001
+// Порт встроенной базы. 5433 — предпочтение, а не закон: у клиента на ноутбуке
+// может стоять свой PostgreSQL или остаться висеть кластер прошлой копии
+// программы. Свободный порт выбирается при старте (resolveDbPort) и остаётся в
+// config.json, чтобы следующий запуск пришёл туда же.
+const DEFAULT_DB_PORT = 5433
+let dbPort = DEFAULT_DB_PORT
+// Порт сервера. 3001 в dev — там же работает `npm run dev:server` и прокси Vite;
+// в упакованной программе 4780: 3001 слишком популярен (его занимают Node-проекты
+// и всякий софт разработчика), а порт хоста должен быть свободен на чужом
+// ноутбуке без разговоров. isDev объявлен выше — порядок важен.
+const DEFAULT_HOST_PORT = isDev ? 3001 : 4780
+// UDP-ответчик хоста: по нему рабочие места находят хост после смены IP.
+// Включается серверу переменной DISCOVERY_PORT (см. spawnServer).
+const DISCOVERY_PORT = 4781
 
 /**
  * Разовый секрет для внутренних вызовов API (копия при выходе, кнопка «Сделать
@@ -174,8 +191,9 @@ function describeStartError(err) {
   if (err && err.title && err.message) return err.message
   const msg = err && (typeof err === 'string' ? err : err.message)
   if (msg) return `${msg}\n\nПодробности: ${DEBUG_LOG}`
-  return `База данных не запустилась. Возможно, порт ${DB_PORT} занят или программа уже запущена. ` +
-    `Подробности: ${DEBUG_LOG}`
+  // Догадки про занятый порт здесь больше нет: занятый порт базы ловится до
+  // старта (resolveDbPort), и своя ошибка у него отдельная и точная.
+  return `База данных не запустилась. Подробности: ${DEBUG_LOG}`
 }
 
 // ─── Состояние процессов хоста ───────────────────────────────────────────────
@@ -191,6 +209,51 @@ let isQuitting = false
 let preUpdateCopyPath = null
 // Идёт перезапуск упавшего Postgres: второй watcher в это время не нужен.
 let pgRestarting = false
+
+/**
+ * Порт для встроенной базы: запомненный, иначе первый свободный от 5433.
+ *
+ * Порт был зашит константой, и любой чужой PostgreSQL на 5433 (а он там бывает
+ * у всех, кто когда-то ставил PostgreSQL руками) превращал запуск в «база не
+ * запустилась» без объяснений. Выбранный порт кладём в config.json: следующий
+ * запуск должен прийти к ТОМУ ЖЕ кластеру, а не поднять рядом второй.
+ *
+ * Выбор делается один раз за запуск: restartPostgres переиспользует тот же
+ * экземпляр EmbeddedPostgres и порт не пересматривает.
+ *
+ * @throws {Error} с `title`, если база этой же папки уже кем-то запущена
+ */
+async function resolveDbPort(cfg, dataDir) {
+  // postmaster.pid остаётся и после аварийного завершения, поэтому одного файла
+  // мало. Проверяем И живой PID, И занятость записанного порта: PID в Windows
+  // переиспользуются после перезагрузки, и «живой» номер из старого файла легко
+  // принадлежит постороннему процессу — отказать в запуске из-за этого нельзя.
+  const running = readPostmasterPid(dataDir, { fs })
+  if (running && isProcessAlive(running.pid)) {
+    const port = running.port || DEFAULT_DB_PORT
+    const busy = !(await isPortFree(port))
+    if (busy) {
+      hlog('база уже запущена: pid=', running.pid, 'port=', port)
+      const err = new Error(
+        `База данных уже работает в другой копии программы (процесс ${running.pid}). ` +
+        'Закройте её и запустите программу снова.')
+      err.title = 'База уже запущена'
+      throw err
+    }
+    hlog('postmaster.pid от прошлого запуска: pid=', running.pid, 'жив, но порт', port, 'свободен — файл устарел')
+  }
+
+  const wanted = Number.isInteger(cfg.dbPort) && cfg.dbPort >= 1024 && cfg.dbPort <= 65535
+    ? cfg.dbPort
+    : DEFAULT_DB_PORT
+  dbPort = (await isPortFree(wanted)) ? wanted : await findFreePort({ start: wanted })
+  if (cfg.dbPort !== dbPort) {
+    cfg.dbPort = dbPort
+    writeConfig(cfg)
+  }
+  hlog('порт базы:', dbPort, wanted === dbPort ? '(как в конфиге)' : `(${wanted} занят — взят свободный)`)
+  return dbPort
+}
 
 // ─── Запуск встроенного Postgres + сервера (режим ХОСТ) ──────────────────────
 async function startHost(cfg) {
@@ -214,11 +277,15 @@ async function startHost(cfg) {
   preUpdateCopyPath = null   // прошлый запуск хоста в этом же процессе (config:apply)
   hlog('dataDir=', dataDir, 'fresh=', fresh, 'schemaReady=', fs.existsSync(markerPath))
 
+  // Порт базы выбираем ДО создания экземпляра: databaseUrl и сам EmbeddedPostgres
+  // берут уже решённый dbPort.
+  await resolveDbPort(cfg, dataDir)
+
   pgInstance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: 'postgres',
     password: cfg.dbPassword,
-    port: DB_PORT,
+    port: dbPort,
     persistent: true,
     // UTF8 обязательно — иначе кириллица в именах гостей ломается.
     //
@@ -344,6 +411,19 @@ async function startHost(cfg) {
     throw e
   }
 
+  // Порт сервера проверяем ЗДЕСЬ, а не по факту падения: сервер на занятом порту
+  // умирает с EADDRINUSE, надзор перезапускает его ещё раз, и человек получает
+  // «Сервер остановился (код 1)» вместо «порт 4780 занят программой такой-то».
+  // Слушать будем 0.0.0.0 — и проверяем ровно его: порт бывает свободен на
+  // 127.0.0.1 и занят на сетевом адресе.
+  if (!(await isPortFree(cfg.hostPort, { host: '0.0.0.0' }))) {
+    const owner = await describePortOwner(cfg.hostPort)
+    hlog('порт сервера занят:', cfg.hostPort, JSON.stringify(owner))
+    const err = new Error(describePortBusy(cfg.hostPort, owner))
+    err.title = 'Порт занят'
+    throw err
+  }
+
   spawnServer(cfg)
   await waitForHealth(cfg.hostPort, 30000)
   hlog('health OK on port', cfg.hostPort)
@@ -394,7 +474,7 @@ async function applySeed() {
 const BASELINE_MIGRATION = '0_init'
 
 function databaseUrl(cfg) {
-  return `postgresql://postgres:${cfg.dbPassword}@127.0.0.1:${DB_PORT}/${DB_NAME}`
+  return `postgresql://postgres:${cfg.dbPassword}@127.0.0.1:${dbPort}/${DB_NAME}`
 }
 
 function runPrisma(args, dbUrl) {
@@ -612,35 +692,41 @@ function spawnServer(cfg) {
     hlog('backup dir unavailable:', backupPath, String(e && (e.message || e)))
   }
 
+  const env = {
+    ...process.env,
+    ELECTRON_RUN_AS_NODE: '1',
+    DATABASE_URL: dbUrl,
+    PORT: String(cfg.hostPort),
+    HOST: '0.0.0.0',            // слушаем LAN — клиенты подключаются к хосту
+    JWT_SECRET: cfg.jwtSecret,
+    JWT_EXPIRES_IN: '8h',
+    NODE_ENV: 'production',
+    TZ: 'UTC',
+    LOG_PATH: logPath,
+    BACKUP_PATH: backupPath,
+    BACKUP_FALLBACK_PATH: backupFallbackPath,
+    // Папка кластера — серверу нужна только чтобы мерить свободное место на
+    // том томе, где лежит база (GET /api/system/status → disk).
+    PG_DATA_DIR: cfg.dataDir || defaultPaths().dataDir,
+    // Ночная копия в 03:00 по местному времени хоста, а не по UTC
+    BACKUP_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
+    // Та же зона — для календарных дней отчётов («дата создания», «дата приёма»):
+    // сервер живёт в UTC, и без неё ночные операции уезжали бы на вчера.
+    HOTEL_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
+    // Ноутбук ночью выключают: при старте догоняем пропущенную копию,
+    // а в течение дня снимаем каждые 4 часа работы.
+    BACKUP_MAX_AGE_HOURS: '20',
+    BACKUP_EVERY_HOURS: '4',
+    INTERNAL_TOKEN,
+  }
+  // UDP-ответчик «я здесь» для рабочих мест. `cfg.discovery: false` — аварийный
+  // выключатель на случай, если в чьей-то сети широковещание окажется вредным;
+  // в окне настроек его нет намеренно: лишний тумблер, который нечем объяснить.
+  if (cfg.discovery !== false) env.DISCOVERY_PORT = String(DISCOVERY_PORT)
+
   const proc = spawn(process.execPath, [serverEntry], {
     cwd: resourcePath('server'),
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      DATABASE_URL: dbUrl,
-      PORT: String(cfg.hostPort),
-      HOST: '0.0.0.0',            // слушаем LAN — клиенты подключаются к хосту
-      JWT_SECRET: cfg.jwtSecret,
-      JWT_EXPIRES_IN: '8h',
-      NODE_ENV: 'production',
-      TZ: 'UTC',
-      LOG_PATH: logPath,
-      BACKUP_PATH: backupPath,
-      BACKUP_FALLBACK_PATH: backupFallbackPath,
-      // Папка кластера — серверу нужна только чтобы мерить свободное место на
-      // том томе, где лежит база (GET /api/system/status → disk).
-      PG_DATA_DIR: cfg.dataDir || defaultPaths().dataDir,
-      // Ночная копия в 03:00 по местному времени хоста, а не по UTC
-      BACKUP_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
-      // Та же зона — для календарных дней отчётов («дата создания», «дата приёма»):
-      // сервер живёт в UTC, и без неё ночные операции уезжали бы на вчера.
-      HOTEL_TZ: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Almaty',
-      // Ноутбук ночью выключают: при старте догоняем пропущенную копию,
-      // а в течение дня снимаем каждые 4 часа работы.
-      BACKUP_MAX_AGE_HOURS: '20',
-      BACKUP_EVERY_HOURS: '4',
-      INTERNAL_TOKEN,
-    },
+    env,
   })
   // Коды цвета из winston здесь — мусор: консоль сервера это файл, а не терминал.
   proc.stdout?.on('data', (d) => hlog('[server]', stripAnsi(String(d)).trim()))
@@ -648,11 +734,21 @@ function spawnServer(cfg) {
   // и по ней в логе находят падение сервера.
   proc.stderr?.on('data', (d) => hlog('[server-err]', stripAnsi(String(d)).trim()))
   proc.on('error', (e) => hlog('[server] SPAWN ERROR:', String(e && (e.stack || e.message))))
-  proc.on('exit', (code, sig) => {
+  proc.on('exit', async (code, sig) => {
     hlog('[server] EXIT code=', code, 'sig=', sig)
     if (serverProc !== proc) return   // уже остановлен/заменён (stopHostProcesses)
     serverProc = null
     if (isQuitting || code === 0) return
+    // Код 3 — «порт занят» (сервер отвечает им на EADDRINUSE). Перезапуск такое
+    // не лечит: порт будет занят и через секунду, и через минуту. Поэтому не
+    // перезапускаем, а называем виновника и открываем настройки.
+    if (code === 3) {
+      const owner = await describePortOwner(cfg.hostPort)
+      hlog('[server] порт занят:', cfg.hostPort, JSON.stringify(owner))
+      dialog.showErrorBox('Порт занят', describePortBusy(cfg.hostPort, owner))
+      createSettingsWindow()
+      return
+    }
     if (!serverRestarted) {
       serverRestarted = true
       hlog('[server] crashed, restarting in 1s')
@@ -861,7 +957,209 @@ function waitForHealth(port, timeoutMs) {
   })
 }
 
+// ─── Сторож адреса хоста (режим «Клиент») ────────────────────────────────────
+//
+// Беда, которую он лечит. Адрес хоста рабочее место получает один раз, руками
+// сисадмина. Сменили роутер, переехали на другой Wi-Fi, DHCP выдал ноутбуку-хосту
+// другой IP — и на всех рабочих местах «нет связи с сервером», хотя хост стоит
+// в двух метрах и работает. Раньше это чинил только звонок тому, кто умеет
+// смотреть ipconfig.
+//
+// Как лечим. Раз в 15 с стучимся в /api/health. Два отказа подряд — спрашиваем
+// сеть, где наш хост (UDP-широковещание, lib/discovery.js), и переезжаем на
+// найденный адрес.
+//
+// ПОЧЕМУ ЭТО БЕЗОПАСНО. Переезд происходит только на хост с ТОЙ ЖЕ личностью:
+// у хоста есть Ed25519-пара в базе, публичный ключ рабочее место запоминает при
+// первом удачном подключении (TOFU — адрес тогда ввёл сисадмин, ему и верим), и
+// дальше принимается только ответ, подписанный этим ключом, плюс подтверждающий
+// HTTP-запрос с одноразовым nonce. Без этого любой в сети отеля (включая
+// гостевой Wi-Fi) мог бы ответить «хост теперь я» и собирать пароли сотрудников.
+const HOST_PROBE_INTERVAL = 15000   // как часто проверяем связь с хостом
+const HOST_SEARCH_INTERVAL = 10000  // как часто спрашиваем сеть, пока хост потерян
+const HOST_PROBE_TIMEOUT = 4000
+const HOST_FAILS_BEFORE_SEARCH = 2
+let hostWatchTimer = null
+let hostSearchTimer = null
+let hostWatchFails = 0
+let hostWatchBusy = false
+let hostSearchBusy = false
+
+/**
+ * Один запрос к /api/health хоста.
+ * @returns {Promise<{reached:boolean, ok:boolean, db:string|null, instance:object|null, status:number|null}>}
+ *   reached — ответ получен (пусть и 503): значит хост по этому адресу ЕСТЬ и
+ *   искать его по сети не нужно.
+ */
+async function probeHost(url, { nonce = null } = {}) {
+  const base = normalizeServerUrl(url)
+  if (!base) return { reached: false, ok: false, db: null, instance: null, status: null }
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), HOST_PROBE_TIMEOUT)
+  try {
+    const suffix = nonce ? `?nonce=${encodeURIComponent(nonce)}` : ''
+    const res = await fetch(`${base}/api/health${suffix}`, { signal: ctrl.signal })
+    let body = {}
+    try { body = await res.json() } catch { /* не JSON — считаем, что полей нет */ }
+    const inst = body && typeof body.instance === 'object' ? body.instance : null
+    return {
+      reached: true,
+      ok: res.ok,
+      db: body && typeof body.db === 'string' ? body.db : null,
+      instance: inst,
+      status: res.status,
+    }
+  } catch {
+    return { reached: false, ok: false, db: null, instance: null, status: null }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/** Личность хоста из ответа health, если она полная. */
+function instanceIdentity(instance) {
+  if (!instance || typeof instance !== 'object') return null
+  const id = typeof instance.id === 'string' ? instance.id : ''
+  const publicKey = typeof instance.publicKey === 'string' ? instance.publicKey : ''
+  if (!id || !publicKey) return null
+  return { id, publicKey }
+}
+
+/**
+ * Подпись из health: Ed25519 над `${id}|${nonce}`. Это второй рубеж после
+ * подписанного UDP-ответа: подтверждает, что по новому адресу отвечает ИМЕННО
+ * наш хост, а не тот, кто переслал чужой ответ.
+ */
+function verifyHealthSignature(instance, { nonce, publicKey, id }) {
+  if (!instance || !instance.sig || !nonce || !publicKey || !id) return false
+  if (instance.id !== id) return false
+  try {
+    return crypto.verify(null, Buffer.from(`${id}|${nonce}`, 'utf8'),
+      publicKey, Buffer.from(String(instance.sig), 'base64url'))
+  } catch {
+    return false
+  }
+}
+
+function startHostWatch(cfg) {
+  if (!cfg || cfg.mode !== 'client' || hostWatchTimer) return
+  hostWatchFails = 0
+  hostWatchTimer = setInterval(() => { hostWatchTick() }, HOST_PROBE_INTERVAL)
+  // Ноутбук закрыли и унесли в другую сеть — просыпаться там надо сразу, а не
+  // через 15 секунд «нет связи».
+  try { powerMonitor.on('resume', hostWatchTick) } catch { /* нет powerMonitor — не беда */ }
+  hlog('[watch] сторож адреса хоста запущен:', cfg.serverUrl)
+}
+
+function stopHostWatch() {
+  if (hostWatchTimer) { clearInterval(hostWatchTimer); hostWatchTimer = null }
+  stopHostSearch()
+  hostWatchFails = 0
+  try { powerMonitor.removeListener('resume', hostWatchTick) } catch { /* уже снят */ }
+}
+
+function stopHostSearch() {
+  if (hostSearchTimer) { clearInterval(hostSearchTimer); hostSearchTimer = null }
+}
+
+function startHostSearch() {
+  if (hostSearchTimer) return
+  hlog('[watch] хост не отвечает — ищу его в сети')
+  hostSearchTimer = setInterval(() => { searchForHost() }, HOST_SEARCH_INTERVAL)
+  searchForHost()
+}
+
+async function hostWatchTick() {
+  if (isQuitting || hostWatchBusy) return
+  hostWatchBusy = true
+  try {
+    const cfg = readConfig()
+    if (cfg.mode !== 'client' || !cfg.serverUrl) return
+    const nonce = makeNonce()
+    const r = await probeHost(cfg.serverUrl, { nonce })
+    if (r.reached) {
+      hostWatchFails = 0
+      stopHostSearch()
+      // TOFU: личность запоминаем при первом удачном подключении по адресу,
+      // который ввёл сисадмин. Перезаписывать её здесь нельзя — иначе подмена
+      // хоста на известном адресе тихо переучила бы рабочее место.
+      const identity = instanceIdentity(r.instance)
+      if (r.ok && r.db === 'ok' && identity && !cfg.hostInstance) {
+        cfg.hostInstance = identity
+        writeConfig(cfg)
+        hlog('[watch] личность хоста запомнена:', identity.id)
+      }
+      return
+    }
+    hostWatchFails++
+    if (hostWatchFails >= HOST_FAILS_BEFORE_SEARCH && cfg.hostInstance) startHostSearch()
+  } catch (e) {
+    hlog('[watch] тик не удался:', String(e && (e.message || e)))
+  } finally {
+    hostWatchBusy = false
+  }
+}
+
+async function searchForHost() {
+  if (isQuitting || hostSearchBusy) return
+  hostSearchBusy = true
+  try {
+    const cfg = readConfig()
+    const known = cfg.hostInstance
+    if (cfg.mode !== 'client' || !known || !known.id || !known.publicKey) return
+    const hosts = await findHosts({
+      port: DISCOVERY_PORT, t: 'find', id: known.id, publicKey: known.publicKey,
+    })
+    const current = normalizeServerUrl(cfg.serverUrl)
+    for (const h of hosts) {
+      if (!h.url || h.url === current) continue
+      // Подтверждающий запрос: UDP-ответ подписан, но подтвердить живой сервер
+      // на новом адресе может только сам сервер.
+      const nonce = makeNonce()
+      const r = await probeHost(h.url, { nonce })
+      if (!r.reached || !r.instance) continue
+      if (!verifyHealthSignature(r.instance, { nonce, publicKey: known.publicKey, id: known.id })) {
+        hlog('[watch] ответ с', h.url, 'не прошёл проверку подписи — пропускаю')
+        continue
+      }
+      moveToHost(h.url, cfg)
+      return
+    }
+  } catch (e) {
+    hlog('[watch] поиск хоста не удался:', String(e && (e.message || e)))
+  } finally {
+    hostSearchBusy = false
+  }
+}
+
+/**
+ * Переезд на новый адрес хоста. Перезапускаем программу целиком, а не
+ * пересоздаём окно: между закрытием старого окна и созданием нового срабатывает
+ * window-all-closed → app.quit(), и программа просто исчезла бы с экрана.
+ */
+function moveToHost(url, cfg) {
+  stopHostWatch()
+  cfg.serverUrl = url
+  writeConfig(cfg)
+  hlog('host moved:', url)
+  try {
+    createSplash(`Хост найден по новому адресу ${escapeHtml(url)} — перезапускаю программу. ` +
+      'Возможно, потребуется войти заново.')
+  } catch { /* окно не обязательно */ }
+  setTimeout(() => {
+    isQuitting = true
+    app.relaunch()
+    app.exit(0)
+  }, 2000)
+}
+
 // ─── Окна ────────────────────────────────────────────────────────────────────
+// Текст сплэша подставляется в HTML — адрес приходит из сети, пусть и
+// проверенный подписью. Экранируем.
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+}
+
 function createSplash(text) {
   splashWindow = new BrowserWindow({
     width: 420, height: 200, frame: false, resizable: false, center: true,
@@ -931,7 +1229,11 @@ async function boot() {
   if (isDev && !cfg.mode) { createMainWindow(''); return }   // dev без настройки — относительные пути/прокси
   if (!cfg.mode) { createSettingsWindow(); return }
 
-  if (cfg.mode === 'client') { createMainWindow(cfg.serverUrl || ''); return }
+  if (cfg.mode === 'client') {
+    createMainWindow(cfg.serverUrl || '')
+    startHostWatch(cfg)   // хост мог переехать, пока рабочее место было выключено
+    return
+  }
 
   // HOST
   hlog('boot: HOST mode')
@@ -1066,13 +1368,16 @@ ipcMain.handle('update:install', async () => {
 // Конфиг наружу — без секретов (dbPassword, jwtSecret) и без хеша сисадмина.
 ipcMain.handle('config:get', () => {
   const cfg = readConfig()
-  const { dbPassword, jwtSecret, sysadmin, ...safe } = cfg // eslint-disable-line no-unused-vars
+  const { dbPassword, jwtSecret, sysadmin, hostInstance, ...safe } = cfg // eslint-disable-line no-unused-vars
   return {
     ...safe,
     hasSysadmin: hasSysadmin(cfg),
     firstRun: !cfg.mode,
     lanIps: lanIps(),
     defaults: defaultPaths(),
+    // Только факт: публичный ключ хоста наружу не отдаём — окну настроек он не
+    // нужен, а лишняя копия ключа в renderer'е ничего не улучшает.
+    hasHostInstance: !!(cfg.hostInstance && cfg.hostInstance.id),
   }
 })
 
@@ -1104,8 +1409,34 @@ ipcMain.handle('config:test', async (_e, serverUrl) => {
     const t = setTimeout(() => ctrl.abort(), 5000)
     const res = await fetch(`${url}/api/health`, { signal: ctrl.signal })
     clearTimeout(t)
-    return { ok: res.ok, status: res.status }
+    let body = {}
+    try { body = await res.json() } catch { /* не JSON — просто нет полей */ }
+    const identity = instanceIdentity(body && body.instance)
+    const cfg = readConfig()
+    // `known` — это «тот же хост, с которым рабочее место уже работало». Старый
+    // сервер и лежащая база личность не отдают: это «неизвестно», а НЕ «чужой».
+    const known = !!(identity && cfg.hostInstance && cfg.hostInstance.id === identity.id)
+    return { ok: res.ok, status: res.status, instance: identity, known }
   } catch (err) { return { ok: false, error: err.message } }
+})
+
+// «Найти в сети»: широковещательный опрос без привязки к сохранённому хосту.
+// Названия отеля в ответе на `who` нет намеренно — его слышит вся сеть.
+ipcMain.handle('config:discover', async () => {
+  try {
+    const cfg = readConfig()
+    const knownId = cfg.hostInstance && cfg.hostInstance.id
+    const hosts = await findHosts({ port: DISCOVERY_PORT, t: 'who', timeoutMs: 2500 })
+    hlog('[discover] найдено хостов:', hosts.length)
+    return hosts.map((h) => ({
+      computer: h.computer || '',
+      url: h.url,
+      known: !!knownId && knownId === h.id,
+    }))
+  } catch (e) {
+    hlog('[discover] не удалось:', String(e && (e.message || e)))
+    return []
+  }
 })
 
 // Сохранить настройки системы. Первый запуск — стартуем сразу; на работающей
@@ -1150,6 +1481,10 @@ ipcMain.handle('config:apply', async (_e, payload) => {
     const url = normalizeServerUrl(p.serverUrl)
     if (!url) return { ok: false, error: 'Укажите адрес хоста' }
     try { new URL(url) } catch { return { ok: false, error: 'Некорректный адрес хоста' } }
+    // Сисадмин указал ДРУГОЙ адрес — значит и хост, возможно, другой. Забываем
+    // прежнюю личность: иначе сторож нашёл бы старый хост в сети и вернул бы
+    // рабочее место туда, откуда его только что увели.
+    if (cfg.serverUrl !== url) delete cfg.hostInstance
     cfg.serverUrl = url
   }
 
@@ -1170,6 +1505,22 @@ ipcMain.handle('config:apply', async (_e, payload) => {
   if (pwd) cfg.sysadmin = hashSysadminPassword(pwd)
   writeConfig(cfg)
   hlog('config:apply saved; mode=', cfg.mode, 'firstRun=', firstRun)
+
+  // Привязка к личности хоста — по возможности прямо сейчас. Это же и
+  // перепривязка: хост переустановили, у него новая пара ключей, и без этого
+  // шага сторож искал бы в сети машину, которой больше нет. Недоступный хост
+  // сохранение НЕ блокирует: сисадмин мог настроить рабочее место заранее.
+  if (cfg.mode === 'client') {
+    const r = await probeHost(cfg.serverUrl)
+    const identity = instanceIdentity(r.instance)
+    if (r.ok && r.db === 'ok' && identity) {
+      cfg.hostInstance = identity
+      writeConfig(cfg)
+      hlog('config:apply: личность хоста сохранена:', identity.id)
+    } else {
+      hlog('config:apply: личность хоста не получена (reached=', r.reached, 'db=', String(r.db), ')')
+    }
+  }
 
   // Настройки изменены на работающей установке → чистый перезапуск.
   if (!firstRun) {
@@ -1200,6 +1551,7 @@ ipcMain.handle('config:apply', async (_e, payload) => {
     }
   } else {
     createMainWindow(cfg.serverUrl)
+    startHostWatch(cfg)
   }
   return { ok: true }
 })
@@ -1341,6 +1693,9 @@ if (!gotLock) {
   // Корректное завершение: сначала копия (последнее, что успеет попасть на
   // флешку), потом гасим сервер и базу, чтобы не повредить данные.
   app.on('before-quit', async (e) => {
+    // Сторож адреса хоста больше не нужен — и не должен успеть перезапустить
+    // программу, которую сейчас закрывают.
+    stopHostWatch()
     // Хост уже остановлен (или его и не было) — выходим без задержки.
     if (!serverProc && !pgInstance) return
     // Хост ещё жив — выход только после штатной остановки. ПОРЯДОК ВАЖЕН:

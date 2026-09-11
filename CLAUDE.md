@@ -24,7 +24,7 @@ Roomline PMS — система бронирования для небольши
 | `npm run db:migrate:status` | состояние миграций |
 | `npm run db:seed` | сид: **сбрасывает пароль главного администратора** — на базе с данными не запускать |
 | `npm run db:studio` / `db:generate` | Prisma Studio / перегенерация клиента |
-| `cd server && npm test` | тесты (vitest, ~66 файлов / ~1150 тестов) |
+| `cd server && npm test` | тесты (vitest, ~73 файла / ~1380 тестов) |
 | `cd client && npx tsc --noEmit` | проверка типов клиента |
 | `cd electron && node test-host.mjs` | связка «встроенный Postgres + миграции + сервер» на временном кластере |
 
@@ -49,10 +49,14 @@ express-validator; node-cron 4 (ночная копия 03:00, чистка жу
 (`src/store/`: auth, grid, settings, roomFund, license, backupStatus, connection, realtime);
 axios (`src/api/`); react-hook-form; date-fns; `@tanstack/react-virtual`; socket.io-client.
 
-**Desktop** (`hotel-booking/electron`): Electron 44, electron-builder 26, `embedded-postgres`
-(PostgreSQL 18, initdb с builtin-локалью `C.UTF-8`). `main.js` — хост: запуск кластера,
-миграции через Prisma CLI, надзор за сервером и Postgres, копии, спутник пароля базы;
-`lib/` — чистые модули без `electron` (тестируются из `server/test`).
+**Desktop** (`hotel-booking/electron`): Electron 44, electron-builder 26 (NSIS `perMachine`,
+`installer.nsh` ставит правило брандмауэра по программе), `embedded-postgres` (PostgreSQL 18,
+initdb с builtin-локалью `C.UTF-8`, порт — свободный от 5433, хранится в `cfg.dbPort`). `main.js` —
+хост: запуск кластера, миграции через Prisma CLI, надзор за сервером и Postgres, копии, спутник
+пароля базы; клиент: сторож адреса хоста (health каждые 15 с → поиск по UDP → `app.relaunch`);
+`lib/` — чистые модули без `electron` (`config`, `migrations`, `disk`, `logs`, `ports`,
+`discovery`; тестируются из `server/test`). Порты упакованной сборки: сервер **4780**
+(dev — 3001), поиск хоста UDP **4781** (`DISCOVERY_PORT`).
 
 ## Структура
 
@@ -75,7 +79,7 @@ client/
   src/components/             # BookingGrid/, BookingModal/, Payments/, Reports/, Rates/, Settings/, Setup/, ui/ConfirmDialog
   src/store/, src/hooks/useSocket.ts, src/types/index.ts, src/utils/
 electron/
-  main.js, lib/{config,migrations,disk,logs}.js, db/seed.sql (только данные), test-host.mjs, SANDBOX-CHECKLIST.md
+  main.js, lib/{config,migrations,disk,logs,ports,discovery}.js, installer.nsh, db/seed.sql (только данные), test-host.mjs, SANDBOX-CHECKLIST.md
 ```
 
 ## Доменные особенности
@@ -97,6 +101,11 @@ electron/
   прежнего образца `QONAQ-…` принимаются навсегда (`LEGACY_KEY_PREFIXES`), гейт
   обслуживания по `buildDate` сборки (`middleware/license.js`).
 - **Мастер первого запуска** — только на нетронутой базе (`utils/setupState.js`).
+- **Личность хоста** — `HotelSettings.instanceId` + пара Ed25519 в базе (`utils/instanceIdentity.js`),
+  `GET /api/health?nonce=…` возвращает `instance { id, publicKey, sig }`; ответчик поиска —
+  `src/discovery/udpResponder.js` (протокол в шапке файла). `GET /api/hotel` — по белому списку
+  `PUBLIC_FIELDS`, приватный ключ наружу не отдаётся никогда. Сервер на занятом порту завершается
+  с кодом 3.
 
 ## Конвенции
 

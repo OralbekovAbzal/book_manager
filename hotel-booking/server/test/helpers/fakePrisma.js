@@ -345,6 +345,22 @@ function makeModel(name, rows, calls, extraVirtual = null) {
       applyData(rec, args.data)
       return out(rec, args)
     },
+    /**
+     * upsert: «есть — обнови, нет — создай». В Prisma это ОДНА операция, и
+     * подменять её парой findUnique+create в тесте нельзя: как раз в зазоре
+     * между ними и живут гонки, ради которых upsert берут.
+     */
+    async upsert(args) {
+      calls.push({ model: name, op: 'upsert', args })
+      const hit = rows.find((r) => matchWhere(r, args.where))
+      if (hit) {
+        applyData(hit, args.update || {})
+        return out(hit, args)
+      }
+      const rec = { id: ++seq, ...(args.create || {}) }
+      rows.push(rec)
+      return out(rec, args)
+    },
     get rows() { return rows },
   }
 }

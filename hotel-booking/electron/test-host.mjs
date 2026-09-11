@@ -6,12 +6,21 @@ import { spawn } from 'child_process'
 import path from 'path'
 import os from 'os'
 import { fileURLToPath } from 'url'
+import { createRequire } from 'module'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+// lib/ports.js — CommonJS, как и всё в lib/; из ESM подключаем через createRequire
+const require = createRequire(import.meta.url)
+const { findFreePort } = require('./lib/ports.js')
+
 const dataDir = path.join(os.tmpdir(), 'hb-test-pg-' + Date.now())
 const PORT = 3099
 const PW = 'localdevpass'
-const DB_URL = `postgresql://postgres:${PW}@127.0.0.1:5433/hotel_booking`
+// Порт базы — свободный, а не зашитый 5433: на машине разработчика там часто
+// уже стоит свой PostgreSQL или висит кластер установленной программы, и тест
+// падал «просто так».
+const DB_PORT = await findFreePort({ start: 5433 })
+const DB_URL = `postgresql://postgres:${PW}@127.0.0.1:${DB_PORT}/hotel_booking`
 
 let pg, srv
 let failures = 0
@@ -44,7 +53,7 @@ function runPrisma(args) {
 async function main() {
   pg = new EmbeddedPostgres({
     databaseDir: dataDir, user: 'postgres', password: PW,
-    port: 5433, persistent: false, onLog: () => {}, onError: () => {},
+    port: DB_PORT, persistent: false, onLog: () => {}, onError: () => {},
     // КРИТИЧНО: те же флаги, что в main.js. UTF8 — иначе кириллица в именах
     // гостей ломается (initdb на Windows по умолчанию берёт WIN1251).
     // Встроенная локаль C.UTF-8 вместо прежней libc C — иначе ILIKE не

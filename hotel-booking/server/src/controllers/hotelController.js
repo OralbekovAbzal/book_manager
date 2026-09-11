@@ -46,11 +46,49 @@ function cleanIban(v) {
   return s === null ? null : s.replace(/\s/g, '').toUpperCase()
 }
 
+/**
+ * Что `GET/PUT /api/hotel` отдаёт наружу. Именно БЕЛЫЙ список, а не «всё, кроме
+ * перечисленного» (`omit`): в `HotelSettings` лежит строка на одну установку, и
+ * туда со временем попадает всё, чему нужна единственная строка настроек, — в том
+ * числе секреты (приватный ключ личности установки, `instancePrivateKey`).
+ * При чёрном списке новая колонка публикуется в тот же день, когда её добавили в
+ * схему, и заметить это некому: тест на «в ответе нет лишнего» никто не пишет
+ * заранее. При белом — новое поле по умолчанию НЕ уходит клиенту, а чтобы его
+ * отдать, надо дописать строку здесь, то есть подумать.
+ *
+ * Порядок — как в схеме: общие настройки, отметка мастера, реквизиты, `updatedAt`.
+ */
+const PUBLIC_FIELDS = [
+  'id', 'name', 'city', 'currency', 'pricingBase', 'lateArrivalHour',
+  'setupCompletedAt',
+  ...REQUISITE_FIELDS,
+  'updatedAt',
+]
+
+/** Тот же список в виде `select` для Prisma — чтобы лишнее не покидало базу. */
+const PUBLIC_SELECT = Object.fromEntries(PUBLIC_FIELDS.map((f) => [f, true]))
+
+/**
+ * Белый список на выходе из контроллера. Дублирует `select` намеренно: `select`
+ * стоит там, где мы ЧИТАЕМ готовую строку, а запись (`create`/`update`) отдаёт
+ * то, что записала, — и один пропущенный `select` не должен превращаться в утечку.
+ * Ключи, которых в строке нет (свежесозданная строка), просто отсутствуют.
+ */
+function publicOnly(row) {
+  if (!row) return row
+  const out = {}
+  for (const f of PUBLIC_FIELDS) if (f in row) out[f] = row[f]
+  return out
+}
+
 /** Настройки объекта — всегда одна строка (id = 1). Создаём при первом обращении. */
 async function getSettings() {
-  const existing = await prisma.hotelSettings.findUnique({ where: { id: 1 } })
-  if (existing) return existing
-  return prisma.hotelSettings.create({ data: { id: 1 } })
+  const existing = await prisma.hotelSettings.findUnique({
+    where: { id: 1 },
+    select: PUBLIC_SELECT,
+  })
+  if (existing) return publicOnly(existing)
+  return publicOnly(await prisma.hotelSettings.create({ data: { id: 1 } }))
 }
 
 // GET /api/hotel
@@ -107,7 +145,7 @@ async function update(req, res, next) {
         ...requisites,
       },
     })
-    res.json({ data })
+    res.json({ data: publicOnly(data) })
   } catch (err) {
     next(err)
   }
@@ -120,6 +158,9 @@ module.exports = {
   // Для правил валидации в routes/hotel.js и для тестов: нормализация обязана
   // быть ОДНА на роут и контроллер, иначе роут проверит одно, а сохранится другое.
   REQUISITE_FIELDS,
+  PUBLIC_FIELDS,
+  PUBLIC_SELECT,
+  publicOnly,
   cleanText,
   cleanBin,
   cleanIban,

@@ -33,6 +33,8 @@ const logger = require('./utils/logger')
 const { safeUrl } = require('./utils/logSafe')
 const { prisma } = require('./utils/prisma')
 const { checkDb } = require('./utils/healthCheck')
+const { buildHealthBody } = require('./utils/healthBody')
+const { getIdentity } = require('./utils/instanceIdentity')
 
 const app = express()
 
@@ -122,9 +124,16 @@ app.use('/api/users', apiLimiter, userRoutes)
 // не покажет окно раньше, чем база реально отвечает; а «Проверить связь»
 // (`config:test`) у клиента честно скажет «недоступно», когда на хосте лежит
 // база, — вместо «всё хорошо» при неработающей программе.
-app.get('/api/health', async (_req, res) => {
+//
+// Здесь же рабочее место подтверждает, что нашло СВОЙ хост: `?nonce=<32 hex>` →
+// в ответе `instance: { id, publicKey, sig }`, подпись над `${id}|${nonce}`
+// (см. `utils/healthBody.js`). Личность берётся из кэша и при лежащей базе
+// отдаётся последняя известная — иначе именно в аварии клиент решил бы, что
+// подключился не туда, и «потерял» хост.
+app.get('/api/health', async (req, res) => {
   const db = await checkDb(prisma)
-  const body = { status: db === 'ok' ? 'ok' : 'degraded', db, timestamp: new Date().toISOString() }
+  const identity = await getIdentity(prisma).catch(() => null)
+  const body = buildHealthBody({ db, identity, nonce: req.query.nonce })
   res.status(db === 'ok' ? 200 : 503).json(body)
 })
 

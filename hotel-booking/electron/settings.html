@@ -51,6 +51,18 @@
     .note { font-size: 12px; color: #35424F; background: #EEF2FA; border: 1px solid #D6DFF3; border-radius: 7px; padding: 9px 11px; margin-top: 14px; }
     .note code { font-family: Consolas, 'Courier New', monospace; font-size: 12px; color: #3457D5; }
 
+    /* Список найденных в сети хостов: строки-кнопки, клик подставляет адрес */
+    .found { margin-top: 8px; }
+    .found .row {
+      display: flex; align-items: baseline; gap: 8px; padding: 7px 10px; cursor: pointer;
+      border: 1px solid #D9E0EA; border-radius: 7px; background: #fff; margin-bottom: 6px;
+    }
+    .found .row:hover { border-color: #3457D5; background: #F7F9FE; }
+    .found .name { font-weight: 600; color: #1F2733; font-size: 12.5px; }
+    .found .addr { font-family: Consolas, 'Courier New', monospace; font-size: 12px; color: #5C6B7F; }
+    .found .tag { font-size: 11.5px; color: #1E8E4A; font-weight: 600; }
+    .found .msg { font-size: 12px; color: #7A8797; }
+
     details { margin-top: 2px; }
     summary { cursor: pointer; font-weight: 600; font-size: 12.5px; color: #3457D5; list-style: none; user-select: none; }
     summary::-webkit-details-marker { display: none; }
@@ -82,7 +94,7 @@
   <div class="card hidden" id="hostBox">
     <h2>Хост</h2>
     <label for="hostPort">Порт сервера</label>
-    <input id="hostPort" type="number" min="1024" max="65535" step="1" placeholder="3001" />
+    <input id="hostPort" type="number" min="1024" max="65535" step="1" placeholder="4780" />
     <div class="help">Число от 1024 до 65535. По этому порту к хосту подключаются клиенты.</div>
 
     <label for="dataDir">Папка данных базы</label>
@@ -116,10 +128,12 @@
     <h2>Клиент</h2>
     <label for="url">Адрес хоста</label>
     <div class="with-btn">
-      <input id="url" type="text" placeholder="http://192.168.1.50:3001" spellcheck="false" />
+      <input id="url" type="text" placeholder="http://192.168.1.50:4780" spellcheck="false" />
       <button class="btn" id="test" type="button">Проверить</button>
+      <button class="btn" id="discover" type="button">Найти в сети</button>
     </div>
-    <div class="help">IP компьютера-хоста и порт сервера, например 192.168.1.50:3001 — «http://» подставится автоматически.</div>
+    <div class="found" id="found"></div>
+    <div class="help">IP компьютера-хоста и порт сервера, например 192.168.1.50:4780 — «http://» подставится автоматически.</div>
   </div>
 
   <div class="card" id="sysBox">
@@ -160,7 +174,9 @@
     const $ = (id) => document.getElementById(id)
     const state = {
       mode: null, firstRun: true, hasSysadmin: false, lanIps: [],
-      defaults: { hostPort: 3001, dataDir: '', backupDir: '' },
+      // Запасные значения на случай, если config:get не ответил: настоящие
+      // приходят из defaults (main.js → defaultPaths).
+      defaults: { hostPort: 4780, dataDir: '', backupDir: '' },
     }
 
     function setStatus(text, cls) { const s = $('status'); s.textContent = text || ''; s.className = cls || '' }
@@ -178,11 +194,13 @@
       setStatus('')
     }
 
-    // «Адрес для клиентов»: реальные IPv4 этого компьютера + выбранный порт.
+    // Заметка хоста: рабочие места ищут его сами (UDP-широковещание), а адрес
+    // остаётся запасным путём — на случай сети, где широковещание не ходит.
     function updateLanNote() {
       const port = parseInt($('hostPort').value, 10) || state.defaults.hostPort
       const box = $('lanNote')
-      box.textContent = 'Адрес для клиентов: '
+      box.textContent = 'Рабочие места найдут этот компьютер сами, если они в одной сети. ' +
+        'Если поиск не сработал — укажите на них адрес: '
       const addCode = (text) => { const c = document.createElement('code'); c.textContent = text; box.appendChild(c) }
       const addText = (text) => box.appendChild(document.createTextNode(text))
       if (!state.lanIps.length) {
@@ -194,7 +212,42 @@
         if (i) addText(i === state.lanIps.length - 1 ? ' или ' : ', ')
         addCode('http://' + ip + ':' + port)
       })
-      addText('. Укажите его на других компьютерах в режиме «Клиент».')
+      addText('.')
+    }
+
+    // Список найденных хостов. Только DOM-узлами: имя компьютера приходит из
+    // сети, и innerHTML с ним был бы дырой в окне, где вводят пароль сисадмина.
+    function renderFound(nodes) {
+      const box = $('found')
+      box.textContent = ''
+      for (const n of nodes) box.appendChild(n)
+    }
+    function foundMessage(text) {
+      const d = document.createElement('div')
+      d.className = 'msg'
+      d.textContent = text
+      return d
+    }
+    function foundRow(host) {
+      const row = document.createElement('div')
+      row.className = 'row'
+      const name = document.createElement('span')
+      name.className = 'name'
+      name.textContent = host.computer || 'Компьютер без имени'
+      const addr = document.createElement('span')
+      addr.className = 'addr'
+      addr.textContent = host.url
+      row.appendChild(name)
+      row.appendChild(document.createTextNode('·'))
+      row.appendChild(addr)
+      if (host.known) {
+        const tag = document.createElement('span')
+        tag.className = 'tag'
+        tag.textContent = 'ваш хост'
+        row.appendChild(tag)
+      }
+      row.onclick = () => { $('url').value = host.url; setStatus('Адрес подставлен — нажмите «Проверить»') }
+      return row
     }
 
     async function init() {
@@ -292,8 +345,27 @@
       if (!url) return setStatus('Укажите адрес хоста', 'err')
       setStatus('Проверяю…')
       const r = await window.settingsApi.test(url)
-      if (r && r.ok) setStatus('Сервер отвечает', 'ok')
+      if (r && r.ok) setStatus(r.known ? 'Сервер отвечает — это ваш хост' : 'Сервер отвечает', 'ok')
       else setStatus('Сервер недоступен: ' + ((r && r.error) || ('HTTP ' + (r && r.status))), 'err')
+    }
+
+    // «Найти в сети»: хост отвечает на широковещательный запрос сам — сисадмину
+    // больше не нужно знать IP и лазить в ipconfig на другом компьютере.
+    $('discover').onclick = async () => {
+      $('discover').disabled = true
+      renderFound([foundMessage('Ищу хосты в сети…')])
+      try {
+        const list = await window.settingsApi.discover()
+        const hosts = Array.isArray(list) ? list : []
+        if (!hosts.length) {
+          renderFound([foundMessage('Хосты не найдены. Проверьте, что хост запущен и находится в той же сети')])
+        } else {
+          renderFound(hosts.map(foundRow))
+        }
+      } catch (e) {
+        renderFound([foundMessage('Поиск не удался: ' + ((e && e.message) || e))])
+      }
+      $('discover').disabled = false
     }
 
     $('save').onclick = async () => {

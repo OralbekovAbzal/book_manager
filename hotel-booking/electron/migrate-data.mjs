@@ -1,5 +1,7 @@
 // Разовый перенос данных из старой базы (localhost:5432) во встроенную базу
-// хоста (userData/pgdata, порт 5433). Сохраняет ID и связи.
+// хоста (userData/pgdata). Сохраняет ID и связи.
+// Порт встроенной базы берём из config.json: он больше не зашит — программа
+// выбирает свободный при старте и запоминает (см. resolveDbPort в main.js).
 // Запуск:  cd electron && node migrate-data.mjs
 import EmbeddedPostgres from 'embedded-postgres'
 import pg from 'pg'
@@ -9,6 +11,7 @@ import path from 'path'
 const { Client } = pg
 const UD = path.join(process.env.APPDATA, 'hotel-booking-desktop')
 const cfg = JSON.parse(readFileSync(path.join(UD, 'config.json'), 'utf8'))
+const DB_PORT = Number.isInteger(cfg.dbPort) ? cfg.dbPort : 5433
 
 // Порядок: родители раньше детей (внешние ключи).
 const ORDER = [
@@ -42,10 +45,10 @@ async function copyTable(src, dst, table) {
 async function main() {
   const epg = new EmbeddedPostgres({
     databaseDir: path.join(UD, 'pgdata'),
-    user: 'postgres', password: cfg.dbPassword, port: 5433,
+    user: 'postgres', password: cfg.dbPassword, port: DB_PORT,
     persistent: true, onLog: () => {}, onError: () => {},
   })
-  console.log('• Запускаю встроенную базу (5433)…')
+  console.log(`• Запускаю встроенную базу (${DB_PORT})…`)
   await epg.start()
 
   const src = new Client(SOURCE)

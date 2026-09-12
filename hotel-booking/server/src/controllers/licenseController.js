@@ -7,6 +7,7 @@ const {
   resetLicenseCache,
   isoToUtcDate,
 } = require('../utils/license')
+const { getTrialState } = require('../utils/trial')
 
 /**
  * Сколько номеров реально занято лимитом. Считаем АКТИВНЫЕ: ступень тарифа —
@@ -20,6 +21,11 @@ function countActiveRooms() {
 async function buildResponse(keyString) {
   const info = describeLicense(keyString)
   info.roomsUsed = await countActiveRooms()
+  // Пробный период имеет смысл только без действующего ключа: с ключом он
+  // не считается вовсе, и клиенту нечего про него показывать.
+  info.trial = info.state === 'none' || info.state === 'invalid'
+    ? await getTrialState()
+    : null
   return info
 }
 

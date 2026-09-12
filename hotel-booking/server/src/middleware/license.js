@@ -1,19 +1,23 @@
 /**
- * Гейт обслуживания — единственный рычаг в лицензировании Roomline PMS.
+ * Гейт лицензии — два рычага в лицензировании Roomline PMS.
  *
- * Правило: «обслуживание = право на обновления», а не право пользоваться
- * программой. Поэтому блокируется не работа отеля, а работа СЛИШКОМ НОВОЙ сборки:
- * если обслуживание кончилось раньше, чем выпущена эта версия, значит клиент
- * поставил обновление, за которое не платил.
+ * 1. Пробный период (с 12.09.2026). Без ключа программа работает 14 дней с
+ *    первого старта (`utils/trial.js`), потом закрывается до ввода ключа.
+ *    Ключ, который не читается, срок не продлевает.
+ * 2. Обслуживание. Правило: «обслуживание = право на обновления», а не право
+ *    пользоваться программой. Поэтому блокируется не работа отеля, а работа
+ *    СЛИШКОМ НОВОЙ сборки: если обслуживание кончилось раньше, чем выпущена
+ *    эта версия, значит клиент поставил обновление, за которое не платил.
  *
  * Что при этом важно и чего мы НЕ делаем:
  *  - база не трогается ни на байт, откатиться на прежний установщик можно всегда;
  *  - сервер поднимается нормально (иначе Electron решил бы, что хост умер,
  *    и полез бы перезапускать его по кругу);
- *  - вход и раздел лицензии открыты — иначе ввести продлённый ключ было бы нечем.
+ *  - вход и раздел лицензии открыты — иначе ввести ключ было бы нечем.
  */
 
 const { getLicenseState, getBuildDate, formatRu } = require('../utils/license')
+const trial = require('../utils/trial')
 const logger = require('../utils/logger')
 
 /**
@@ -24,6 +28,7 @@ const logger = require('../utils/logger')
 const ALLOWED = ['/api/health', '/api/license', '/api/auth/login']
 
 const MAINTENANCE_EXPIRED = 'MAINTENANCE_EXPIRED'
+const TRIAL_EXPIRED = 'TRIAL_EXPIRED'
 
 function isAllowed(pathname) {
   return ALLOWED.some((p) => pathname === p || pathname === `${p}/` || pathname.startsWith(`${p}/`))
@@ -53,18 +58,43 @@ async function maintenanceGate(req, res, next) {
     return next()
   }
 
-  if (lic.state !== 'expired') return next()
+  if (lic.state === 'expired') {
+    const message = expiredMessage(lic.payload.maintenanceUntil)
+    return res.status(402).json({
+      code: MAINTENANCE_EXPIRED,
+      message,
+      // Дубль в `error` — чтобы общий обработчик ошибок на клиенте (он читает
+      // именно это поле у всех остальных ответов) показал текст, а не «неизвестная ошибка».
+      error: message,
+      maintenanceUntil: lic.payload.maintenanceUntil,
+      buildDate: getBuildDate(),
+    })
+  }
 
-  const message = expiredMessage(lic.payload.maintenanceUntil)
-  res.status(402).json({
-    code: MAINTENANCE_EXPIRED,
-    message,
-    // Дубль в `error` — чтобы общий обработчик ошибок на клиенте (он читает
-    // именно это поле у всех остальных ответов) показал текст, а не «неизвестная ошибка».
-    error: message,
-    maintenanceUntil: lic.payload.maintenanceUntil,
-    buildDate: getBuildDate(),
-  })
+  // Ключа нет (или он не читается) — смотрим пробный период. С действующим
+  // ключом (`ok`) сюда не доходим: срок ему не указ.
+  if (lic.state === 'none' || lic.state === 'invalid') {
+    let t
+    try {
+      t = await trial.getTrialState()
+    } catch (err) {
+      // Та же логика, что выше: лежащая база — не «кончился пробный период».
+      logger.error(`maintenanceGate: не удалось прочитать пробный период — ${err.message}`)
+      return next()
+    }
+    if (t.expired) {
+      const message = trial.expiredMessage(t)
+      return res.status(402).json({
+        code: TRIAL_EXPIRED,
+        message,
+        error: message,
+        trialEndsAt: t.lastDay,
+        buildDate: getBuildDate(),
+      })
+    }
+  }
+
+  return next()
 }
 
-module.exports = { maintenanceGate, MAINTENANCE_EXPIRED, ALLOWED, expiredMessage }
+module.exports = { maintenanceGate, MAINTENANCE_EXPIRED, TRIAL_EXPIRED, ALLOWED, expiredMessage }

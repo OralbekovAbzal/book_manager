@@ -102,7 +102,9 @@ electron/
 - **Realtime** — любое изменение брони эмитит `booking:*`; при правке API проверяй событие.
 - **Лицензия** — офлайн-ключ `ROOMLINE-…` с подписью Ed25519 (`utils/license.js`); ключи
   прежнего образца `QONAQ-…` принимаются навсегда (`LEGACY_KEY_PREFIXES`), гейт
-  обслуживания по `buildDate` сборки (`middleware/license.js`).
+  обслуживания по `buildDate` сборки (`middleware/license.js`). **Без ключа — 14 дней
+  пробного периода** (`utils/trial.js`, `HotelSettings.trialStartedAt`), потом 402
+  `TRIAL_EXPIRED` и экран блокировки; `ROOMLINE_TRIAL_DAYS=0` — закрыть сразу (проверка).
 - **Мастер первого запуска** — только на нетронутой базе (`utils/setupState.js`).
 - **Личность хоста** — `HotelSettings.instanceId` + пара Ed25519 в базе (`utils/instanceIdentity.js`),
   `GET /api/health?nonce=…` возвращает `instance { id, publicKey, sig }`; ответчик поиска —

@@ -391,6 +391,7 @@ describe('контроллер /api/license', () => {
       stubs: {
         '../utils/prisma': { prisma },
         '../utils/license': lib,
+        '../utils/trial': { getTrialState: async () => ({ startedAt: null, endsAt: null, lastDay: null, daysLeft: null, expired: false, days: 14 }) },
         '../middleware/errorHandler': require_errorHandler(),
       },
     })
@@ -519,7 +520,12 @@ describe('гейт обслуживания (402)', () => {
       formatRu: (iso) => iso.split('-').reverse().join('.'),
     }
     const mod = loadCjs('src/middleware/license.js', {
-      stubs: { '../utils/license': licenseStub, '../utils/logger': silentLogger },
+      stubs: {
+        '../utils/license': licenseStub,
+        // Пробный период здесь не при чём — свой набор проверок в trial.test.js
+        '../utils/trial': { getTrialState: async () => ({ expired: false }), expiredMessage: () => '' },
+        '../utils/logger': silentLogger,
+      },
     })
     return mod.maintenanceGate
   }

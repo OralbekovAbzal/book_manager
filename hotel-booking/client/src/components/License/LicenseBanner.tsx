@@ -2,15 +2,17 @@ import React from 'react'
 import { useLicenseStore } from '../../store/useLicenseStore'
 
 /**
- * Полоса под шапкой: «Лицензия не введена».
+ * Полоса под шапкой: «Ключ лицензии не читается».
  *
- * Именно полоса, а не модалка: без ключа программа работает полностью (демо), и
- * перекрывать работу стойки из-за учётного вопроса нельзя. Одна строка, кликом
- * уводит в «Настройки → Лицензия».
+ * Показывается ТОЛЬКО при `invalid`: ключ есть, но не проходит проверку —
+ * молчать об этом хуже, чем сказать, а больше нигде это не всплывёт.
  *
- * При `ok` не показывается ничего. `invalid` показываем тоже: ключ есть, но не
- * читается — молчать об этом хуже, чем сказать, а больше нигде это не всплывёт.
- * `expired` сюда не доходит: там поднимается экран блокировки вместо приложения.
+ * При `none` не показывается ничего (решение владельца 12.09.2026): без ключа
+ * идёт пробный период 14 дней, и полоса «лицензия не введена» всё это время
+ * только мешала бы стойке. Сколько осталось — видно в «Настройки → Лицензия»;
+ * когда срок выйдет, сервер ответит 402 и вместо приложения поднимется экран
+ * блокировки (`MaintenanceGateScreen`). `expired` сюда тоже не доходит — там
+ * тот же экран.
  */
 
 const barStyle: React.CSSProperties = {
@@ -24,18 +26,13 @@ const barStyle: React.CSSProperties = {
 
 export const LicenseBanner: React.FC<{ onOpen: () => void }> = ({ onOpen }) => {
   const info = useLicenseStore(s => s.info)
-  if (!info || info.state === 'ok' || info.state === 'expired') return null
+  if (!info || info.state !== 'invalid') return null
 
-  const text = info.state === 'none'
-    ? 'Лицензия не введена — программа работает в демонстрационном режиме.'
-    : `Ключ лицензии не читается${info.message ? `: ${info.message}` : ''}.`
+  const text = `Ключ лицензии не читается${info.message ? `: ${info.message}` : ''}.`
 
   return (
     <button type="button" onClick={onOpen} title="Открыть раздел «Лицензия»" style={barStyle}>
-      <span style={{
-        width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
-        background: info.state === 'none' ? 'var(--s-out)' : 'var(--s-overdue)',
-      }} />
+      <span style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: 'var(--s-overdue)' }} />
       {/* На узком окне обрезаем текст, а не ссылку: полоса обязана остаться в одну строку */}
       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{text}</span>
       <span style={{ flexShrink: 0, marginLeft: 'auto', color: 'var(--accent-text)', fontWeight: 600 }}>

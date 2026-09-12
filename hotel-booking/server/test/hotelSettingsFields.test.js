@@ -43,6 +43,8 @@ function settingsRow(over = {}) {
     pricingBase: 'person',
     lateArrivalHour: null,
     setupCompletedAt: new Date('2026-09-03T03:54:54.890Z'),
+    // Начало пробного периода (12.09.2026) — служебное, наружу не отдаётся.
+    trialStartedAt: new Date('2026-09-03T03:54:54.890Z'),
     legalName: 'ИП Оралбеков А.',
     bin: '990514300123',
     address: null,

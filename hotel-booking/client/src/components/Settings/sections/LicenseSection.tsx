@@ -2,7 +2,7 @@ import React, { useEffect } from 'react'
 import { useLicenseStore } from '../../../store/useLicenseStore'
 import { useAuthStore } from '../../../store/useAuthStore'
 import {
-  LicenseKeyForm, LICENSE_STATE_TITLE, licenseStateNote, licenseStateColor, formatIsoRu,
+  LicenseKeyForm, LICENSE_STATE_TITLE, licenseStateNote, licenseStateColor, formatIsoRu, pluralDays,
 } from '../../License/licenseUi'
 import { SectionHeader, formCard, errorStyle } from './sectionUi'
 
@@ -73,7 +73,27 @@ export const LicenseSection: React.FC = () => {
             </div>
           )}
 
-          <div style={formCard}>
+          {info.trial && (
+            <div style={formCard}>
+              <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>Пробный период</div>
+              <div>
+                <Row label="Длительность">{pluralDays(info.trial.days)} с первого запуска</Row>
+                <Row label="Работает до">{formatIsoRu(info.trial.lastDay)}</Row>
+                <div style={{ ...rowStyle, borderBottom: 'none' }}>
+                  <span style={rowLabel}>Осталось</span>
+                  <span style={{
+                    ...rowValue,
+                    color: info.trial.expired || (info.trial.daysLeft ?? 99) <= 3 ? 'var(--s-overdue)' : 'var(--text)',
+                  }}>
+                    {info.trial.expired ? 'срок вышел' : info.trial.daysLeft != null ? pluralDays(info.trial.daysLeft) : '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Без ключа карточка «Что в ключе» — одни прочерки; вместо неё выше стоит пробный период */}
+          {info.state !== 'none' && <div style={formCard}>
             <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>Что в ключе</div>
             <div>
               <Row label="Объект">{info.hotel ?? '—'}</Row>
@@ -102,7 +122,7 @@ export const LicenseSection: React.FC = () => {
                 действует только на добавление новых.
               </div>
             )}
-          </div>
+          </div>}
         </>
       )}
 

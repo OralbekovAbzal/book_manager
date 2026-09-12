@@ -12,6 +12,7 @@ const { startAuditRetention } = require('./src/utils/auditRetention')
 const { prisma } = require('./src/utils/prisma')
 const logger = require('./src/utils/logger')
 const { ensureIdentity, getIdentity } = require('./src/utils/instanceIdentity')
+const { ensureTrialStart } = require('./src/utils/trial')
 const { startResponder } = require('./src/discovery/udpResponder')
 const { version: APP_VERSION } = require('./package.json')
 
@@ -74,6 +75,15 @@ server.listen(PORT, HOST, async () => {
     setTimeout(identityAttempt, IDENTITY_RETRY_MS).unref()
   }
   await identityAttempt()
+
+  // Начало пробного периода — сразу после личности: та создаёт строку настроек
+  // на свежей базе, и дата ложится в неё же. Не получилось — гейт проставит
+  // лениво при первом чтении (`utils/trial.js`), ронять старт незачем.
+  try {
+    await ensureTrialStart(prisma)
+  } catch (err) {
+    logger.warn(`trial: начало пробного периода не записано (${err && err.message}) — проставлю при первом запросе`)
+  }
 
   // Ответчик включается ТОЛЬКО по явному DISCOVERY_PORT — его задаёт Electron в
   // режиме хоста. В dev и на рабочем месте-клиенте лишний слушающий UDP-порт

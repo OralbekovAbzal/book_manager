@@ -3,12 +3,24 @@ import { API_BASE } from '../config'
 
 const api = axios.create({ baseURL: API_BASE })
 
-/** Сведения из ответа 402 — гейт обслуживания (server/src/middleware/license.js). */
+/** Сведения из ответа 402 — гейт лицензии (server/src/middleware/license.js). */
 export interface MaintenanceBlock {
-  /** Готовый текст сервера: «Обслуживание закончилось …, а эта версия выпущена позже.» */
+  /**
+   * `maintenance` — обслуживание кончилось раньше выпуска этой сборки;
+   * `trial` — 14 дней без ключа вышли. Текст и поля экрана блокировки разные.
+   */
+  kind: 'maintenance' | 'trial'
+  /** Готовый текст сервера — он один и тот же в логах и на экране. */
   message: string
   maintenanceUntil: string | null
+  /** Последний день пробного периода, 'ГГГГ-ММ-ДД' (только для `trial`). */
+  trialEndsAt: string | null
   buildDate: string | null
+}
+
+const BLOCK_CODES: Record<string, MaintenanceBlock['kind']> = {
+  MAINTENANCE_EXPIRED: 'maintenance',
+  TRIAL_EXPIRED: 'trial',
 }
 
 /**
@@ -53,11 +65,14 @@ api.interceptors.response.use(
     // токен сотрётся, страница перезагрузится — и так по кругу, а ввести
     // продлённый ключ станет негде. Вход и /api/license гейт пропускает, поэтому
     // просто поднимаем экран блокировки и отдаём ошибку вызывающему.
-    if (status === 402 && err.response?.data?.code === 'MAINTENANCE_EXPIRED') {
+    const blockKind = status === 402 ? BLOCK_CODES[String(err.response?.data?.code)] : undefined
+    if (blockKind) {
       const d = err.response.data
       maintenanceListener?.({
-        message: d.message || d.error || 'Обслуживание закончилось.',
+        kind: blockKind,
+        message: d.message || d.error || (blockKind === 'trial' ? 'Пробный период закончился.' : 'Обслуживание закончилось.'),
         maintenanceUntil: d.maintenanceUntil ?? null,
+        trialEndsAt: d.trialEndsAt ?? null,
         buildDate: d.buildDate ?? null,
       })
       return Promise.reject(err)

@@ -319,8 +319,10 @@ async function seedAdmins(keepAdminId) {
 async function seedHotelSettings() {
   return prisma.hotelSettings.upsert({
     where: { id: 1 },
-    update: { ...HOTEL, setupCompletedAt: new Date() },
-    create: { id: 1, ...HOTEL, setupCompletedAt: new Date() },
+    // Пробный период — заново с каждого пересева: демо-база не должна упереться
+    // в гейт лицензии посреди показа (14 дней без ключа, utils/trial.js).
+    update: { ...HOTEL, setupCompletedAt: new Date(), trialStartedAt: new Date() },
+    create: { id: 1, ...HOTEL, setupCompletedAt: new Date(), trialStartedAt: new Date() },
   })
 }
 

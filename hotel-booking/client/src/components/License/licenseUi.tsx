@@ -27,17 +27,40 @@ export function formatIsoRu(iso: string | null | undefined): string {
 
 /** Короткое название состояния — то, что читает администратор отеля. */
 export const LICENSE_STATE_TITLE: Record<LicenseState, string> = {
-  none: 'Лицензия не введена',
+  none: 'Пробный период',
   ok: 'Лицензия действует',
   expired: 'Обслуживание закончилось',
   invalid: 'Ключ лицензии не читается',
+}
+
+/** «14 дней», «1 день», «3 дня». */
+export function pluralDays(n: number): string {
+  const abs = Math.abs(n) % 100
+  const last = abs % 10
+  if (abs > 10 && abs < 20) return `${n} дней`
+  if (last === 1) return `${n} день`
+  if (last >= 2 && last <= 4) return `${n} дня`
+  return `${n} дней`
+}
+
+/** Сколько осталось пробного периода — фраза для раздела «Лицензия». */
+export function trialNote(info: LicenseInfo): string {
+  const t = info.trial
+  if (!t || !t.lastDay) {
+    return `Без ключа программа работает ${pluralDays(t?.days ?? 14)} с первого запуска, потом потребует ключ. Ключ вводится один раз главным администратором.`
+  }
+  if (t.expired) {
+    return `Пробный период закончился ${formatIsoRu(t.lastDay)}. Чтобы продолжить работу, введите ключ лицензии.`
+  }
+  return `Программа работает полностью до ${formatIsoRu(t.lastDay)} включительно (осталось ${pluralDays(t.daysLeft ?? 0)}). ` +
+    'Потом потребуется ключ лицензии — его вводит главный администратор, данные при этом не теряются.'
 }
 
 /** Пояснение под названием состояния. */
 export function licenseStateNote(info: LicenseInfo): string {
   switch (info.state) {
     case 'none':
-      return 'Программа работает полностью, без ограничений по числу номеров. Ключ вводится один раз главным администратором.'
+      return trialNote(info)
     case 'ok':
       return info.maintenanceActive === false
         ? 'Программа работает. Обслуживание закончилось — эта версия останется рабочей, но новые версии установить нельзя.'

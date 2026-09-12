@@ -4,8 +4,10 @@ import { useLicenseStore } from '../../store/useLicenseStore'
 import { LicenseKeyForm, formatIsoRu } from './licenseUi'
 
 /**
- * Экран блокировки: сервер закрыт гейтом обслуживания и отвечает 402 на всё,
- * кроме входа и лицензии. Показывается ВМЕСТО приложения — это не раздел
+ * Экран блокировки: сервер закрыт гейтом лицензии и отвечает 402 на всё,
+ * кроме входа и лицензии. Два случая с одним экраном и разными словами:
+ * `trial` — 14 дней без ключа вышли; `maintenance` — обслуживание кончилось
+ * раньше выпуска этой сборки. Показывается ВМЕСТО приложения — это не раздел
  * (`section`) и не модалка: под гейтом приложения нет вообще, и рисовать шапку
  * с меню разделов, которые все до одного получат 402, было бы обманом.
  *
@@ -38,6 +40,7 @@ export const MaintenanceGateScreen: React.FC = () => {
   if (!block) return null
 
   const canEdit = admin?.role === 'SUPER_ADMIN'
+  const isTrial = block.kind === 'trial'
 
   return (
     <div style={{
@@ -48,7 +51,7 @@ export const MaintenanceGateScreen: React.FC = () => {
         <div>
           <div style={{ fontSize: 34, lineHeight: 1, marginBottom: 10 }}>🔑</div>
           <h1 style={{ margin: 0, fontSize: '1.32rem', fontWeight: 700, letterSpacing: '-0.01em' }}>
-            Обслуживание закончилось
+            {isTrial ? 'Пробный период закончился' : 'Обслуживание закончилось'}
           </h1>
         </div>
 
@@ -58,14 +61,29 @@ export const MaintenanceGateScreen: React.FC = () => {
         </div>
 
         <div style={{ borderTop: '1px solid var(--border-subtle)', borderBottom: '1px solid var(--border-subtle)', padding: '4px 0' }}>
-          <div style={factRow}>
-            <span style={{ color: 'var(--text-faint)' }}>Обслуживание оплачено до</span>
-            <span>{formatIsoRu(block.maintenanceUntil)}</span>
-          </div>
-          <div style={factRow}>
-            <span style={{ color: 'var(--text-faint)' }}>Эта версия выпущена</span>
-            <span>{formatIsoRu(block.buildDate)}</span>
-          </div>
+          {isTrial ? (
+            <>
+              <div style={factRow}>
+                <span style={{ color: 'var(--text-faint)' }}>Пробный период действовал до</span>
+                <span>{formatIsoRu(block.trialEndsAt)}</span>
+              </div>
+              <div style={factRow}>
+                <span style={{ color: 'var(--text-faint)' }}>Брони, касса и настройки</span>
+                <span>сохранены, откроются после ввода ключа</span>
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={factRow}>
+                <span style={{ color: 'var(--text-faint)' }}>Обслуживание оплачено до</span>
+                <span>{formatIsoRu(block.maintenanceUntil)}</span>
+              </div>
+              <div style={factRow}>
+                <span style={{ color: 'var(--text-faint)' }}>Эта версия выпущена</span>
+                <span>{formatIsoRu(block.buildDate)}</span>
+              </div>
+            </>
+          )}
         </div>
 
         <LicenseKeyForm canEdit={canEdit} autoFocus={canEdit} />

@@ -24,7 +24,7 @@ Roomline PMS — система бронирования для небольши
 | `npm run db:migrate:status` | состояние миграций |
 | `npm run db:seed` | сид: **сбрасывает пароль главного администратора** — на базе с данными не запускать |
 | `npm run db:studio` / `db:generate` | Prisma Studio / перегенерация клиента |
-| `cd server && npm test` | тесты (vitest, ~73 файла / ~1380 тестов) |
+| `cd server && npm test` | тесты (vitest, ~79 файлов / ~1470 тестов; `it.fails` — репродукции из аудита 13.09) |
 | `cd client && npx tsc --noEmit` | проверка типов клиента |
 | `cd electron && node test-host.mjs` | связка «встроенный Postgres + миграции + сервер» на временном кластере |
 

@@ -4,6 +4,7 @@ const ctrl = require('../controllers/occupancyController')
 const optimizeCtrl = require('../controllers/optimizeController')
 const { authenticate, requireRole } = require('../middleware/auth')
 const { validate } = require('../middleware/validate')
+const { requireFeature } = require('../utils/features')
 
 router.use(authenticate)
 
@@ -35,8 +36,9 @@ router.get(
   ctrl.roomAvailability
 )
 
-// optimize и applyOptimization читают тело — нужен express.json (он подключён глобально)
-router.post('/optimize', optimizeCtrl.optimize)
-router.post('/optimize/apply', requireRole('SUPER_ADMIN', 'ADMIN'), optimizeCtrl.applyOptimization)
+// optimize и applyOptimization читают тело — нужен express.json (он подключён глобально).
+// Оптимизатор в 1.0 закрыт (utils/features.js): без FEATURE_PREVIEW оба пути отвечают 404.
+router.post('/optimize', requireFeature('optimizer'), optimizeCtrl.optimize)
+router.post('/optimize/apply', requireFeature('optimizer'), requireRole('SUPER_ADMIN', 'ADMIN'), optimizeCtrl.applyOptimization)
 
 module.exports = router

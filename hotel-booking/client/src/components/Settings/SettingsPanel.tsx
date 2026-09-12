@@ -8,6 +8,7 @@ import { RoomsSection } from './sections/RoomsSection'
 import { FiltersSection } from './sections/FiltersSection'
 import { BookingFlagsSection } from './sections/BookingFlagsSection'
 import { OptimizerSection } from './sections/OptimizerSection'
+import { FEATURES } from '../../config'
 import { PartnersSection } from './sections/PartnersSection'
 import { AllotmentsSection } from './sections/AllotmentsSection'
 import { BackupSection } from './sections/BackupSection'
@@ -50,7 +51,10 @@ const NAV_GROUPS: NavGroup[] = [
       { id: 'bookingFlags', label: 'Метки броней',       icon: 'M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z M7.5 7.5h.01' },
       { id: 'partners',     label: 'Партнёры',           icon: 'M9 17H7A5 5 0 0 1 7 7h2 M15 7h2a5 5 0 1 1 0 10h-2 M8 12h8' },
       { id: 'allotments',   label: 'Квоты и аллотменты',  icon: 'M12 2 2 7l10 5 10-5z M2 17l10 5 10-5 M2 12l10 5 10-5' },
-      { id: 'optimizer',    label: 'Оптимизатор',        icon: 'M15 4V2 M8 9h2 M20 9h2 M17.8 11.8 19 13 M17.8 6.2 19 5 M3 21l9-9 M12.2 6.2 11 5' },
+      // Оптимизатор — не в 1.0 (config.ts → FEATURES); пункт пропадает вместе с ним.
+      ...(FEATURES.optimizer
+        ? [{ id: 'optimizer' as const, label: 'Оптимизатор', icon: 'M15 4V2 M8 9h2 M20 9h2 M17.8 11.8 19 13 M17.8 6.2 19 5 M3 21l9-9 M12.2 6.2 11 5' }]
+        : []),
     ],
   },
   {
@@ -193,7 +197,7 @@ export const SettingsPanel: React.FC<Props> = ({ open, onClose, initialSection }
           {activeSection === 'rooms'      && <RoomsSection />}
           {activeSection === 'filters'     && <FiltersSection />}
           {activeSection === 'bookingFlags' && <BookingFlagsSection />}
-          {activeSection === 'optimizer'    && <OptimizerSection />}
+          {activeSection === 'optimizer' && FEATURES.optimizer && <OptimizerSection />}
           {activeSection === 'partners'     && <PartnersSection />}
           {activeSection === 'allotments'   && <AllotmentsSection />}
           {activeSection === 'backup'       && <BackupSection />}

@@ -3,8 +3,12 @@ const { authenticate, requireRole } = require('../middleware/auth')
 const {
   listSnapshots, createSnapshot, describeRestore, restoreSnapshot, deleteSnapshot,
 } = require('../utils/snapshot')
+const { requireFeature } = require('../utils/features')
 
 router.use(authenticate)
+// Откат к снимкам в 1.0 закрыт целиком (utils/features.js). Сами автоснимки
+// создаются внутри сервера (utils/snapshot.js) и через этот роутер не ходят.
+router.use(requireFeature('snapshotRestore'))
 
 // GET /api/snapshots — список точек отката. Тело снимка (`data`) не отдаём, но
 // отдаём `version`: формат 1 денег не хранит, и по списку должно быть видно, что

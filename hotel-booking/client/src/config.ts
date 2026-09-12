@@ -76,4 +76,17 @@ export const API_BASE = `${SERVER_URL}/api`
 // Адрес для socket.io. Пустой → текущий origin ('/').
 export const SOCKET_URL = SERVER_URL || '/'
 
+/**
+ * Что из готового не входит в эту версию (решение владельца 2026-09-12):
+ * оптимизатор размещения и откат к снимкам до доработки клиентам не показываем.
+ * Кнопки и раздел настроек скрыты; сервер закрывает те же роуты 404 независимо
+ * от клиента (`server/src/utils/features.js`). Для разработки:
+ * `VITE_FEATURE_PREVIEW=1` у клиента и `FEATURE_PREVIEW=1` у сервера.
+ */
+const PREVIEW = import.meta.env.VITE_FEATURE_PREVIEW === '1'
+export const FEATURES = Object.freeze({
+  optimizer: PREVIEW,
+  snapshotRestore: PREVIEW,
+})
+
 export {}

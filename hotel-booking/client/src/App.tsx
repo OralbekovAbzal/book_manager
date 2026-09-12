@@ -11,6 +11,7 @@ import { MoveBookingModal } from './components/BookingModal/MoveBookingModal'
 import { BookingContextMenu } from './components/BookingGrid/BookingContextMenu'
 import { Filters } from './components/Filters/Filters'
 import { TodayStats } from './components/BookingGrid/TodayStats'
+import { FEATURES } from './config'
 import { StatusBar } from './components/BookingGrid/StatusBar'
 import { SettingsPanel } from './components/Settings/SettingsPanel'
 import { AuditWindow } from './components/Audit/AuditWindow'
@@ -263,8 +264,13 @@ export const App: React.FC = () => {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <IconBtn onClick={() => setOptimizeOpen(true)} title="Оптимизатор: подсказать перестановки" icon={ICONS.wand} />
-            <IconBtn onClick={() => setSnapshotsOpen(true)} title="Откат / снапшоты" icon={ICONS.history} />
+            {/* Оптимизатор и откат к снимкам — не в 1.0 (config.ts → FEATURES) */}
+            {FEATURES.optimizer && (
+              <IconBtn onClick={() => setOptimizeOpen(true)} title="Оптимизатор: подсказать перестановки" icon={ICONS.wand} />
+            )}
+            {FEATURES.snapshotRestore && (
+              <IconBtn onClick={() => setSnapshotsOpen(true)} title="Откат / снапшоты" icon={ICONS.history} />
+            )}
             <IconBtn onClick={() => setAuditOpen(true)} title="Аудит" icon={ICONS.audit} />
             <IconBtn onClick={toggleTheme} title="Сменить тему" icon={visual.theme === 'light' ? ICONS.moon : ICONS.sun} />
             {/* Не `onClick={logout}`: событие клика ушло бы в параметр `reason` */}
@@ -328,8 +334,8 @@ export const App: React.FC = () => {
       <BookingContextMenu />
       <DeleteBookingDialog />
       <AuditWindow open={auditOpen} onClose={() => setAuditOpen(false)} />
-      <OptimizeModal open={optimizeOpen} onClose={() => setOptimizeOpen(false)} />
-      <SnapshotsModal open={snapshotsOpen} onClose={() => setSnapshotsOpen(false)} />
+      {FEATURES.optimizer && <OptimizeModal open={optimizeOpen} onClose={() => setOptimizeOpen(false)} />}
+      {FEATURES.snapshotRestore && <SnapshotsModal open={snapshotsOpen} onClose={() => setSnapshotsOpen(false)} />}
       <NavDrawer
         open={navOpen}
         active={section}

@@ -39,6 +39,13 @@
         "to": "renderer"
       },
       {
+        "from": "vcredist",
+        "to": "app/node_modules/@embedded-postgres/windows-x64/native/bin",
+        "filter": [
+          "*.dll"
+        ]
+      },
+      {
         "from": "db",
         "to": "db"
       },

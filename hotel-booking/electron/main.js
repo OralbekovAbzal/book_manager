@@ -190,6 +190,17 @@ function describeStartError(err) {
   // для пользователя — путь к логу в нём тоже есть, второй раз не приписываем.
   if (err && err.title && err.message) return err.message
   const msg = err && (typeof err === 'string' ? err : err.message)
+  // 3221225781 = 0xC0000135, STATUS_DLL_NOT_FOUND: initdb/postgres не смогли
+  // загрузить системную библиотеку. На практике это среда выполнения Visual C++
+  // (vcruntime140/msvcp140) на чистой Windows — сборка с 12.09.2026 везёт её с
+  // собой (electron/vcredist), но старая установка или подменённые файлы дадут
+  // ровно этот код, и человеку нужен ответ, а не число.
+  if (msg && /3221225781|0xC0000135/i.test(msg)) {
+    return 'База данных не запустилась: не найдена системная библиотека Windows ' +
+      '(среда выполнения Visual C++). Переустановите программу свежим установщиком; ' +
+      'если не поможет — установите «Microsoft Visual C++ Redistributable x64» с сайта Microsoft.' +
+      `\n\nПодробности: ${DEBUG_LOG}`
+  }
   if (msg) return `${msg}\n\nПодробности: ${DEBUG_LOG}`
   // Догадки про занятый порт здесь больше нет: занятый порт базы ловится до
   // старта (resolveDbPort), и своя ошибка у него отдельная и точная.

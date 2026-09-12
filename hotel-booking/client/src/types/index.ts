@@ -221,6 +221,9 @@ export interface GridRoom {
   number: string
   building: string
   floor: number
+  /** Сколько гостей помещается (по справочнику вместимостей); null — не задано. */
+  capacity: number | null
+  capacityLabel: string | null
   features: string[]
   bookings: GridBooking[]
   allotments?: GridAllotment[]

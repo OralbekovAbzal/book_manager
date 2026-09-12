@@ -102,11 +102,24 @@ async function grid(req, res, next) {
         number: true,
         building: true,
         floor: true,
+        capacity: true,
         features: true,
         category: { select: { id: true, name: true, color: true } },
       },
       orderBy: [{ building: 'asc' }, { floor: 'asc' }, { number: 'asc' }],
     })
+
+    // Вместимость в номере лежит кодом (`Room.capacity` ↔ `RoomCapacity.code`);
+    // сетке нужна цифра рядом с номером — расшифровываем один раз на запрос.
+    // Код без строки в справочнике или с value 0 → null: рисовать «0 гостей» вранье.
+    const capacityRows = await prisma.roomCapacity.findMany({ select: { code: true, value: true, label: true } })
+    const capacityByCode = new Map(capacityRows.map((c) => [c.code, c]))
+    const roomCapacity = (code) => {
+      const c = code ? capacityByCode.get(code) : null
+      return c && c.value > 0
+        ? { capacity: c.value, capacityLabel: c.label }
+        : { capacity: null, capacityLabel: null }
+    }
 
     const roomIds = rooms.map((r) => r.id)
 
@@ -195,6 +208,7 @@ async function grid(req, res, next) {
         number: room.number,
         building: room.building,
         floor: room.floor,
+        ...roomCapacity(room.capacity),
         features: room.features,
         bookings: bookingsByRoom.get(room.id) || [],
         allotments: allotmentsByRoom.get(room.id) || [],

@@ -229,8 +229,29 @@ const GridRowImpl: React.FC<Props> = ({ row, dates, dateFrom, today }) => {
           background: categoryColor, flexShrink: 0,
         }} />
         <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', minWidth: 0, flex: 1 }}>
-          <span className="mono" style={{ fontSize: FONT_SIZE, fontWeight: 600, color: 'var(--text)', lineHeight: 1.3, letterSpacing: '-0.01em' }}>
-            {room.number}
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+            <span className="mono" style={{ fontSize: FONT_SIZE, fontWeight: 600, color: 'var(--text)', lineHeight: 1.3, letterSpacing: '-0.01em' }}>
+              {room.number}
+            </span>
+            {/* Вместимость — рядом с номером, чтобы при звонке видеть «на скольких»,
+                не открывая карточку номера (просьба владельца 13.09.2026). */}
+            {room.capacity != null && (
+              <span
+                title={room.capacityLabel ? `Вместимость: ${room.capacityLabel}` : `Вместимость: ${room.capacity}`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 2, flexShrink: 0,
+                  padding: '0 5px', height: Math.max(14, FONT_SIZE + 3), borderRadius: 4,
+                  background: 'var(--surface-2)', color: 'var(--text-muted)',
+                  fontSize: Math.max(9, FONT_SIZE - 3), fontWeight: 600, lineHeight: 1,
+                }}
+              >
+                <svg width={Math.max(9, FONT_SIZE - 3)} height={Math.max(9, FONT_SIZE - 3)} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="8" r="4" />
+                  <path d="M4 21c0-4 3.6-7 8-7s8 3 8 7" />
+                </svg>
+                {room.capacity}
+              </span>
+            )}
           </span>
           <span style={{
             fontSize: Math.max(9, FONT_SIZE - 3),

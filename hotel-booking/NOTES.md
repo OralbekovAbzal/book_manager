@@ -1128,6 +1128,13 @@ Start-Process -FilePath "npm.cmd" -ArgumentList "run","dev" `
 7. Сервер на клоне — `node server.js`, правки не подхватывает: после серверных правок перезапускать.
 
 ### Правила/грабли
+- **Полоса «Нет связи с сервером» на упакованном хосте при живом сервере** (12.09.2026): из окна
+  на `file://` fetch идёт без `Origin`, а WebSocket-рукопожатие несёт `Origin: file://` — старый
+  `corsOrigin` его отвергал, engine.io отвечал 403, сокет не подключался, через 5 с полоса. REST
+  при этом работал, поэтому в песочнице не замечали. Исправлено в `utils/corsOrigin.js`
+  (`OPAQUE_ORIGINS`: `file://`, `null`). Проверять: после входа в упакованной программе полосы
+  нет (`SANDBOX-CHECKLIST.md` п. 2); пробник Origin — Electron-окно на `file://` против
+  http-сервера, логирующего заголовок (см. `docs/decisions/desktop-and-ops.md`).
 - **Чистая Windows без Visual C++ Redistributable** (12.09.2026, первый чужой ноутбук): `initdb`
   падал с `code: 3221225781` — не найдены `vcruntime140/msvcp140`. С 12.09 они едут в сборке
   (`electron/vcredist/` → `extraResources` → папка `bin` встроенного Postgres). На машине

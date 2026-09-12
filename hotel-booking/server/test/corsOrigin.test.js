@@ -44,8 +44,20 @@ describe('corsOrigin', () => {
     expect(allows('http://evil.example')).toBe(false)
   })
 
-  it('запрос без Origin разрешён — упакованный Electron шлёт file:// без него', () => {
+  it('запрос без Origin разрешён — fetch из упакованного Electron идёт без него', () => {
     expect(allows(undefined)).toBe(true)
+  })
+
+  it('WebSocket из упакованного окна (Origin: file:// или null) разрешён — иначе сокет 403 и полоса «Нет связи»', () => {
+    // Найдено на чистой установке 12.09.2026: REST работал (без Origin), а
+    // рукопожатие сокета несло `Origin: file://` и получало отказ.
+    expect(allows('file://')).toBe(true)
+    expect(allows('null')).toBe(true)
+  })
+
+  it('чужая схема с похожим видом не проходит', () => {
+    expect(allows('file://evil')).toBe(false)
+    expect(allows('nullx')).toBe(false)
   })
 
   it('локальный префикс в чужом домене не проходит — хост закрыт границей', () => {

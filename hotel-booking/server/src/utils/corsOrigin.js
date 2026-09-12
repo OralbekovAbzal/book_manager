@@ -16,8 +16,18 @@ const allowedOrigins = (process.env.CLIENT_ORIGIN || 'http://localhost:5173,http
 // `http://10.evil.example` проходили как «локальная сеть» (находка волны 10).
 const LAN_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(:\d{1,5})?$/
 
+// Упакованное окно живёт на file://. Chromium при этом ведёт себя по-разному:
+// fetch/axios идут БЕЗ заголовка Origin (ветка `!origin`), а WebSocket-рукопожатие
+// несёт `Origin: file://` (в некоторых сборках — строку `null`). Без этих двух
+// строк REST работал, а сокет получал 403 от engine.io — и на каждом
+// упакованном хосте через 5 секунд висела полоса «Нет связи с сервером»
+// (найдено на чистой установке 12.09.2026). Граница безопасности здесь всё равно
+// JWT: страница с чужого file:// токен из нашего localStorage не достанет.
+const OPAQUE_ORIGINS = new Set(['file://', 'null'])
+
 function corsOrigin(origin, cb) {
   if (!origin) return cb(null, true)
+  if (OPAQUE_ORIGINS.has(origin)) return cb(null, true)
   if (allowedOrigins.includes(origin)) return cb(null, true)
   if (LAN_ORIGIN.test(origin)) return cb(null, true)
   return cb(new Error('CORS: origin не разрешён'))

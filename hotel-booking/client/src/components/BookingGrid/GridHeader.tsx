@@ -16,7 +16,8 @@ interface MonthGroup {
   count: number
 }
 
-const MONTH_ROW_H = 30
+// 30 → 22 (12.09.2026): строка месяца — подпись, а не панель; экран стойки дороже.
+const MONTH_ROW_H = 22
 
 export const GridHeader: React.FC<Props> = ({ dates, today, scrollbarWidth = 0 }) => {
   const { DAY_WIDTH, ROOM_COL_WIDTH, HEADER_HEIGHT, FONT_SIZE } = useGridSettings()

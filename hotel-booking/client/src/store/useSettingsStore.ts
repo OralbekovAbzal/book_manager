@@ -6,7 +6,7 @@ export type ThemeMode = 'light' | 'dark'
 export interface VisualSettings {
   theme: ThemeMode
   rowHeight: number       // 28–80  — высота строки сетки
-  headerHeight: number    // 32–72  — высота заголовка дат
+  headerHeight: number    // 24–72  — высота заголовка дат
   fontSize: number        // 10–22  — размер шрифта (глобальный, применяется везде)
   blockRadius: number     // 0–20   — скругление блоков броней
   uiRadius: number        // 0–20   — скругление кнопок / полей / карточек
@@ -19,7 +19,7 @@ export interface VisualSettings {
 export const VISUAL_DEFAULTS: VisualSettings = {
   theme: 'light',
   rowHeight: 44,
-  headerHeight: 48,
+  headerHeight: 38,
   fontSize: 13,
   blockRadius: 6,
   uiRadius: 6,
@@ -167,6 +167,16 @@ interface SettingsStore {
   toggleFlagHidden: (code: string) => void
 }
 
+/**
+ * Правка сохранённых настроек под новые дефолты (12.09.2026): заголовок дат
+ * по умолчанию ужат 48 → 38 px, чтобы полосы над сеткой занимали меньше экрана.
+ * Кто не трогал ползунок, получает новую высоту; кто выставил своё — остаётся
+ * при своём (48 — прежний дефолт, а не осознанный выбор).
+ */
+function migrateVisual(v: VisualSettings): VisualSettings {
+  return v.headerHeight === 48 ? { ...v, headerHeight: VISUAL_DEFAULTS.headerHeight } : v
+}
+
 export const useSettingsStore = create<SettingsStore>()(
   persist(
     (set) => ({
@@ -212,7 +222,7 @@ export const useSettingsStore = create<SettingsStore>()(
         return {
           ...current,
           ...p,
-          visual:         { ...current.visual,         ...(p.visual ?? {}) },
+          visual:         migrateVisual({ ...current.visual,         ...(p.visual ?? {}) }),
           // roomFund домешиваем полным spread'ом НАМЕРЕННО: у старых
           // пользователей внутри ещё лежат buildings/features/capacities, и до
           // успешного переноса в БД (см. useRoomFundStore) их терять нельзя —

@@ -44,9 +44,11 @@ export const TodayStats: React.FC<Props> = ({ filtersOpen, onToggleFilters }) =>
   }
 
   return (
+    // 52 → 40 px (12.09.2026): вместе с шапкой и заголовком дат полосы над
+    // сеткой съедали ~180 px — на ноутбуке стойки это два-три номера.
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 12,
-      height: 52, flexShrink: 0, padding: '0 16px',
+      display: 'flex', alignItems: 'center', gap: 10,
+      height: 40, flexShrink: 0, padding: '0 12px',
       background: 'var(--bg)', borderBottom: '1px solid var(--border-subtle)',
     }}>
       {/* Filter rail toggle */}
@@ -55,21 +57,21 @@ export const TodayStats: React.FC<Props> = ({ filtersOpen, onToggleFilters }) =>
         title={filtersOpen ? 'Скрыть фильтры' : 'Показать фильтры'}
         className="tb-btn"
         style={{
-          width: 34, height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8,
+          width: 28, height: 28, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7,
           color: 'var(--text-muted)', cursor: 'pointer', transition: 'background 0.12s',
         }}
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           {filtersOpen ? chevLeft2 : chevRight2}
         </svg>
       </button>
 
       {/* Room-status pills — общий серый контейнер, активная белая */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 3, flexWrap: 'wrap',
-        padding: 4, background: 'var(--surface-2)',
-        border: '1px solid var(--border-subtle)', borderRadius: 10,
+        display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap',
+        padding: 2, background: 'var(--surface-2)',
+        border: '1px solid var(--border-subtle)', borderRadius: 8,
       }}>
         {FILTERS.map(f => (
           <FilterPill
@@ -89,9 +91,9 @@ export const TodayStats: React.FC<Props> = ({ filtersOpen, onToggleFilters }) =>
         <NavBtn onClick={() => navigate(-7)} title="−7 дней" icon={chevLeft2} />
         <NavBtn onClick={() => navigate(-1)} title="−1 день" icon={chevLeft} />
         <button onClick={goToToday} title="Перейти к рабочему дню" className="tb-today" style={{
-          height: 30, padding: '0 14px', background: 'var(--bg)',
-          border: '1px solid var(--border)', borderRadius: 7, color: 'var(--text)',
-          cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.86rem', fontWeight: 600,
+          height: 26, padding: '0 12px', background: 'var(--bg)',
+          border: '1px solid var(--border)', borderRadius: 6, color: 'var(--text)',
+          cursor: 'pointer', fontFamily: 'inherit', fontSize: '0.84rem', fontWeight: 600,
           whiteSpace: 'nowrap', transition: 'background 0.12s, border-color 0.12s',
         }}>Сегодня</button>
         <NavBtn onClick={() => navigate(1)} title="+1 день" icon={chevRight} />
@@ -103,8 +105,8 @@ export const TodayStats: React.FC<Props> = ({ filtersOpen, onToggleFilters }) =>
 
 const NavBtn: React.FC<{ onClick: () => void; title: string; icon: React.ReactNode }> = ({ onClick, title, icon }) => (
   <button onClick={onClick} title={title} className="tb-btn" style={{
-    width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center',
-    background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 7,
+    width: 26, height: 26, display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
     color: 'var(--text-muted)', cursor: 'pointer', transition: 'background 0.12s',
   }}>
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
@@ -120,8 +122,8 @@ const FilterPill: React.FC<{
   <button
     onClick={onClick}
     style={{
-      display: 'flex', alignItems: 'center', gap: 7, height: 28, padding: '0 12px',
-      borderRadius: 7, fontFamily: 'inherit', fontSize: '0.88rem',
+      display: 'flex', alignItems: 'center', gap: 6, height: 24, padding: '0 10px',
+      borderRadius: 6, fontFamily: 'inherit', fontSize: '0.84rem',
       cursor: 'pointer', whiteSpace: 'nowrap', border: 'none',
       background: active ? 'var(--bg)' : 'transparent',
       color: active ? 'var(--text)' : 'var(--text-muted)',

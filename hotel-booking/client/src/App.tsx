@@ -236,25 +236,25 @@ export const App: React.FC = () => {
             onClick={() => setNavOpen(o => !o)}
             title="Меню разделов"
             style={{
-              width: 26, height: 26, borderRadius: 7,
+              width: 22, height: 22, borderRadius: 6,
               background: 'var(--accent)', border: 'none', padding: 0,
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              color: '#ffffff', fontWeight: 800, fontSize: '1rem',
+              color: '#ffffff', fontWeight: 800, fontSize: '0.9rem',
               letterSpacing: '-0.02em', cursor: 'pointer',
             }}
           >
             R
           </button>
-          <span style={{ fontWeight: 600, fontSize: '0.95rem', color: 'var(--text)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
+          <span style={{ fontWeight: 600, fontSize: '0.9rem', color: 'var(--text)', letterSpacing: '-0.01em', whiteSpace: 'nowrap' }}>
             Roomline PMS
           </span>
           {!narrow && (
             <>
-              <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
-              <span style={{ fontSize: '0.86rem', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{hotelName || 'Отель'}</span>
+              <span style={{ width: 1, height: 16, background: 'var(--border-subtle)' }} />
+              <span style={{ fontSize: '0.84rem', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{hotelName || 'Отель'}</span>
               {roomsCount !== null && (
                 <span style={{
-                  fontSize: '0.77rem', color: 'var(--text-faint)', padding: '2px 7px',
+                  fontSize: '0.75rem', color: 'var(--text-faint)', padding: '1px 6px',
                   border: '1px solid var(--border-subtle)', borderRadius: 5, whiteSpace: 'nowrap',
                 }}>{roomsCount} {roomsWord(roomsCount)}</span>
               )}
@@ -276,18 +276,18 @@ export const App: React.FC = () => {
             {/* Не `onClick={logout}`: событие клика ушло бы в параметр `reason` */}
             <IconBtn onClick={() => logout()} title="Выйти" icon={ICONS.logout} />
           </div>
-          <span style={{ width: 1, height: 18, background: 'var(--border-subtle)' }} />
+          <span style={{ width: 1, height: 16, background: 'var(--border-subtle)' }} />
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, paddingLeft: 2 }}>
             <div style={{
-              width: 26, height: 26, borderRadius: '50%', background: 'var(--surface-3)',
+              width: 24, height: 24, borderRadius: '50%', background: 'var(--surface-3)',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: '0.77rem', fontWeight: 600, color: 'var(--text-muted)',
+              fontSize: '0.72rem', fontWeight: 600, color: 'var(--text-muted)',
             }}>
               {admin.name.split(' ').map(p => p[0]).slice(0, 2).join('').toUpperCase()}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
-              <span style={{ fontSize: '0.86rem', fontWeight: 500 }}>{admin.name}</span>
-              <span style={{ fontSize: '0.75rem', color: 'var(--text-faint)' }}>{ROLE_LABELS[admin.role] ?? admin.role}</span>
+            <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.15 }}>
+              <span style={{ fontSize: '0.82rem', fontWeight: 500 }}>{admin.name}</span>
+              <span style={{ fontSize: '0.7rem', color: 'var(--text-faint)' }}>{ROLE_LABELS[admin.role] ?? admin.role}</span>
             </div>
           </div>
         </div>

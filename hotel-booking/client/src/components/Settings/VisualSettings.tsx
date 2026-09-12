@@ -8,22 +8,22 @@ const PRESETS = [
   {
     label: 'Компактный',
     hint: 'Больше данных на экране',
-    values: { rowHeight: 32, headerHeight: 36, fontSize: 11, blockRadius: 3, uiRadius: 4 },
+    values: { rowHeight: 32, headerHeight: 30, fontSize: 11, blockRadius: 3, uiRadius: 4 },
   },
   {
     label: 'Стандарт',
     hint: 'Баланс плотности и читаемости',
-    values: { rowHeight: 44, headerHeight: 48, fontSize: 13, blockRadius: 6, uiRadius: 6 },
+    values: { rowHeight: 44, headerHeight: 38, fontSize: 13, blockRadius: 6, uiRadius: 6 },
   },
   {
     label: 'Просторный',
     hint: 'Удобно при сенсорном вводе',
-    values: { rowHeight: 60, headerHeight: 56, fontSize: 14, blockRadius: 8, uiRadius: 8 },
+    values: { rowHeight: 60, headerHeight: 46, fontSize: 14, blockRadius: 8, uiRadius: 8 },
   },
   {
     label: 'Крупный',
     hint: 'Большой шрифт и элементы',
-    values: { rowHeight: 72, headerHeight: 64, fontSize: 16, blockRadius: 10, uiRadius: 10 },
+    values: { rowHeight: 72, headerHeight: 54, fontSize: 16, blockRadius: 10, uiRadius: 10 },
   },
 ]
 
@@ -116,7 +116,7 @@ export const VisualSettings: React.FC = () => {
           Сколько дней истории показывать слева от текущей смены. Применится при нажатии «Сегодня» или перезагрузке.
         </div>
         <Slider label="Высота строки" unit="px" min={28} max={80} value={visual.rowHeight} onChange={v => setVisual('rowHeight', v)} />
-        <Slider label="Высота заголовка дат" unit="px" min={32} max={72} value={visual.headerHeight} onChange={v => setVisual('headerHeight', v)} />
+        <Slider label="Высота заголовка дат" unit="px" min={24} max={72} value={visual.headerHeight} onChange={v => setVisual('headerHeight', v)} />
       </Section>
 
       {/* Шрифт и скругления */}

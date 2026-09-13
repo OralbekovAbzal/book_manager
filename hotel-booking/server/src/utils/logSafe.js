@@ -41,14 +41,38 @@ function safeUrl(url) {
  * Пользователь видит 400 и ничего не замечает, а паспорт уезжает в error.log,
  * combined.log и host-debug.log. Диагностике хватает первой строки сообщения
  * (там имя вызова и вид ошибки) и кадров стека без текста.
+ *
+ * S13-L2 (живой стенд 13.09): у Prisma сообщение НАЧИНАЕТСЯ с пустой строки
+ * (`\nInvalid \`prisma.booking.create()\` invocation:`), поэтому «первая строка»
+ * давала в журнале голое `PrismaClientUnknownRequestError: ` без причины — из-за
+ * этого взаимоблокировку (S13-L1) пришлось ловить отдельным прогоном. Берём первую
+ * НЕПУСТУЮ строку, а у ошибок Postgres дополнительно достаём код и текст драйвера.
  */
+
+/** Код ошибки Postgres и её текст из отладочного вывода коннектора Prisma. */
+function pgDetails(raw) {
+  // Только настоящий отчёт драйвера: у ошибки валидации Prisma в тексте лежит
+  // объект `data`, где `code:` может оказаться кодом услуги или партнёра.
+  if (!/PostgresError|severity:/.test(raw)) return ''
+  const out = []
+  const code = raw.match(/code:\s*"([0-9A-Za-z]{5})"/)
+  if (code) out.push(`pg ${code[1]}`)
+  // Берём ТОЛЬКО значение `message:` — это текст самого Postgres («deadlock detected»,
+  // «conflicting key value violates exclusion constraint …»), данных гостя в нём нет.
+  // Соседний `detail:` не трогаем: там лежат значения ключа (логин, ключ лицензии).
+  const msg = raw.match(/message:\s*"((?:[^"\\]|\\.)*)"/)
+  if (msg) out.push(msg[1].replace(/\\"/g, '"').slice(0, 200))
+  return out.join(' ')
+}
+
 function safeError(err) {
   if (!err) return { message: 'unknown error' }
   const raw = String(err.message == null ? err : err.message)
-  const firstLine = raw.split(/\r?\n/, 1)[0].trim().slice(0, 300)
+  const firstLine = (raw.split(/\r?\n/).find((l) => l.trim() !== '') || '').trim().slice(0, 300)
   const code = err.code ? ` [${err.code}]` : ''
   const name = err.name && err.name !== 'Error' ? `${err.name}: ` : ''
-  const message = `${name}${firstLine}${code}`
+  const details = /^PrismaClient\w*Error$/.test(String(err.name || '')) ? pgDetails(raw) : ''
+  const message = `${name}${firstLine}${code}${details ? ` — ${details}` : ''}`
   const frames = typeof err.stack === 'string'
     ? err.stack.split(/\r?\n/).filter((l) => /^\s+at\s/.test(l)).slice(0, 12).join('\n')
     : undefined

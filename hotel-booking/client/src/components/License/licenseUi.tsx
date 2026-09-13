@@ -96,6 +96,19 @@ const noteStyle: React.CSSProperties = {
   border: '1px solid var(--border-subtle)', background: 'var(--surface-2)', color: 'var(--text-muted)',
 }
 
+/**
+ * Плашка «ключ принят, но…» — общая для формы ввода и раздела «Лицензия».
+ * Цвет — токен `--s-out` (тот же, что у «пора продлевать»), а не красный:
+ * несовпадение названия объекта работать не мешает, но поддержке важно увидеть
+ * чужой ключ сразу (S13-008).
+ */
+export const LicenseWarningNote: React.FC<{ text: string }> = ({ text }) => (
+  <div style={{ ...noteStyle, borderColor: 'var(--s-out)', color: 'var(--text)' }}>
+    <span style={{ color: 'var(--s-out)', fontWeight: 700, marginRight: 6 }}>!</span>
+    {text}
+  </div>
+)
+
 // ─── Форма ввода ключа ────────────────────────────────────────────────────────
 
 interface KeyFormProps {
@@ -112,6 +125,9 @@ export const LicenseKeyForm: React.FC<KeyFormProps> = ({ canEdit, autoFocus, onA
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [ok, setOk] = useState('')
+  // Предупреждение сервера при принятом ключе (S13-008). Отдельно от `error`:
+  // ключ РАБОТАЕТ, красным пугать нечем.
+  const [warning, setWarning] = useState('')
 
   if (!canEdit) {
     return (
@@ -127,6 +143,7 @@ export const LicenseKeyForm: React.FC<KeyFormProps> = ({ canEdit, autoFocus, onA
     setBusy(true)
     setError('')
     setOk('')
+    setWarning('')
     try {
       const info = await activate(key)
       setKey('')
@@ -142,6 +159,7 @@ export const LicenseKeyForm: React.FC<KeyFormProps> = ({ canEdit, autoFocus, onA
           `Ключ принят: ${info.hotel ?? '—'}, номеров: ${info.rooms ?? '—'}, ` +
           `обслуживание до ${formatIsoRu(info.maintenanceUntil)}.`,
         )
+        if (info.warning) setWarning(info.warning)
         onActivated?.(info)
       }
     } catch (e2) {
@@ -179,6 +197,7 @@ export const LicenseKeyForm: React.FC<KeyFormProps> = ({ canEdit, autoFocus, onA
           {ok}
         </div>
       )}
+      {warning && <LicenseWarningNote text={warning} />}
 
       <div>
         <button

@@ -236,7 +236,8 @@ describe('GET /api/license отдаёт пробный период клиент
     const { prisma } = createFakePrisma({
       license: licenseRow ? [licenseRow] : [],
       room: [],
-      hotelSettings: [{ id: 1, trialStartedAt }],
+      // `name` — контроллер читает его ради `hotelMismatch` (S13-008)
+      hotelSettings: [{ id: 1, name: 'Отель', trialStartedAt }],
     })
     const license = loadCjs('src/utils/license.js', { stubs: { './prisma': { prisma }, './logger': silentLogger } })
     const trial = loadTrial(prisma)

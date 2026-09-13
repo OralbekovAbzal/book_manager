@@ -18,17 +18,19 @@
  * любая строка в таблице License была бы вечной лицензией.
  *
  * ROOMLINE_TRIAL_DAYS — ручной обход для тестов и разбора обращений (0 —
- * закрыть сразу). В установленной программе переменной нет.
+ * закрыть сразу). В установленной программе (`NODE_ENV=production`) не читается
+ * вовсе: она наследует окружение Windows, и `setx` делал бы срок вечным (S13-011).
  */
 
 const { localDateISO } = require('./hotelTz')
+const { devEnv } = require('./devOverride')
 
 const DEFAULT_TRIAL_DAYS = 14
 const DAY_MS = 24 * 60 * 60 * 1000
 
 /** Сколько дней длится пробный период. Мусор в переменной — значение по умолчанию. */
 function trialDays() {
-  const raw = process.env.ROOMLINE_TRIAL_DAYS
+  const raw = devEnv('ROOMLINE_TRIAL_DAYS')
   if (raw === undefined || raw === '') return DEFAULT_TRIAL_DAYS
   const n = Number(raw)
   return Number.isInteger(n) && n >= 0 ? n : DEFAULT_TRIAL_DAYS

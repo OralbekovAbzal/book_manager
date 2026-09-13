@@ -2,7 +2,8 @@ import React, { useEffect } from 'react'
 import { useLicenseStore } from '../../../store/useLicenseStore'
 import { useAuthStore } from '../../../store/useAuthStore'
 import {
-  LicenseKeyForm, LICENSE_STATE_TITLE, licenseStateNote, licenseStateColor, formatIsoRu, pluralDays,
+  LicenseKeyForm, LicenseWarningNote,
+  LICENSE_STATE_TITLE, licenseStateNote, licenseStateColor, formatIsoRu, pluralDays,
 } from '../../License/licenseUi'
 import { SectionHeader, formCard, errorStyle } from './sectionUi'
 
@@ -62,6 +63,16 @@ export const LicenseSection: React.FC = () => {
               {licenseStateNote(info)}
             </div>
           </div>
+
+          {/* Ключ выписан другому объекту (S13-008). Плашка висит постоянно, а не
+              один раз после активации: чужой ключ обычно вводят и забывают. */}
+          {info.hotelMismatch && (
+            <LicenseWarningNote
+              text={info.warning
+                ?? `Ключ выписан на «${info.hotel ?? '—'}», а объект в настройках называется иначе. `
+                 + 'Программа работает — сверьте название объекта или ключ.'}
+            />
+          )}
 
           {softExpired && (
             <div style={{

@@ -11,6 +11,7 @@ import {
 } from '../../../api/system'
 import { useBackupStatusStore } from '../../../store/useBackupStatusStore'
 import { importRoomFund, type RoomFundImportPayload } from '../../../api/roomFund'
+import { saveFileToUser } from '../../../utils/saveFile'
 import type { BackupFile } from '../../../types'
 import { formatApiError } from '../../Setup/accountRules'
 import { SectionHeader } from './sectionUi'
@@ -84,19 +85,27 @@ export const BackupSection: React.FC = () => {
           isActive: r.isActive,
         })),
       }
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' })
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
       const stamp = new Date().toISOString().slice(0, 10)
-      a.href = url
-      a.download = `номерной-фонд-${stamp}.json`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-      setStatus({ kind: 'ok', text: `Сохранено: ${cats.length} категорий, ${rooms.length} номеров + справочники.` })
-    } catch {
-      setStatus({ kind: 'err', text: 'Не удалось создать резервную копию.' })
+      // Через общий хелпер: в упакованной программе окно живёт на file://, где
+      // `<a download>` молча ничего не сохраняет — на экране было «Сохранено»,
+      // а файла не было (C13-001, подтверждено на стенде 13.09).
+      const saved = await saveFileToUser(
+        `номерной-фонд-${stamp}.json`,
+        JSON.stringify(bundle, null, 2),
+      )
+      // Закрыл диалог сохранения — это не успех и не ошибка: молчим.
+      if (!saved.canceled) {
+        setStatus({ kind: 'ok', text: `Сохранено: ${cats.length} категорий, ${rooms.length} номеров + справочники.` })
+      }
+    } catch (e) {
+      // Ошибка приходит из двух разных мест: от API (справочники, номера) и от
+      // диалога сохранения. У второй нет `response`, и `formatApiError` сказал бы
+      // «Сервер недоступен» вместо настоящей причины от main-процесса.
+      const fallback = 'Не удалось создать резервную копию.'
+      const text = (e as { response?: unknown } | null)?.response
+        ? formatApiError(e, fallback)
+        : ((e as Error)?.message || fallback)
+      setStatus({ kind: 'err', text })
     } finally {
       setBusy(false)
     }

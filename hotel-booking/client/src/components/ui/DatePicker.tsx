@@ -4,6 +4,7 @@ import {
   startOfWeek, endOfWeek, eachDayOfInterval, isSameMonth, isSameDay, isToday,
 } from 'date-fns'
 import { ru } from 'date-fns/locale'
+import { usePopupEscape } from '../../hooks/usePopupEscape'
 
 interface Props {
   value: string                 // 'YYYY-MM-DD' или ''
@@ -36,20 +37,20 @@ export const DatePicker: React.FC<Props> = ({ value, onChange, min, disabled, pl
     if (open) setViewMonth(value ? parseISO(value) : new Date())
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Закрытие по клику вне / Escape
+  // Закрытие по клику вне
   useEffect(() => {
     if (!open) return
     const onDown = (e: MouseEvent) => {
       if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
     }
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
     document.addEventListener('mousedown', onDown)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDown)
-      document.removeEventListener('keydown', onKey)
-    }
+    return () => document.removeEventListener('mousedown', onDown)
   }, [open])
+
+  // Escape закрывает только календарь. Раньше слушатель висел на `document` во
+  // всплытии и до него успевал отработать обработчик формы брони — одно нажатие
+  // закрывало всю недописанную бронь (C13-003). Подробности — в хуке.
+  usePopupEscape(open, () => setOpen(false))
 
   const days = eachDayOfInterval({
     start: startOfWeek(startOfMonth(viewMonth), { weekStartsOn: 1 }),

@@ -7,6 +7,7 @@ import { useRealtimeStore } from '../../store/useRealtimeStore'
 import { confirmDialog } from '../ui/ConfirmDialog'
 import { fetchRooms } from '../../api/rooms'
 import { compareRooms } from '../../utils/sortRooms'
+import { usePopupEscape } from '../../hooks/usePopupEscape'
 import {
   createBooking,
   updateBooking,
@@ -319,6 +320,15 @@ const linkBtnStyle: React.CSSProperties = {
   background: 'none', border: 'none', padding: 0, cursor: 'pointer',
   color: 'var(--accent-text)', fontFamily: 'inherit', fontSize: 'inherit',
   textDecoration: 'underline',
+}
+
+/** «1 ночь», «2 ночи», «5 ночей». */
+const pluralNights = (n: number): string => {
+  const mod10 = n % 10
+  const mod100 = n % 100
+  if (mod10 === 1 && mod100 !== 11) return 'ночь'
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return 'ночи'
+  return 'ночей'
 }
 
 /**
@@ -1905,8 +1915,13 @@ export const BookingModal: React.FC = () => {
       ? 'Бронь'
       : 'Новая бронь'
 
-  const nightsLabel = watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn
-    ? `${nightsBetween(watchedCheckIn, watchedCheckOut)} ночей · ${watchedCheckIn} – ${watchedCheckOut}`
+  // Даты в шапке — как везде в программе, дд.мм.гггг. ISO здесь был единственным
+  // местом с другим форматом в том же окне (стенд 13.09, S13-L7).
+  const nightsCount = watchedCheckIn && watchedCheckOut && watchedCheckOut > watchedCheckIn
+    ? nightsBetween(watchedCheckIn, watchedCheckOut)
+    : 0
+  const nightsLabel = nightsCount > 0
+    ? `${nightsCount} ${pluralNights(nightsCount)} · ${fmtDay(watchedCheckIn)} – ${fmtDay(watchedCheckOut)}`
     : 'Выберите даты'
 
   return (
@@ -2956,7 +2971,12 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
   freeInCategory, selectedStatus,
 }) => {
   const [open, setOpen] = useState(false)
+  // Клавиатурная навигация (C13-020). Индекс 0 — пункт «— выберите номер —»,
+  // дальше rooms[i] со сдвигом на единицу: список на экране именно такой.
+  const [activeIndex, setActiveIndex] = useState(0)
   const ref = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   // Закрываем при клике вне компонента
   useEffect(() => {
@@ -2968,7 +2988,53 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
     return () => document.removeEventListener('mousedown', handler)
   }, [open])
 
+  // Escape закрывает только список, а не всю форму брони (C13-020 вместе с C13-003):
+  // обработчик формы висит на document во всплытии и без перехвата сработал бы первым.
+  usePopupEscape(open, () => { setOpen(false); triggerRef.current?.focus() })
+
+  // Держим подсвеченный пункт в зоне видимости — со стрелками список из 60 номеров
+  // иначе уезжает под край.
+  useEffect(() => {
+    if (!open) return
+    const el = listRef.current?.children[activeIndex] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [open, activeIndex])
+
   const selectedRoom = rooms.find(r => r.id === value)
+
+  const indexOfValue = () => {
+    const i = rooms.findIndex(r => r.id === value)
+    return i >= 0 ? i + 1 : 0
+  }
+
+  const openList = () => { setActiveIndex(indexOfValue()); setOpen(true) }
+
+  const pickIndex = (i: number) => {
+    onChange(i === 0 ? 0 : rooms[i - 1].id)
+    setOpen(false)
+    triggerRef.current?.focus()
+  }
+
+  // Клавиши слушаем на обёртке: фокус остаётся на кнопке-триггере, а React-событие
+  // всплывает до неё. preventDefault на Enter и пробеле обязателен — иначе Enter
+  // внутри формы отправил бы бронь.
+  const onTriggerKeyDown = (e: React.KeyboardEvent) => {
+    if (disabled) return
+    const last = rooms.length
+    if (!open) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        openList()
+      }
+      return
+    }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActiveIndex(i => Math.min(i + 1, last)) }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActiveIndex(i => Math.max(i - 1, 0)) }
+    else if (e.key === 'Home') { e.preventDefault(); setActiveIndex(0) }
+    else if (e.key === 'End') { e.preventDefault(); setActiveIndex(last) }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickIndex(activeIndex) }
+    else if (e.key === 'Tab') { setOpen(false) }
+  }
 
   const dotColor = (roomId: number) => {
     if (loadingAvail) return 'var(--border-strong)'
@@ -3002,11 +3068,12 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
       </div>
 
       {/* Custom dropdown trigger */}
-      <div ref={ref} style={{ position: 'relative' }}>
+      <div ref={ref} style={{ position: 'relative' }} onKeyDown={onTriggerKeyDown}>
         <button
+          ref={triggerRef}
           type="button"
           disabled={disabled}
-          onClick={() => !disabled && setOpen(o => !o)}
+          onClick={() => { if (!disabled) { if (open) setOpen(false); else openList() } }}
           style={{
             width: '100%',
             padding: '8px 32px 8px 10px',
@@ -3050,7 +3117,7 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
 
         {/* Dropdown list */}
         {open && (
-          <div style={{
+          <div ref={listRef} style={{
             position: 'absolute',
             top: '100%', left: 0, right: 0,
             zIndex: 200,
@@ -3065,7 +3132,7 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
             {/* "Не выбрано" option */}
             <button
               type="button"
-              onClick={() => { onChange(0); setOpen(false) }}
+              onClick={() => pickIndex(0)}
               style={{
                 display: 'flex', alignItems: 'center', gap: 8,
                 width: '100%', padding: '9px 12px',
@@ -3074,6 +3141,10 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
                 background: value === 0 ? 'var(--surface-2)' : 'transparent',
                 cursor: 'pointer', textAlign: 'left',
                 color: 'var(--text-faint)', fontSize: 'inherit',
+                // Подсветка с клавиатуры — рамкой, а не фоном: фон уже занят
+                // выбранным пунктом и подсветкой мышью.
+                outline: activeIndex === 0 ? '2px solid var(--accent)' : 'none',
+                outlineOffset: -2,
               }}
             >
               — выберите номер —
@@ -3093,7 +3164,7 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
                   <button
                     key={room.id}
                     type="button"
-                    onClick={() => { onChange(room.id); setOpen(false) }}
+                    onClick={() => pickIndex(idx + 1)}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 10,
                       width: '100%', padding: '9px 12px',
@@ -3101,6 +3172,8 @@ const RoomDropdown: React.FC<RoomDropdownProps> = ({
                       borderTop: idx > 0 ? '1px solid var(--border-subtle)' : 'none',
                       background: isSelected ? 'var(--accent-bg)' : 'transparent',
                       cursor: 'pointer', textAlign: 'left',
+                      outline: activeIndex === idx + 1 ? '2px solid var(--accent)' : 'none',
+                      outlineOffset: -2,
                     }}
                     onMouseEnter={e => {
                       if (!isSelected)

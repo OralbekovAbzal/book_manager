@@ -81,10 +81,12 @@ export const ReportsScreen: React.FC<Props> = ({ onBack }) => {
   valuesRef.current = values
   const runTimer = useRef<number | undefined>(undefined)
 
-  const flash = (text: string) => {
+  // Отказы сервера бывают длинные («В Word можно выгрузить до 5 000 строк…»),
+  // и 2,6 с на них не хватает — поэтому длительность параметром.
+  const flash = (text: string, ms = 2600) => {
     setToast(text)
     window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(''), 2600)
+    toastTimer.current = window.setTimeout(() => setToast(''), ms)
   }
 
   /** Список отчётов; selectId — какой выбрать после обновления (новый/изменённый). */
@@ -200,7 +202,9 @@ export const ReportsScreen: React.FC<Props> = ({ onBack }) => {
       const name = await downloadReport(activeId, valuesRef.current, format)
       if (name) flash(`Сохранено: ${name}`)
     } catch (err: any) {
-      flash(err?.message || 'Не удалось выгрузить отчёт')
+      // Текст сервера показываем как есть: при отказе 400 DOCX_TOO_LARGE он
+      // объясняет и предел, и что делать (O13-001).
+      flash(err?.message || 'Не удалось выгрузить отчёт', 6500)
     } finally {
       setBusy('')
     }
@@ -418,7 +422,12 @@ export const ReportsScreen: React.FC<Props> = ({ onBack }) => {
             <ToolBtn label="Печать" title="Печать (Ctrl+P)" disabled={!hasRows} onClick={() => window.print()} />
             <ToolBtn label={busy === 'pdf' ? '…' : 'PDF'} disabled={!hasRows || !!busy} onClick={handlePdf} />
             <ToolBtn label={busy === 'xlsx' ? '…' : 'Excel'} disabled={!hasRows || !!busy} onClick={() => handleExport('xlsx')} />
-            <ToolBtn label={busy === 'docx' ? '…' : 'Word'} disabled={!hasRows || !!busy} onClick={() => handleExport('docx')} />
+            <ToolBtn
+              label={busy === 'docx' ? '…' : 'Word'}
+              title="Word — до 5 000 строк; для больших отчётов Excel или CSV"
+              disabled={!hasRows || !!busy}
+              onClick={() => handleExport('docx')}
+            />
             <ToolBtn label={busy === 'csv' ? '…' : 'CSV'} disabled={!hasRows || !!busy} onClick={() => handleExport('csv')} />
           </div>
           <button onClick={onBack} title="К шахматке (Esc)" style={{

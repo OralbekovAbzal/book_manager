@@ -8,10 +8,15 @@
  * клиенте спрятаны (`client/src/config.ts`, `FEATURES`).
  *
  * Для разработки включается переменной `FEATURE_PREVIEW=1` (сервер) и
- * `VITE_FEATURE_PREVIEW=1` (клиент). Упакованная сборка её не выставляет.
+ * `VITE_FEATURE_PREVIEW=1` (клиент). В упакованной программе
+ * (`NODE_ENV=production`) переменная не читается вообще: сервер наследует
+ * окружение Windows, и один `setx FEATURE_PREVIEW 1` оживлял откат всей базы
+ * к снимку — то самое, что владелец спрятал как «опаснее, чем полезно» (S13-011).
  */
 
-const PREVIEW = process.env.FEATURE_PREVIEW === '1'
+const { devEnv } = require('./devOverride')
+
+const PREVIEW = devEnv('FEATURE_PREVIEW') === '1'
 
 const FEATURES = Object.freeze({
   /** Оптимизатор размещения: POST /occupancy/optimize и /optimize/apply. */

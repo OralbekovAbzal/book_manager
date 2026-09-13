@@ -257,6 +257,39 @@ async function buildXlsx(result, totalsLabel) {
 
 // --- Word -------------------------------------------------------------------
 
+/**
+ * Потолок строк для Word (O13-001).
+ *
+ * Word — единственный формат, который собирает документ в памяти целиком:
+ * на каждую ячейку создаётся объект-параграф библиотеки `docx`. Замеры аудита
+ * 13.09 на отчёте из 12 колонок: 20 000 строк — 27 с полной блокировки цикла
+ * событий и 3,2 ГБ RSS, 50 000 строк — «JavaScript heap out of memory».
+ * Сервер один на весь отель, поэтому это не «долгая выгрузка», а 27 секунд без
+ * броней и сокета на всех рабочих местах либо падение сервера. Те же 50 000
+ * строк CSV отдаёт за 0,2 с, а xlsx за 4,7 с — поэтому отказ предлагает их.
+ *
+ * Проверка стоит ДО сборки документа: смысл в том, чтобы тяжёлая работа не
+ * делалась вовсе, а не в том, чтобы упасть аккуратно.
+ */
+const DOCX_MAX_ROWS = 5000
+
+/**
+ * Потолок можно сдвинуть переменной окружения — но только ВНЕ production:
+ * в установленной у клиента программе `NODE_ENV=production`, и переменная
+ * не должна становиться способом уронить сервер отеля.
+ */
+function docxMaxRows() {
+  const raw = process.env.REPORT_DOCX_MAX_ROWS
+  if (process.env.NODE_ENV === 'production' || raw === undefined || raw === '') return DOCX_MAX_ROWS
+  const n = Number(raw)
+  return Number.isInteger(n) && n > 0 ? n : DOCX_MAX_ROWS
+}
+
+/** 5001 → «5 001»: число строк в тексте отказа читает человек. */
+function groupDigits(n) {
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+}
+
 const THIN = { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' }
 
 function docxCell(text, opts = {}) {
@@ -282,6 +315,9 @@ async function buildDocx(result, totalsLabel) {
   const body = rows.map((row) => new TableRow({
     children: columns.map((c) => docxCell(asText(row[c.key], c.type), { right: c.align === 'right' })),
   }))
+  // Шапку кладём в тот же массив: `[head, ...body]` копировал бы тысячи строк
+  // ради одной строки заголовка.
+  body.unshift(head)
 
   const totals = totalsRow(result, totalsLabel)
   if (totals) {
@@ -299,7 +335,7 @@ async function buildDocx(result, totalsLabel) {
         new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun({ text: result.report.title })] }),
         new Paragraph({ children: [new TextRun({ text: subtitle(result), size: 18, color: '666666' })] }),
         new Paragraph({ children: [] }),
-        new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: [head, ...body] }),
+        new Table({ width: { size: 100, type: WidthType.PERCENTAGE }, rows: body }),
       ],
     }],
   })
@@ -334,6 +370,22 @@ async function exportReport(result, format, totalsLabel = 'Итого') {
   const meta = FORMATS[format]
   if (!meta) throw createError(`Формат «${format}» не поддерживается`, 400)
 
+  // O13-001: отказ ДО сборки документа. Считаем по строкам результата, которые
+  // уже есть в памяти, — сам docx ещё не начат.
+  if (format === 'docx') {
+    const max = docxMaxRows()
+    const count = (result.rows || []).length
+    if (count > max) {
+      const err = createError(
+        `В Word можно выгрузить до ${groupDigits(max)} строк (в отчёте ${groupDigits(count)}). `
+        + 'Сузьте период или выгрузите в Excel/CSV.',
+        400,
+      )
+      err.code = 'DOCX_TOO_LARGE'
+      throw err
+    }
+  }
+
   let buffer
   if (format === 'csv') buffer = buildCsv(result, totalsLabel)
   else if (format === 'xlsx') buffer = await buildXlsx(result, totalsLabel)
@@ -351,4 +403,7 @@ async function exportReport(result, format, totalsLabel = 'Итого') {
   }
 }
 
-module.exports = { exportReport, FORMATS, buildCsv, buildXlsx, buildDocx, translit, formatDateTimeLocal, csvSafe, safeSheetName }
+module.exports = {
+  exportReport, FORMATS, buildCsv, buildXlsx, buildDocx, translit, formatDateTimeLocal,
+  csvSafe, safeSheetName, DOCX_MAX_ROWS, docxMaxRows,
+}

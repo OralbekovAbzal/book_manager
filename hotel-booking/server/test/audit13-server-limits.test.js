@@ -89,17 +89,59 @@ describe('S13-004 · BOOKING_STALE и гонка двух рабочих мес�
     expect(out.body.code).toBe('BOOKING_STALE')
   })
 
-  it.fails('версия участвует в самом UPDATE, а не только в проверке до него', async () => {
+  // Починено (волна 12, 2026-09-13): запись идёт условным `updateMany`.
+  it('версия участвует в самом UPDATE, а не только в проверке до него', async () => {
     const { ctrl, calls } = makeStack({ bookings: [existing] })
     const out = await run(ctrl.update, {
       params: { id: '1' },
       body: { guestName: 'Первый', expectedUpdatedAt: '2026-07-05T10:00:00.000Z' },
     })
     expect(out.status).toBe(200)
-    const upd = calls.find((c) => c.model === 'booking' && c.op === 'update')
-    // Сейчас `where` — это просто `{ id }`: между `isStale` и записью соседнее
-    // рабочее место успевает сохранить своё, и обе правки проходят.
+    const upd = calls.find((c) => c.model === 'booking' && c.op === 'updateMany')
     expect(upd.args.where).toHaveProperty('updatedAt')
+    expect(upd.args.where.updatedAt.getTime()).toBe(new Date('2026-07-05T10:00:00.000Z').getTime())
+  })
+
+  /**
+   * Сама гонка: первое место сохранилось, база подняла `updatedAt` (в фейке это
+   * делаем руками — `@updatedAt` живёт в Postgres), второе место шлёт ту же версию.
+   * До починки его UPDATE шёл по `{ id }` и молча затирал чужую правку.
+   */
+  it('второе сохранение с той же версией получает 409, а не затирает первое', async () => {
+    const { ctrl, prisma } = makeStack({ bookings: [existing] })
+    const version = '2026-07-05T10:00:00.000Z'
+
+    const first = await run(ctrl.update, {
+      params: { id: '1' }, body: { guestName: 'Первый', expectedUpdatedAt: version },
+    })
+    expect(first.status).toBe(200)
+    prisma.booking.rows[0].updatedAt = new Date('2026-07-05T10:00:00.050Z')
+
+    const second = await run(ctrl.update, {
+      params: { id: '1' }, body: { guestName: 'Второй', expectedUpdatedAt: version },
+    })
+    expect(second.status).toBe(409)
+    expect(second.body.code).toBe('BOOKING_STALE')
+    expect(second.body.booking.guestName).toBe('Первый')
+    expect(prisma.booking.rows[0].guestName).toBe('Первый')
+  })
+
+  it('версия миллисекунда в миллисекунду: ISO клиента сходится с Date в условии', async () => {
+    const precise = booking({ id: 2, services: [], updatedAt: new Date('2026-07-05T10:00:00.123Z') })
+    const { ctrl } = makeStack({ bookings: [precise] })
+    const out = await run(ctrl.update, {
+      params: { id: '2' },
+      body: { guestName: 'Точная версия', expectedUpdatedAt: '2026-07-05T10:00:00.123Z' },
+    })
+    expect(out.status).toBe(200)
+  })
+
+  it('без версии (старый клиент) сохранение идёт как раньше', async () => {
+    const { ctrl, calls } = makeStack({ bookings: [booking({ id: 3, services: [] })] })
+    const out = await run(ctrl.update, { params: { id: '3' }, body: { guestName: 'Без замка' } })
+    expect(out.status).toBe(200)
+    const upd = calls.find((c) => c.model === 'booking' && c.op === 'updateMany')
+    expect(Object.keys(upd.args.where)).toEqual(['id'])
   })
 })
 
@@ -150,12 +192,39 @@ describe('S13-007 · регистр логина при входе', () => {
     expect(out.status).toBe(200)
   })
 
-  it.fails('Caps Lock на стойке не мешает войти', async () => {
+  // Починено (волна 12, 2026-09-13): `loginRules` приводит логин к нижнему
+  // регистру, а контроллер вдобавок ищет без учёта регистра — ради старых баз,
+  // где логин мог сохраниться как `Admin`.
+  it('Caps Lock на стойке не мешает войти', async () => {
     const auth = makeAuth()
     const out = await run(auth.login, { body: { username: 'Aigerim', password: PASSWORD } })
-    // `userController.create` и мастер приводят логин к нижнему регистру
-    // (`.toLowerCase()` в routes/users.js), а `routes/auth.js` — только `.trim()`.
     expect(out.status).toBe(200)
+  })
+
+  it('пробелы по краям и «ВСЁ КАПСОМ» — та же учётка', async () => {
+    const auth = makeAuth()
+    const out = await run(auth.login, { body: { username: '  AIGERIM  ', password: PASSWORD } })
+    expect(out.status).toBe(200)
+  })
+
+  it('учётка старой базы с заглавной буквой в логине входит по-прежнему', async () => {
+    const { prisma } = createFakePrisma({
+      admin: [{
+        id: 1, username: 'Admin', name: 'Администратор', role: 'SUPER_ADMIN',
+        isActive: true, tokenVersion: 0, password: bcrypt.hashSync(PASSWORD, 4),
+      }],
+    })
+    const auth = loadCjs('src/controllers/authController.js', {
+      stubs: { '../utils/prisma': { prisma }, '../utils/sessions': { revokeSessions: async () => ({}) } },
+    })
+    const out = await run(auth.login, { body: { username: 'admin', password: PASSWORD } })
+    expect(out.status).toBe(200)
+  })
+
+  it('чужой логин по-прежнему отвергается', async () => {
+    const auth = makeAuth()
+    const out = await run(auth.login, { body: { username: 'aigerim2', password: PASSWORD } })
+    expect(out.status).toBe(401)
   })
 })
 
@@ -174,16 +243,18 @@ function loadLicense(prisma) {
   })
 }
 
-describe('S13-008 · ключ не сверяется с названием объекта', () => {
-  it.fails('ключ, выписанный другой базе отдыха, не включает лицензию', async () => {
+describe('S13-008 · ключ сверяется с названием объекта', () => {
+  /**
+   * Решение (волна 12, 2026-09-13): ключ на чужой объект ПРИНИМАЕТСЯ, но
+   * расхождение видно. Отказ стоил бы работы отелю, который просто переименовался,
+   * а «молча работает у соседей» — единственного коммерческого рычага.
+   */
+  const scene = (hotel, settingsName, maintenanceUntil = '2027-09-06') => {
     const { prisma } = createFakePrisma({
-      license: [], room: [], hotelSettings: [{ id: 1, name: 'Дорожник' }],
+      license: [], room: [], hotelSettings: [{ id: 1, name: settingsName }],
     })
     const lib = loadLicense(prisma)
-    const { key } = lib.issueLicense(TEST_PRIVATE, {
-      hotel: 'Туран', rooms: 45, maintenanceUntil: '2027-09-06',
-    })
-
+    const { key } = lib.issueLicense(TEST_PRIVATE, { hotel, rooms: 45, maintenanceUntil })
     const ctrl = loadCjs('src/controllers/licenseController.js', {
       stubs: {
         '../utils/prisma': { prisma },
@@ -192,11 +263,43 @@ describe('S13-008 · ключ не сверяется с названием об
         '../utils/trial': { getTrialState: async () => ({ expired: false, daysLeft: 14 }) },
       },
     })
+    return { ctrl, key, prisma, lib }
+  }
+
+  it('ключ, выписанный другой базе отдыха, помечен расхождением', async () => {
+    const { ctrl, key } = scene('Туран', 'Дорожник')
     const out = await run(ctrl.activate, { body: { key }, admin: { id: 1, role: 'SUPER_ADMIN' } })
-    // Шапка utils/license.js: «Ключ привязан к НАЗВАНИЮ объекта». В коде этой
-    // привязки нет ни при активации, ни при проверке — совпадение имени нигде
-    // не сверяется, и скопированный ключ работает молча.
-    expect(out.body.state).not.toBe('ok')
+    expect(out.body.state).toBe('ok')            // работу отелю не ломаем
+    expect(out.body.hotelMismatch).toBe(true)
+    expect(out.body.warning).toBe('Ключ выписан на «Туран», а объект называется «Дорожник»')
+  })
+
+  it('расхождение видно и потом, в GET /api/license', async () => {
+    const { ctrl, key } = scene('Туран', 'Дорожник')
+    await run(ctrl.activate, { body: { key }, admin: { id: 1, role: 'SUPER_ADMIN' } })
+    const out = await run(ctrl.get, { admin: { id: 1, role: 'ADMIN' } })
+    expect(out.body.hotelMismatch).toBe(true)
+    expect(out.body.warning).toContain('Туран')
+  })
+
+  it('свой ключ — без предупреждения', async () => {
+    const { ctrl, key } = scene('Туран', 'Туран')
+    const out = await run(ctrl.activate, { body: { key }, admin: { id: 1, role: 'SUPER_ADMIN' } })
+    expect(out.body.state).toBe('ok')
+    expect(out.body.hotelMismatch).toBe(false)
+    expect(out.body.warning).toBeUndefined()
+  })
+
+  it('кавычки, регистр и лишние пробелы расхождением не считаются', async () => {
+    const { ctrl, key } = scene('База отдыха «Туран»', '  база отдыха "ТУРАН"  ')
+    const out = await run(ctrl.activate, { body: { key }, admin: { id: 1, role: 'SUPER_ADMIN' } })
+    expect(out.body.hotelMismatch).toBe(false)
+  })
+
+  it('объект ещё не назван (мастер не пройден) — сравнивать не с чем', async () => {
+    const { ctrl, key } = scene('Туран', '')
+    const out = await run(ctrl.activate, { body: { key }, admin: { id: 1, role: 'SUPER_ADMIN' } })
+    expect(out.body.hotelMismatch).toBe(false)
   })
 })
 
@@ -251,15 +354,47 @@ describe('S13-010 · прожитые ночи при правке заселё�
     expect(future.amount).toBe(45000)   // 3 взрослых × 15 000
   })
 
-  it.fails('ночь, которую гость уже прожил, сохраняет свою цену', async () => {
+  // Починено (волна 12, 2026-09-13): `frozenBefore` = рабочая дата отеля, но не
+  // раньше заезда отрезка (`resolveFrozenBefore` в bookingController).
+  it('ночь, которую гость уже прожил, сохраняет свою цену', async () => {
     const { ctrl, prisma } = stack()
     await editGuests(ctrl)
-    const lived = prisma.bookingCharge.rows.find(
-      (c) => c.kind === 'stay' && c.date && c.date.getTime() === d('2026-07-08').getTime(),
+    const lived = prisma.bookingCharge.rows.filter(
+      (c) => c.kind === 'stay' && c.date && c.date.getTime() < d('2026-07-10').getTime(),
     )
-    // Ранний выезд и переезд замораживают прожитые ночи (`frozenBefore`), а
-    // обычный PUT — нет: `rebuildChainCharges` получает `frozenBefore: null`
-    // у любой брони без цепочки (bookingController.js, ветка needsRebuild).
-    expect(lived.amount).toBe(40000)
+    expect(lived.map((c) => c.amount)).toEqual([40000, 40000])   // ночи 8 и 9 июля
+  })
+
+  /**
+   * Сценарий владельца: заселён 10-го по 15 000, 12-го цену в календаре подняли
+   * до 18 000 и в тот же день правят бронь. Ночи 10 и 11 прожиты — их не трогаем.
+   */
+  it('поднятая цена не переписывает прожитые ночи задним числом', async () => {
+    const days = ['2026-07-10', '2026-07-11', '2026-07-12', '2026-07-13', '2026-07-14']
+    const { ctrl, prisma } = makeStack({
+      businessDate: d('2026-07-12'),
+      bookings: [booking({
+        id: 1, status: 'CHECKED_IN', checkIn: d('2026-07-10'), checkOut: d('2026-07-15'),
+        adultsWithMeals: 1, actualCheckInAt: new Date('2026-07-10T14:00:00Z'),
+      })],
+      charges: days.map((day, i) => charge({
+        id: i + 1, bookingId: 1, kind: 'stay', date: d(day),
+        quantity: 1, unitPrice: 15000, amount: 15000, source: 'auto',
+      })),
+      rates: days.map((day) => rate(day, { adultPrice: 18000 })),
+    })
+
+    // Любая правка, пересобирающая строки (здесь — скидка 0 → 0 не годится, меняем гостей)
+    const out = await run(ctrl.update, { params: { id: '1' }, body: { adultsWithMeals: 1, notes: 'x', recalcCharges: true } })
+    expect(out.status).toBe(200)
+
+    const byDay = Object.fromEntries(prisma.bookingCharge.rows
+      .filter((c) => c.kind === 'stay' && c.date)
+      .map((c) => [c.date.toISOString().slice(0, 10), c.amount]))
+    expect(byDay['2026-07-10']).toBe(15000)
+    expect(byDay['2026-07-11']).toBe(15000)
+    expect(byDay['2026-07-12']).toBe(18000)
+    expect(byDay['2026-07-13']).toBe(18000)
+    expect(byDay['2026-07-14']).toBe(18000)
   })
 })

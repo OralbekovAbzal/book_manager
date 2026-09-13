@@ -12,7 +12,22 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
+import express from 'express'
 import { loadCjs, silentLogger } from './helpers/loadCjs.js'
+
+/**
+ * Роуты входа — заглушкой: проверяем ПОРЯДОК middleware в `src/app.js`, а не
+ * контроллер. Настоящий `POST /auth/login` после починки S13-006 доходит до
+ * Prisma, то есть полез бы в рабочую базу разработчика — в тестах так нельзя.
+ */
+function fakeAuthRoutes() {
+  const r = express.Router()
+  r.post('/login', (_req, res) => res.status(401).json({ error: 'Неверный логин или пароль' }))
+  r.post('/change-password', (_req, res) => res.status(401).json({ error: 'Нет токена' }))
+  r.get('/me', (_req, res) => res.status(401).json({ error: 'Нет токена' }))
+  r.post('/logout', (_req, res) => res.status(401).json({ error: 'Нет токена' }))
+  return r
+}
 
 // Логи — во временную папку: тесты не должны писать в server/logs/.
 process.env.LOG_PATH = path.join(os.tmpdir(), 'roomline-audit13-logs')
@@ -25,6 +40,7 @@ function loadApp() {
       './middleware/license': { maintenanceGate: (_req, _res, next) => next() },
       './middleware/audit': { auditMiddleware: (_req, _res, next) => next() },
       './utils/logger': silentLogger,
+      './routes/auth': fakeAuthRoutes(),
     },
   })
 }
@@ -77,12 +93,17 @@ describe('S13-006 · лимитер входа считает и /auth/me', () =
     try { prodApp = loadApp() } finally { process.env.NODE_ENV = was }
   })
 
-  it.fails('после двадцати проверок сессии вход всё ещё возможен', async () => {
+  // Починено (волна 12, 2026-09-13): `authLimiter` висит точечно на
+  // `POST /auth/login` и `POST /auth/change-password`, остальное — под apiLimiter.
+  it('после двадцати проверок сессии вход всё ещё возможен', async () => {
     const status = await withServer(prodApp, async (base) => {
       // Столько запросов /auth/me делает клиент за 15 минут, если рабочее место
       // перезагружали или связь рвалась: каждый старт приложения — один вызов.
       for (let i = 0; i < 20; i++) {
-        await fetch(`${base}/api/auth/me`, { headers: { Authorization: 'Bearer нет' } })
+        // Заголовок только из латиницы: в HTTP кириллица в значении заголовка —
+        // ошибка самого fetch, и запрос до сервера не доходит (так этот тест и
+        // «проходил» как `it.fails`, ничего на самом деле не проверив).
+        await fetch(`${base}/api/auth/me`, { headers: { Authorization: 'Bearer no-such-token' } })
       }
       const res = await fetch(`${base}/api/auth/login`, {
         method: 'POST',
@@ -91,9 +112,26 @@ describe('S13-006 · лимитер входа считает и /auth/me', () =
       })
       return res.status
     })
-    // Ожидание: вход не заблокирован (401 «неверный пароль» или иной ответ входа).
-    // Фактически — 429 «Слишком много попыток входа».
+    // Вход не заблокирован: доходит до контроллера (401/500 — база тут не поднята),
+    // но не до 429 «Слишком много попыток входа».
     expect(status).not.toBe(429)
+  })
+
+  it('сам подбор пароля лимитером по-прежнему запирается', async () => {
+    const status = await withServer(prodApp, async (base) => {
+      let last = 0
+      // 20 — потолок production-лимитера; 21-я попытка должна упереться.
+      for (let i = 0; i < 21; i++) {
+        const res = await fetch(`${base}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username: 'admin', password: `подбор-${i}` }),
+        })
+        last = res.status
+      }
+      return last
+    })
+    expect(status).toBe(429)
   })
 })
 

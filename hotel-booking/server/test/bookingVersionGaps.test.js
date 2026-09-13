@@ -31,7 +31,11 @@ const scene = (over = {}) => makeStack({
   charges: [charge({ id: 1, bookingId: 7, amount: 90000, unitPrice: 90000, date: d('2026-07-10') })],
 })
 
-const bookingUpdates = (calls) => calls.filter((c) => c.model === 'booking' && c.op === 'update')
+// С волны 12 (S13-004) бронь пишется условным `updateMany` — версия стоит в самом
+// UPDATE. Обе операции смотрим вместе: замок не должен зависеть от того, какой из
+// них контроллер воспользовался.
+const bookingUpdates = (calls) =>
+  calls.filter((c) => c.model === 'booking' && (c.op === 'update' || c.op === 'updateMany'))
 
 describe('expectedUpdatedAt — служебное поле, не колонка брони', () => {
   it('при успешном сохранении не попадает в data записи', async () => {
@@ -49,14 +53,21 @@ describe('expectedUpdatedAt — служебное поле, не колонка
     expect(prisma.booking.rows[0].expectedUpdatedAt).toBeUndefined()
   })
 
-  it('не попадает и в `where` — сверка идёт в коде, а не запросом', async () => {
+  it('в `where` уходит колонка `updatedAt`, а не поле тела', async () => {
     const { ctrl, calls } = scene()
     await run(ctrl.update, {
       params: { id: '7' },
       body: { expectedUpdatedAt: UPDATED_AT.toISOString(), notes: 'x' },
     })
-    for (const w of bookingUpdates(calls)) {
-      expect(Object.keys(w.args.where)).toEqual(['id'])
+    const writes = bookingUpdates(calls)
+    expect(writes.length).toBeGreaterThan(0)
+    for (const w of writes) {
+      // Было `['id']` — сверка жила в коде до транзакции и в гонке не срабатывала
+      // (S13-004). Теперь версия участвует в самой записи, но под именем колонки:
+      // служебное `expectedUpdatedAt` в запрос не просачивается.
+      expect(Object.keys(w.args.where).sort()).toEqual(['id', 'updatedAt'])
+      expect(w.args.where.updatedAt).toBeInstanceOf(Date)
+      expect(w.args.where.updatedAt.getTime()).toBe(UPDATED_AT.getTime())
     }
   })
 

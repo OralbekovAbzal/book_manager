@@ -113,7 +113,15 @@ async function exportFile(req, res, next) {
     )
     res.setHeader('Content-Length', file.buffer.length)
     res.send(file.buffer)
-  } catch (err) { next(err) }
+  } catch (err) {
+    // Потолок строк Word (O13-001). Код нужен клиенту, чтобы показать свой
+    // текст у кнопки «Word», а errorHandler коды в тело ответа не переносит —
+    // поэтому отвечаем здесь, как это делают BOOKING_STALE и SERVICE_IN_USE.
+    if (err && err.code === 'DOCX_TOO_LARGE') {
+      return res.status(err.status || 400).json({ error: err.message, code: err.code })
+    }
+    next(err)
+  }
 }
 
 // --- Конструктор / редактор ---------------------------------------------------

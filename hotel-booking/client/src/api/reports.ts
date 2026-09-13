@@ -1,4 +1,5 @@
 import api from './client'
+import { saveFileToUser } from '../utils/saveFile'
 
 /**
  * Отчёты. Клиент НЕ знает, что такое «загрузка» или «реестр»: он получает с
@@ -341,15 +342,6 @@ function filenameFromHeader(header: string | undefined, fallback: string): strin
   return plain ? plain[1] : fallback
 }
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onerror = () => reject(new Error('Не удалось прочитать файл'))
-    reader.onload = () => resolve(String(reader.result).split(',')[1] || '')
-    reader.readAsDataURL(blob)
-  })
-}
-
 /** Ошибку сервера при responseType:'blob' приходится доставать из самого блоба. */
 async function messageFromBlobError(err: any): Promise<string> {
   const blob = err?.response?.data
@@ -382,22 +374,8 @@ export async function downloadReport(
   const blob: Blob = response.data
   const fileName = filenameFromHeader(response.headers['content-disposition'], `report.${format}`)
 
-  const bridge = window.appConfig?.saveReportFile
-  if (bridge) {
-    const result = await bridge({ fileName, base64: await blobToBase64(blob) })
-    if (result.canceled) return null
-    if (!result.ok) throw new Error(result.error || 'Не удалось сохранить файл')
-    return fileName
-  }
-
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = fileName
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  // Освобождаем сразу после клика: браузер уже забрал данные себе.
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-  return fileName
+  // Ветка «Electron через мост / браузер ссылкой» живёт в одном месте на всю
+  // программу — `utils/saveFile.ts` (см. C13-001).
+  const saved = await saveFileToUser(fileName, blob)
+  return saved.canceled ? null : fileName
 }

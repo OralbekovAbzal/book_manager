@@ -80,7 +80,7 @@ export const AboutSection: React.FC = () => {
           <span className="mono" style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>версия {version}</span>
         </div>
         <div style={{ fontSize: '0.86rem', color: 'var(--text-faint)', lineHeight: 1.5 }}>
-          Roomline PMS — система бронирования отеля: шахматка, брони, тарифы, справочник, оптимизатор размещения.
+          Roomline PMS — система бронирования отеля: шахматка, брони, тарифы, касса, отчёты, справочник.
         </div>
       </div>
 

@@ -371,10 +371,14 @@ describe('лимит номеров', () => {
 describe('контроллер /api/license', () => {
   const signer = loadLicense()
 
-  function setup({ licenseRow = null, rooms = [] } = {}) {
+  function setup({ licenseRow = null, rooms = [], hotel = 'База отдыха «Туран»' } = {}) {
     const { prisma } = createFakePrisma({
       license: licenseRow ? [licenseRow] : [],
       room: rooms,
+      // Название объекта контроллер читает ради `hotelMismatch` (S13-008).
+      // По умолчанию оно совпадает с «Объектом» в ключах этого файла — иначе
+      // каждый тест здесь получал бы предупреждение о чужом ключе.
+      hotelSettings: [{ id: 1, name: hotel }],
     })
     // upsert в мини-Prisma нет — доклеиваем поверх модели license.
     prisma.license.upsert = async ({ where, create, update }) => {
@@ -582,6 +586,16 @@ describe('гейт обслуживания (402)', () => {
     const { passed, res } = await call(mw, { path })
     expect(passed).toBe(false)
     expect(res.statusCode).toBe(402)
+  })
+
+  it('резервная копия открыта под гейтом, а загрузка/восстановление копии — нет (O13-013)', async () => {
+    const mw = gate({ state: 'expired' })
+    expect((await call(mw, { path: '/api/system/backup', method: 'POST' })).passed).toBe(true)
+    expect((await call(mw, { path: '/api/system/backup/', method: 'POST' })).passed).toBe(true)
+    for (const path of ['/api/system/backup/upload', '/api/system/backup/restore', '/api/system/backups', '/api/system/status']) {
+      const { passed } = await call(mw, { path, method: 'POST' })
+      expect(passed, path).toBe(false)
+    }
   })
 
   it('похожий путь не считается разрешённым по совпадению префикса', async () => {

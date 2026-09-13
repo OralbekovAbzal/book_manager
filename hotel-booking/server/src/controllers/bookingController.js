@@ -492,18 +492,19 @@ async function update(req, res, next) {
     const existing = await prisma.booking.findUnique({ where: { id } })
     if (!existing) return next(createError('Бронь не найдена', 404))
 
-    // Замок версии — ДО любой проверки и любой записи, вне транзакции: если бронь
-    // изменилась на другом рабочем месте, спорить об остальном уже незачем.
-    // Отдаём текущую бронь целиком (как GET /bookings/:id), чтобы форма показала,
-    // что именно изменилось, а не отправляла пользователя перечитывать вручную.
+    // Замок версии — ДО любой проверки: если бронь изменилась на другом рабочем
+    // месте, спорить об остальном уже незачем. Отдаём текущую бронь целиком
+    // (как GET /bookings/:id), чтобы форма показала, что именно изменилось.
+    //
+    // Это только быстрый отказ. Настоящий замок — в самой записи ниже
+    // (`updatedAt` в условии UPDATE, S13-004): между этой проверкой и записью
+    // лежат ещё несколько обращений к базе, и соседнее рабочее место успевало
+    // сохранить своё в этом окне — тогда 409 не получал никто, а правка первого
+    // исчезала молча. Ровно тот случай, ради которого замок и делался (D5-004).
     if (isStale(req.body.expectedUpdatedAt, existing.updatedAt)) {
-      const current = await prisma.booking.findUnique({ where: { id }, select: BOOKING_DETAIL_SELECT })
-      return res.status(409).json({
-        error: 'Бронь изменена на другом рабочем месте',
-        code: 'BOOKING_STALE',
-        booking: current,
-      })
+      return respondStale(res, id)
     }
+    const expectedVersion = parseExpectedVersion(req.body.expectedUpdatedAt)
 
     if (['CHECKED_OUT', 'CANCELLED'].includes(existing.status)) {
       return next(createError('Нельзя редактировать закрытую бронь', 400))
@@ -627,9 +628,20 @@ async function update(req, res, next) {
       || servicesChanged
       || chargeInputsChanged(existing, nextInputs)
 
+    // Граница «уже прожитого» для пересборки строк (S13-010). Раньше замораживались
+    // только ночи продолжения цепочки, а у обычной заселённой брони любая правка
+    // (подселили третьего, дали скидку) пересчитывала ВСЕ ночи по сегодняшнему
+    // календарю — счёт за прожитое менялся задним числом. Считаем от рабочей даты
+    // отеля: ночи до неё гость уже прожил, их цена зафиксирована.
+    const frozenBefore = needsRebuild ? await resolveFrozenBefore(existing, newCheckIn) : null
+
     const booking = await prisma.$transaction(async (tx) => {
-      const updated = await tx.booking.update({
-        where: { id },
+      // Сверка версии и запись — ОДНА операция (S13-004): `updatedAt` стоит в
+      // условии UPDATE, поэтому в гонке двух рабочих мест изменит строку ровно
+      // одно, а второму база вернёт 0 изменённых строк → 409 BOOKING_STALE.
+      // Версию не прислали (старый клиент, служебный вызов) — условие только по id.
+      const { count } = await tx.booking.updateMany({
+        where: expectedVersion ? { id, updatedAt: expectedVersion } : { id },
         data: {
           roomId: newRoomId,
           guestName: guestName?.trim() ?? existing.guestName,
@@ -655,8 +667,9 @@ async function update(req, res, next) {
           ...(actualCheckOutAt !== undefined && { actualCheckOutAt: nextActualOut }),
           allotmentOverride: nextOverride,
         },
-        select: BOOKING_SELECT,
       })
+      if (count === 0) throw staleError(expectedVersion ? 'stale' : 'gone')
+      const updated = await tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
 
       // Переписываем только при реальном изменении: иначе каждое сохранение брони
       // пересоздавало бы строки (новые id, новая дата создания) без всякой причины.
@@ -677,13 +690,12 @@ async function update(req, res, next) {
         return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
       }
 
-      // Прожитые ночи не переоцениваем: у цепочки они лежат до заезда текущего
-      // отрезка, у одиночной брони замораживать нечего.
+      // Прожитые ночи не переоцениваем (граница посчитана выше).
       await rebuildChainCharges(accountId, {
         adminId: req.admin.id,
         client: tx,
         keepIfEmpty: true,
-        frozenBefore: existing.accountBookingId ? existing.checkIn : null,
+        frozenBefore,
       })
       return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
     })
@@ -693,13 +705,78 @@ async function update(req, res, next) {
     if (existing.accountBookingId) await emitChainUpdated(id, [id])
     res.json({ data: booking })
   } catch (err) {
+    // Условный UPDATE не нашёл строку: пока шли проверки, бронь либо изменили
+    // на другом рабочем месте, либо удалили. Транзакция уже откатилась.
+    if (err && err[STALE_MARK] === 'stale') return respondStale(res, parseInt(req.params.id))
+    if (err && err[STALE_MARK] === 'gone') return next(createError('Бронь не найдена', 404))
     next(err)
   }
+}
+
+// ─── Замок версии брони (D5-004, атомарный с S13-004) ────────────────────────
+
+/** Метка «наша» на ошибке из транзакции: по тексту такие вещи не различают. */
+const STALE_MARK = Symbol('bookingStale')
+
+function staleError(kind) {
+  const err = new Error(kind === 'stale' ? 'Бронь изменена на другом рабочем месте' : 'Бронь не найдена')
+  err[STALE_MARK] = kind
+  return err
+}
+
+/**
+ * Версия для условия UPDATE. `isStale` уже отсеял мусор и отсутствие поля,
+ * поэтому здесь остаётся либо корректная дата, либо null («замка нет»).
+ */
+function parseExpectedVersion(expectedUpdatedAt) {
+  if (expectedUpdatedAt === undefined || expectedUpdatedAt === null || expectedUpdatedAt === '') return null
+  const d = expectedUpdatedAt instanceof Date ? expectedUpdatedAt : new Date(expectedUpdatedAt)
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
+/** 409 с ТЕКУЩЕЙ броней: форма покажет, что именно изменилось. */
+async function respondStale(res, id) {
+  const current = await prisma.booking.findUnique({ where: { id }, select: BOOKING_DETAIL_SELECT })
+  return res.status(409).json({
+    error: 'Бронь изменена на другом рабочем месте',
+    code: 'BOOKING_STALE',
+    booking: current,
+  })
 }
 
 /** Дата брони (@db.Date) как UTC-полночь — в этом виде её сравнивают с рабочей датой. */
 function bookingDayUTC(date) {
   return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()))
+}
+
+/**
+ * Граница заморозки прожитых ночей при обычном сохранении брони (S13-010).
+ *
+ * Ночи СТРОГО РАНЬШЕ неё `rebuildChainCharges` не переоценивает. Берём рабочую
+ * дату отеля, а не календарную: сутки в отеле сдвинуты и двигаются только
+ * кнопкой «Следующий день» (`utils/businessDate.js`). Ниже заезда самого отрезка
+ * граница не опускается — у продолжения цепочки его ночи начинаются с переезда,
+ * а у одиночной брони до заезда замораживать нечего.
+ *
+ * Единственное исключение — заезд подвинули НАЗАД (это разрешено только броням
+ * «ремонт»): у появившихся ночей в прошлом строк ещё нет, и заморозка закрыла бы
+ * их нулём вместо цены. Такую правку считаем целиком.
+ *
+ * @param {object} existing бронь до правки
+ * @param {Date} newCheckIn дата заезда после правки
+ * @returns {Promise<Date|null>} граница или null, если замораживать нечего
+ */
+async function resolveFrozenBefore(existing, newCheckIn) {
+  const checkIn = bookingDayUTC(existing.checkIn)
+  if (newCheckIn && bookingDayUTC(newCheckIn).getTime() < checkIn.getTime()) {
+    return existing.accountBookingId ? existing.checkIn : null
+  }
+  const businessDate = await getCurrentBusinessDate()
+  const cut = businessDate.getTime() > checkIn.getTime() ? bookingDayUTC(businessDate) : checkIn
+  // У головы/одиночной брони граница на дате заезда эквивалентна «ничего не заморожено»
+  // (ночей раньше заезда не бывает) — не гоняем лишнюю ветку в rebuildChainCharges.
+  if (!existing.accountBookingId && cut.getTime() <= checkIn.getTime()) return null
+  return cut
 }
 
 /**

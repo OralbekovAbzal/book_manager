@@ -177,7 +177,7 @@ describe('O13-001 · потолок строк выгрузки', () => {
     expect(engine.MAX_ROWS).toBe(5000)
   })
 
-  it.fails('у docx должен быть свой потолок: 50 000 строк его убивают', () => {
+  it('у docx свой потолок: 50 000 строк его убивают', () => {
     const mod = loadExport()
     // Замеры аудита (отдельный процесс node, файл из 12 колонок):
     //   csv  50 000 строк — 0,2 с, 13 МБ;
@@ -186,8 +186,100 @@ describe('O13-001 · потолок строк выгрузки', () => {
     //   docx 50 000 строк — FATAL ERROR: JavaScript heap out of memory.
     // Процесс сервера один на весь отель: 27 с — это 27 с без броней и сокета,
     // а OOM — падение сервера для всех рабочих мест.
-    expect(typeof mod.MAX_DOCX_ROWS).toBe('number')
-    expect(mod.MAX_DOCX_ROWS).toBeLessThan(50000)
+    expect(mod.DOCX_MAX_ROWS).toBe(5000)
+    expect(mod.DOCX_MAX_ROWS).toBeLessThan(50000)
+  })
+
+  /** Результат отчёта из одной колонки на N строк — движок для этого не нужен. */
+  const fakeResult = (n) => ({
+    report: { id: 'x', title: 'Реестр броней' },
+    columns: [{ key: 'a', title: 'А', type: 'text' }],
+    rows: Array.from({ length: n }, () => ({ a: 'Иванов' })),
+    totals: {}, params: {},
+    meta: { hotelName: 'Туран', generatedAt: '2026-09-13T00:00:00Z' },
+  })
+
+  it('5001 строка в Word — отказ 400 с кодом DOCX_TOO_LARGE и без сборки документа', async () => {
+    const { exportReport } = loadExport()
+    const err = await exportReport(fakeResult(5001), 'docx').catch((e) => e)
+    expect(err.status).toBe(400)
+    expect(err.code).toBe('DOCX_TOO_LARGE')
+    // Текст называет и потолок, и сколько строк в отчёте, и куда выгружать вместо Word
+    expect(err.message).toMatch(/5.000/)
+    expect(err.message).toMatch(/5.001/)
+    expect(err.message).toMatch(/Excel\/CSV/)
+  })
+
+  it('5000 строк в Word проходят', async () => {
+    const { exportReport } = loadExport()
+    const file = await exportReport(fakeResult(5000), 'docx')
+    expect(file.buffer.length).toBeGreaterThan(0)
+    expect(file.filename.endsWith('.docx')).toBe(true)
+  })
+
+  it('csv и xlsx потолок Word не трогает: их 50 000 строк не убивают', async () => {
+    const { exportReport } = loadExport()
+    const csv = await exportReport(fakeResult(5001), 'csv')
+    expect(csv.buffer.length).toBeGreaterThan(0)
+  })
+
+  it('контроллер отдаёт клиенту код DOCX_TOO_LARGE, а не «внутреннюю ошибку»', async () => {
+    const result = fakeResult(5001)
+    const controller = loadCjs('src/controllers/reportController.js', {
+      stubs: {
+        '../reports/registry': { getDefinition: async () => ({ id: 'x', title: 'Реестр броней' }) },
+        '../reports/datasets': { describeDatasets: () => [] },
+        '../reports/options': { resolveOptions: async (d) => d },
+        '../reports/engine': { runReport: async () => result },
+        '../reports/vocab': {},
+        '../utils/businessDate': { getCurrentBusinessDate: async () => new Date('2026-09-13T00:00:00Z') },
+        '../utils/prisma': { prisma: { hotelSettings: { findUnique: async () => ({ name: 'Туран' }) } } },
+        '../middleware/errorHandler': { createError },
+        '../socket/socketManager': { emitReportsChanged() {} },
+      },
+    })
+
+    const sent = {}
+    const res = {
+      status(code) { sent.status = code; return this },
+      json(body) { sent.body = body; return this },
+      setHeader() { throw new Error('документ не должен собираться') },
+      send() { throw new Error('документ не должен собираться') },
+    }
+    let passedToNext = null
+    await controller.exportFile(
+      { body: { format: 'docx' }, query: {}, params: { id: 'x' }, admin: { name: 'Асель' } },
+      res,
+      (err) => { passedToNext = err },
+    )
+
+    // errorHandler коды в тело ответа не переносит — поэтому контроллер отвечает сам
+    expect(passedToNext).toBe(null)
+    expect(sent.status).toBe(400)
+    expect(sent.body.code).toBe('DOCX_TOO_LARGE')
+    expect(sent.body.error).toMatch(/Word/)
+  })
+
+  it('переменная REPORT_DOCX_MAX_ROWS работает вне production и молчит в нём', () => {
+    const mod = loadExport()
+    const oldEnv = process.env.NODE_ENV
+    const oldRaw = process.env.REPORT_DOCX_MAX_ROWS
+    try {
+      process.env.REPORT_DOCX_MAX_ROWS = '10'
+      process.env.NODE_ENV = 'test'
+      expect(mod.docxMaxRows()).toBe(10)
+      // У клиента стоит production: переменная окружения не должна становиться
+      // способом уронить сервер отеля.
+      process.env.NODE_ENV = 'production'
+      expect(mod.docxMaxRows()).toBe(5000)
+      process.env.NODE_ENV = 'test'
+      process.env.REPORT_DOCX_MAX_ROWS = 'нет'
+      expect(mod.docxMaxRows()).toBe(5000)
+    } finally {
+      process.env.NODE_ENV = oldEnv
+      if (oldRaw === undefined) delete process.env.REPORT_DOCX_MAX_ROWS
+      else process.env.REPORT_DOCX_MAX_ROWS = oldRaw
+    }
   })
 
   it.fails('у денежных датасетов должен быть потолок периода, как у «Номеро-ночей»', () => {
@@ -277,10 +369,13 @@ describe('O13-003 · флешка вставлена, но записать на
     return () => { fs.writeFileSync = real }
   }
 
-  it('отказ записи виден в журнале копий — это сегодня работает', async () => {
+  it('отказ записи ВЕЗДЕ виден в журнале копий', async () => {
     const { prisma, rows } = makeDb()
     const backup = loadBackup(prisma)
-    const restore = blockWrites(usb)
+    // Ни флешка, ни запасная папка не принимают запись — писать копию некуда,
+    // и это обязано попасть в журнал: «копия свежая» при отсутствии копий —
+    // та же схема молчаливого отказа, из-за которой бэкап месяцами падал.
+    const restore = blockWrites(root)
     try {
       await expect(backup.createBackup()).rejects.toThrow(/ENOSPC/)
     } finally { restore() }
@@ -290,19 +385,42 @@ describe('O13-003 · флешка вставлена, но записать на
     expect(String(rows.backupLog[0].error)).toMatch(/ENOSPC/)
   })
 
-  it.fails('копия должна уйти в запасную папку, как при вынутой флешке', async () => {
-    const { prisma } = makeDb()
+  it('копия уходит в запасную папку, как при вынутой флешке', async () => {
+    const { prisma, rows } = makeDb()
     const backup = loadBackup(prisma)
     const restore = blockWrites(usb)
+    let res = null
     try {
-      // Сегодня: исключение наружу, копии нет ВООБЩЕ. При вынутой флешке
-      // (`probeDir` видит отсутствующий диск) копия ложится локально, а при
-      // вставленной, но полной — не ложится никуда: запасной путь проверяется
-      // только до записи, а не после её отказа.
-      await backup.createBackup()
+      // Флешка вставлена и проходит `probeDir`, но запись не проходит: полна,
+      // защищена от записи, файл держит антивирус. Для человека это тот же
+      // случай, что вынутая флешка, — значит и копия ложится туда же, локально.
+      res = await backup.createBackup()
     } finally { restore() }
+
     const localFiles = fs.existsSync(local) ? fs.readdirSync(local).filter((f) => f.endsWith('.json')) : []
     expect(localFiles).toHaveLength(1)
+    expect(fs.readdirSync(usb).filter((f) => f.endsWith('.json'))).toHaveLength(0)
+    expect(res.fallbackUsed).toBe(true)
+    expect(String(res.fallbackReason)).toMatch(/ENOSPC/)
+    // Копия удалась, но мимо флешки — причина едет в журнале, иначе статус
+    // и баннер об этом никак не узнают.
+    expect(rows.backupLog[0].success).toBe(true)
+    expect(String(rows.backupLog[0].error)).toMatch(/ENOSPC/)
+  })
+
+  it('битого временного файла на флешке не остаётся', async () => {
+    const { prisma } = makeDb()
+    const backup = loadBackup(prisma)
+    // Падает переименование, а не запись: `.tmp` уже создан — его надо убрать
+    const realRename = fs.renameSync
+    fs.renameSync = function patched(from, to) {
+      if (String(to).startsWith(usb)) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' })
+      return realRename.call(this, from, to)
+    }
+    try {
+      await backup.createBackup()
+    } finally { fs.renameSync = realRename }
+    expect(fs.readdirSync(usb)).toHaveLength(0)
   })
 })
 
@@ -317,12 +435,20 @@ describe('O13-005/006/007 · что теряется при восстановл
 
   const MODELS = ['admin', 'hotelSettings', 'license', 'backupLog']
 
+  /** Условие where мини-базы: только равенство — большего восстановлению не надо. */
+  const match = (row, where = {}) => Object.entries(where).every(([f, v]) => row[f] === v)
+
   function makeDb(fixture) {
     const rows = {}
     for (const m of MODELS) rows[m] = (fixture[m] || []).map((r) => ({ ...r }))
     const model = (name) => ({
       async findMany() { return rows[name].map((r) => ({ ...r })) },
-      async findFirst() { return rows[name][rows[name].length - 1] ?? null },
+      async findFirst(args = {}) {
+        const hits = rows[name].filter((r) => match(r, args.where))
+        // orderBy в коде копий всегда «свежие сверху»
+        const hit = args.orderBy ? hits[hits.length - 1] : hits[0]
+        return hit ? { ...hit } : null
+      },
       async count() { return rows[name].length },
       async create({ data }) {
         const rec = { id: rows[name].length + 1, createdAt: new Date(), ...data }
@@ -331,8 +457,16 @@ describe('O13-005/006/007 · что теряется при восстановл
       },
       async createMany({ data }) { rows[name].push(...data.map((r) => ({ ...r }))); return { count: data.length } },
       async deleteMany() { const n = rows[name].length; rows[name] = []; return { count: n } },
-      async updateMany() { return { count: 0 } },
-      async update({ data }) { return { ...data } },
+      async updateMany(args = {}) {
+        const hits = rows[name].filter((r) => match(r, args.where))
+        for (const hit of hits) Object.assign(hit, args.data)
+        return { count: hits.length }
+      },
+      async update(args) {
+        const hit = rows[name].find((r) => match(r, args.where))
+        if (hit) Object.assign(hit, args.data)
+        return { ...(hit || args.data) }
+      },
     })
     const prisma = {}
     for (const m of MODELS) prisma[m] = model(m)
@@ -342,16 +476,22 @@ describe('O13-005/006/007 · что теряется при восстановл
   }
 
   let licenseStub = null
+  let trialStub = null
+  let identityStub = null
   function loadBackup(prisma) {
     process.env.BACKUP_PATH = dir
     process.env.BACKUP_FALLBACK_PATH = dir
     process.env.BACKUP_KEEP = '50'
     licenseStub = { calls: 0, resetLicenseCache() { this.calls++ } }
+    trialStub = { calls: 0, resetTrialCache() { this.calls++ } }
+    identityStub = { calls: 0, resetIdentityCache() { this.calls++ } }
     return loadCjs('src/utils/backup.js', {
       stubs: {
         './prisma': { prisma },
         './logger': silentLogger,
         './license': licenseStub,
+        './trial': trialStub,
+        './instanceIdentity': identityStub,
         'node-cron': { schedule() { return { stop() {} } } },
         '../middleware/errorHandler': { createError },
         '../controllers/occupancyController': { invalidateGridCache() {} },
@@ -397,7 +537,7 @@ describe('O13-005/006/007 · что теряется при восстановл
     backupLog: [],
   })
 
-  it.fails('восстановление старой копии не должно стирать личность установки', async () => {
+  it('восстановление старой копии не стирает личность установки', async () => {
     const { prisma, rows } = makeDb(liveFixture())
     const backup = loadBackup(prisma)
     const name = writeOldDump()
@@ -409,9 +549,46 @@ describe('O13-005/006/007 · что теряется при восстановл
     // НОВУЮ пару — и рабочие места, запомнившие старый публичный ключ (TOFU),
     // больше никогда не найдут этот хост в сети после смены IP.
     expect(rows.hotelSettings[0].instanceId).toBe('f1e2d3c4-0000-4000-8000-000000000001')
+    expect(String(rows.hotelSettings[0].instancePublicKey)).toMatch(/BEGIN PUBLIC KEY/)
+    expect(String(rows.hotelSettings[0].instancePrivateKey)).toMatch(/BEGIN PRIVATE KEY/)
   })
 
-  it.fails('восстановление старой копии не должно обнулять начало пробного периода', async () => {
+  it('личность ИЗ КОПИИ остаётся: это перенос на новый ноутбук', async () => {
+    const { prisma, rows } = makeDb(liveFixture())
+    const backup = loadBackup(prisma)
+    const name = 'imported_2026-09-10_12-00_pereezd.json'
+    fs.writeFileSync(path.join(dir, name), JSON.stringify({
+      version: 2,
+      createdAt: '2026-09-10T12:00:00.000Z',
+      tables: {
+        Admin: [{
+          id: 1, username: 'admin', password: 'x', name: 'Главный администратор',
+          role: 'SUPER_ADMIN', isActive: true, tokenVersion: 0,
+          createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+        }],
+        HotelSettings: [{
+          id: 1, name: 'Туран', currency: 'KZT', pricingBase: 'person',
+          trialStartedAt: '2026-09-01T00:00:00.000Z',
+          instanceId: 'aaaaaaaa-0000-4000-8000-00000000000b',
+          instancePublicKey: '--PUB-FROM-DUMP--',
+          instancePrivateKey: '--PRIV-FROM-DUMP--',
+          updatedAt: '2026-09-10T00:00:00.000Z',
+        }],
+        License: [],
+      },
+    }), 'utf8')
+
+    await backup.restoreBackup(name, 1, { allowDataLoss: true })
+
+    // Свою личность здесь возвращать НЕЛЬЗЯ: хост на новом ноутбуке обязан
+    // стать тем же, что был на старом, иначе рабочие места его не найдут.
+    expect(rows.hotelSettings[0].instanceId).toBe('aaaaaaaa-0000-4000-8000-00000000000b')
+    expect(rows.hotelSettings[0].instancePublicKey).toBe('--PUB-FROM-DUMP--')
+    // Начало срока из копии РАНЬШЕ текущего — остаётся раннее
+    expect(new Date(rows.hotelSettings[0].trialStartedAt).toISOString()).toBe('2026-09-01T00:00:00.000Z')
+  })
+
+  it('восстановление старой копии не обнуляет начало пробного периода', async () => {
     const { prisma, rows } = makeDb(liveFixture())
     const backup = loadBackup(prisma)
     const name = writeOldDump()
@@ -422,9 +599,10 @@ describe('O13-005/006/007 · что теряется при восстановл
     // «сейчас», то есть ещё 14 дней. Восстановление копии — обычная кнопка у
     // SUPER_ADMIN, и это самый простой способ работать без ключа бесконечно.
     expect(rows.hotelSettings[0].trialStartedAt).toBeInstanceOf(Date)
+    expect(rows.hotelSettings[0].trialStartedAt.toISOString()).toBe('2026-09-03T00:00:00.000Z')
   })
 
-  it.fails('восстановление должно сбрасывать кэш лицензии в процессе сервера', async () => {
+  it('восстановление сбрасывает кэши лицензии, срока и личности', async () => {
     const { prisma } = makeDb(liveFixture())
     const backup = loadBackup(prisma)
     const name = writeOldDump()
@@ -436,6 +614,8 @@ describe('O13-005/006/007 · что теряется при восстановл
     // поэтому заглушка ниже не вызывается ни разу. Перенос на новый ноутбук:
     // ключ приехал в копии, а программа до перезапуска считает, что его нет.
     expect(licenseStub.calls).toBeGreaterThan(0)
+    expect(trialStub.calls).toBeGreaterThan(0)
+    expect(identityStub.calls).toBeGreaterThan(0)
   })
 })
 

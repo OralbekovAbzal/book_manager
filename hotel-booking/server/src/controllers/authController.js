@@ -18,7 +18,16 @@ async function login(req, res, next) {
   try {
     const { username, password } = req.body
 
-    const admin = await prisma.admin.findUnique({ where: { username } })
+    // Регистр логина не должен решать, пустят человека или нет (S13-007).
+    // Точное совпадение — обычный путь (учётки создаются в нижнем регистре);
+    // поиск без учёта регистра нужен старым базам, где логин мог сохраниться
+    // как `Admin` или `Aigerim`, — иначе починка входа сломала бы вход им.
+    const normalized = (typeof username === 'string' ? username : '').trim().toLowerCase()
+    const admin = await prisma.admin.findUnique({ where: { username: normalized } })
+      || await prisma.admin.findFirst({
+        where: { username: { equals: normalized, mode: 'insensitive' } },
+        orderBy: { id: 'asc' },
+      })
     if (!admin || !admin.isActive) {
       return res.status(401).json({ error: 'Неверный логин или пароль' })
     }

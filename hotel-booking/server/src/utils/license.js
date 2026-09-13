@@ -29,6 +29,7 @@
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+const { devEnv } = require('./devOverride')
 
 const KEY_PREFIX = 'ROOMLINE-'
 /** Префиксы прежних имён продукта — только на чтение, новые ключи ими не выпускаются. */
@@ -263,13 +264,15 @@ function buildDateFromPackage() {
  * программе дата настоящая и не меняется от того, какое сегодня число.
  * ROOMLINE_BUILD_DATE — ручной обход для тестов и разбора обращений; прежнее имя
  * QONAQ_BUILD_DATE читается как запасное, чтобы чужие .env не перестали работать.
+ * В упакованной программе (`NODE_ENV=production`) обе переменные не читаются:
+ * сервер наследует окружение Windows, и `setx` снимал бы гейт обслуживания (S13-011).
  *
  * null (в репозитории поля нет) означает «дата неизвестна» — и тогда гейт
  * обслуживания НЕ включается. Это сознательный выбор в пользу клиента: доказать,
  * что сборка новее оплаченного обслуживания, мы в этом случае не можем.
  */
 function getBuildDate() {
-  const fromEnv = process.env.ROOMLINE_BUILD_DATE || process.env.QONAQ_BUILD_DATE
+  const fromEnv = devEnv('ROOMLINE_BUILD_DATE') || devEnv('QONAQ_BUILD_DATE')
   if (isIsoDate(fromEnv)) return fromEnv
   return buildDateFromPackage()
 }
@@ -300,13 +303,50 @@ function evaluateLicense(keyString, buildDate = getBuildDate()) {
   return { state: expired ? 'expired' : 'ok', payload: p, message: null }
 }
 
-/** Сводка для API и для клиента. roomsUsed добавляет вызывающий (он ходит в базу). */
-function describeLicense(keyString, buildDate = getBuildDate()) {
+/**
+ * Название объекта в виде, пригодном для сравнения: без регистра, без кавычек
+ * любого вида и без лишних пробелов. «База отдыха "Туран"» и «база отдыха
+ * «Туран»» — один и тот же объект, а не два разных.
+ */
+function normalizeHotelName(name) {
+  return String(name == null ? '' : name)
+    .replace(/[«»"“”„‟'’`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+/**
+ * Ключ выписан НЕ этому объекту? (S13-008)
+ *
+ * Шапка этого файла обещает: «ключ привязан к названию объекта». В коде такой
+ * связи не было ни строки — один купленный ключ молча обслуживал сколько угодно
+ * баз отдыха. Отказывать нельзя: название меняют (переименование, опечатка при
+ * выписке), и превратить это в «программа не работает» хуже, чем потерянная
+ * продажа. Поэтому ключ принимаем, а расхождение показываем — поддержка видит
+ * чужой ключ сразу.
+ *
+ * Пустое название объекта (мастер ещё не пройден) расхождением не считается:
+ * сравнивать не с чем.
+ */
+function hotelNameMismatch(keyHotel, settingsName) {
+  const a = normalizeHotelName(keyHotel)
+  const b = normalizeHotelName(settingsName)
+  if (!a || !b) return false
+  return a !== b
+}
+
+/**
+ * Сводка для API и для клиента. roomsUsed добавляет вызывающий (он ходит в базу).
+ * `hotelName` — название объекта из HotelSettings; передаётся ради `hotelMismatch`.
+ */
+function describeLicense(keyString, buildDate = getBuildDate(), hotelName = null) {
   const ev = evaluateLicense(keyString, buildDate)
   const p = ev.payload
   return {
     state: ev.state,
     hotel: p ? p.hotel : null,
+    hotelMismatch: Boolean(p) && hotelNameMismatch(p.hotel, hotelName),
     rooms: p ? p.rooms : null,
     issuedAt: p ? p.issuedAt : null,
     maintenanceUntil: p ? p.maintenanceUntil : null,
@@ -375,6 +415,8 @@ module.exports = {
   parseLicenseKey,
   evaluateLicense,
   describeLicense,
+  normalizeHotelName,
+  hotelNameMismatch,
   getBuildDate,
   getLicenseState,
   getRoomLimit,

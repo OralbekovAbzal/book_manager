@@ -364,6 +364,39 @@ function fallbackDir(reason) {
 
 // ─── Создание копии ───────────────────────────────────────────────────────────
 
+/** Один и тот же путь (разная запись, регистр Windows) — не считаем его «другой папкой». */
+function samePath(a, b) {
+  try { return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() } catch { return a === b }
+}
+
+/**
+ * Имя файла копии для конкретной папки. Считается на КАЖДУЮ попытку заново:
+ * при переезде на запасную папку занятым может оказаться другое имя.
+ */
+function pickBackupPath(dir, now) {
+  const stamp = localStamp(now)
+  let filename = `backup_${stamp}.json`
+  // Две копии в одну минуту (ручная + перед восстановлением) — добавляем секунды,
+  // а при совпадении и секунд — порядковый номер, чтобы не перезаписать файл
+  const sec = String(now.getUTCSeconds()).padStart(2, '0')
+  for (let n = 1; fs.existsSync(path.join(dir, filename)); n++) {
+    filename = `backup_${stamp}-${sec}${n > 1 ? `-${n}` : ''}.json`
+  }
+  return { filename, filePath: path.join(dir, filename) }
+}
+
+/** Пишем во временный файл и переименовываем: обрыв на записи не оставит битую копию. */
+function writeDumpFile(filePath, payload) {
+  const tmpPath = filePath + '.tmp'
+  try {
+    fs.writeFileSync(tmpPath, payload, 'utf8')
+    fs.renameSync(tmpPath, filePath)
+  } catch (err) {
+    try { fs.unlinkSync(tmpPath) } catch { /* временного файла может не быть */ }
+    throw err
+  }
+}
+
 async function createBackup() {
   // Выбор папки — тоже часть попытки: если недоступна и флешка, и запасная папка
   // (родитель — файл, нет прав, диск полон), провал обязан попасть в BackupLog,
@@ -383,16 +416,9 @@ async function createBackup() {
     throw err
   }
   const now = new Date()
-  const stamp = localStamp(now)
-  let filename = `backup_${stamp}.json`
-  // Две копии в одну минуту (ручная + перед восстановлением) — добавляем секунды,
-  // а при совпадении и секунд — порядковый номер, чтобы не перезаписать файл
-  const sec = String(now.getUTCSeconds()).padStart(2, '0')
-  for (let n = 1; fs.existsSync(path.join(target.dir, filename)); n++) {
-    filename = `backup_${stamp}-${sec}${n > 1 ? `-${n}` : ''}.json`
-  }
-  const filePath = path.join(target.dir, filename)
-  const tmpPath = filePath + '.tmp'
+  let place = pickBackupPath(target.dir, now)
+  // Путь нужен и в catch — для записи неудачи в BackupLog
+  let filePath = place.filePath
 
   try {
     const { models } = schemaPlan()
@@ -403,13 +429,26 @@ async function createBackup() {
         info.idField ? { orderBy: { [info.idField]: 'asc' } } : {},
       )
     }
-    // Пишем во временный файл и переименовываем: обрыв на записи не оставит битую копию
-    fs.writeFileSync(
-      tmpPath,
-      JSON.stringify({ version: BACKUP_VERSION, createdAt: now.toISOString(), tables }),
-      'utf8',
-    )
-    fs.renameSync(tmpPath, filePath)
+    const payload = JSON.stringify({ version: BACKUP_VERSION, createdAt: now.toISOString(), tables })
+
+    try {
+      writeDumpFile(filePath, payload)
+    } catch (err) {
+      // O13-003. Папка прошла проверку, а запись не прошла: флешка полна
+      // (ENOSPC), включена защита от записи (EACCES/EPERM/EROFS), её выдернули
+      // между проверкой и записью (ENOENT), файл держит антивирус. Для человека
+      // это ровно тот же случай, что вынутая флешка, — значит и поведение то же:
+      // копия ложится в запасную папку с пометкой, а не пропадает совсем.
+      // «Копии нет вообще» замечают только через двое суток по баннеру.
+      if (target.fallbackUsed || samePath(BACKUP_FALLBACK_PATH, target.dir)) throw err
+      const reason = `отказ записи — ${(err && err.code) || ''} ${(err && err.message) || err}`.trim().slice(0, 300)
+      logger.warn(`Backup: запись в ${target.dir} не удалась (${reason}) — пишем в запасную папку`)
+      target = fallbackDir(reason)
+      place = pickBackupPath(target.dir, now)
+      filePath = place.filePath
+      writeDumpFile(filePath, payload)
+    }
+    const filename = place.filename
     const size = fs.statSync(filePath).size
 
     // Копия удалась (success: true), но записана мимо флешки — причина едет в
@@ -425,7 +464,6 @@ async function createBackup() {
       fallbackUsed: target.fallbackUsed, fallbackReason: target.reason,
     }
   } catch (err) {
-    try { fs.unlinkSync(tmpPath) } catch { /* временного файла может не быть */ }
     const message = String((err && err.message) || err).slice(0, 1000)
     try {
       await prisma.backupLog.create({ data: { path: filePath, size: 0, success: false, error: message } })
@@ -846,6 +884,78 @@ async function describeRestore(fileName) {
   }
 }
 
+/** Поля строки настроек, которые принадлежат УСТАНОВКЕ, а не данным отеля. */
+const INSTALL_FIELDS = {
+  instanceId: true, instancePublicKey: true, instancePrivateKey: true, trialStartedAt: true,
+  // не «наше», но нужно при записи: см. ниже про @updatedAt
+  updatedAt: true,
+}
+
+/**
+ * Что из «своего» вернуть в строку настроек после восстановления.
+ *
+ * Личность установки (O13-005). Рабочие места запоминают публичный ключ хоста
+ * при первом знакомстве (TOFU) и по нему находят его в сети после смены IP.
+ * В копии, снятой прошлой версией, этих колонок нет вовсе — восстановление
+ * обнулило бы личность, сервер выписал бы на следующем старте НОВУЮ пару, и
+ * рабочие места перестали бы находить хост навсегда (тихо: по прямому адресу
+ * они продолжают работать, поломка всплывает в день смены IP). Поэтому: нет
+ * личности в копии — возвращаем свою; есть — оставляем из копии, потому что
+ * это перенос на новый ноутбук и хост обязан стать тем же, что был на старом.
+ *
+ * Пробный период (O13-007). Пустой `trialStartedAt` (копия старого образца или
+ * правленый вручную файл — формат открытый) заставит `ensureTrialStart`
+ * поставить «сейчас», то есть ещё 14 дней, и так сколько угодно раз. Берём
+ * РАННЮЮ из двух дат: восстановление копии срок не двигает. С действующим
+ * ключом это безразлично (гейт на срок не смотрит), но правило одно для всех.
+ */
+function keepInstallFields(before, after) {
+  const keep = {}
+  if (!before) return keep
+
+  const hasIdentity = (r) => !!(r && r.instanceId && r.instancePublicKey && r.instancePrivateKey)
+  if (hasIdentity(before) && !hasIdentity(after)) {
+    keep.instanceId = before.instanceId
+    keep.instancePublicKey = before.instancePublicKey
+    keep.instancePrivateKey = before.instancePrivateKey
+  }
+
+  const prev = before.trialStartedAt ? new Date(before.trialStartedAt) : null
+  const next = after && after.trialStartedAt ? new Date(after.trialStartedAt) : null
+  if (prev && !Number.isNaN(prev.getTime())) {
+    if (!next || Number.isNaN(next.getTime()) || next.getTime() > prev.getTime()) keep.trialStartedAt = prev
+  }
+  return keep
+}
+
+/**
+ * Сброс кэшей процесса, в которых после восстановления лежит уже НЕ ТА правда.
+ *
+ * Лицензия кэшируется на всю жизнь процесса (`cacheLoaded`, без TTL), и главный
+ * путь продаж «перенос на новый ноутбук» без сброса выглядит так: ключ приехал
+ * в копии, а программа до перезапуска сервера считает, что ключа нет (O13-006,
+ * он же D8-009). У пробного периода и личности кэш с TTL — они вылечились бы
+ * сами через минуту, но ждать минуту незачем.
+ *
+ * `require` ленивый и под try: восстановление данных не должно падать из-за
+ * модуля, который к данным отношения не имеет.
+ */
+function resetProcessCaches() {
+  const drop = [
+    ['./license', 'resetLicenseCache'],
+    ['./trial', 'resetTrialCache'],
+    ['./instanceIdentity', 'resetIdentityCache'],
+  ]
+  for (const [id, fn] of drop) {
+    try {
+      const mod = require(id)
+      if (mod && typeof mod[fn] === 'function') mod[fn]()
+    } catch (err) {
+      logger.warn('Backup restore: не удалось сбросить кэш (' + id + '): ' + (err && err.message))
+    }
+  }
+}
+
 /**
  * @param {string} fileName  имя файла в BACKUP_PATH
  * @param {number|null} adminId  кто запустил (для журнала)
@@ -892,6 +1002,7 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
 
     const restored = {}
     let deferredLinks = 0
+    let keptInstall = []
     let keptSnapshotAuthors = 0
     let orphanedSnapshotAuthors = 0
     await prisma.$transaction(async (tx) => {
@@ -922,6 +1033,13 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
           select: { id: true, createdById: true },
         })
         : []
+
+      // Личность установки и начало пробного периода — свойства ЭТОГО
+      // компьютера, а не данных отеля (см. keepInstallFields). Читаем ДО
+      // удаления строки настроек.
+      const installBefore = tx.hotelSettings
+        ? await tx.hotelSettings.findFirst({ where: { id: 1 }, select: INSTALL_FIELDS })
+        : null
 
       // Удаляем в обратном порядке зависимостей, вставляем в прямом; id сохраняются
       for (const t of [...plan.present].reverse()) await tx[models.get(t).key].deleteMany({})
@@ -977,6 +1095,25 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
         }
       }
 
+      // Возвращаем то, что принадлежит установке (личность, начало срока).
+      if (tx.hotelSettings) {
+        const installAfter = await tx.hotelSettings.findFirst({ where: { id: 1 }, select: INSTALL_FIELDS })
+        if (installAfter) {
+          const keep = keepInstallFields(installBefore, installAfter)
+          if (Object.keys(keep).length > 0) {
+            keptInstall = Object.keys(keep)
+            // `updatedAt` передаём явно: у поля @updatedAt Prisma иначе поставит
+            // «сейчас», и восстановленная строка отличалась бы от снятой.
+            if (installAfter.updatedAt != null) keep.updatedAt = installAfter.updatedAt
+            await tx.hotelSettings.updateMany({ where: { id: 1 }, data: keep })
+          }
+        } else if (installBefore && installBefore.instanceId) {
+          // Строки настроек в файле нет вовсе: личность выпишет заново
+          // `ensureIdentity` при следующем старте — сказать об этом стоит.
+          logger.warn('Backup restore: в файле нет строки настроек — личность установки будет создана заново')
+        }
+      }
+
       // Последовательности — у КАЖДОЙ восстановленной таблицы с автоинкрементом:
       // id вставлены явные, и без сброса следующая же новая строка упрётся
       // в занятый id. (Раньше список вёлся руками — в снимках на этом уже
@@ -991,6 +1128,10 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
       }
 
     }, { timeout: 300_000, maxWait: 20_000 })
+
+    // Кэши процесса теперь врут: в базе другая лицензия, другой срок, другая
+    // личность. Сбрасываем ДО сокета — клиенты сейчас пойдут перечитывать.
+    resetProcessCaches()
 
     // Сбрасываем кэш сетки и говорим клиентам перезагрузить её
     try {
@@ -1094,6 +1235,7 @@ module.exports = {
   BACKUP_VERSION,
   BACKUP_PATH,
   BACKUP_FALLBACK_PATH,
+  keepInstallFields,
   // для тестов и диагностики: какой состав и порядок собрался из схемы
   _schemaPlan: schemaPlan,
 }

@@ -22,8 +22,20 @@ function errorHandler(err, req, res, _next) {
 
   // Exclusion-constraint двойного бронирования (race condition): два админа одновременно
   // забронировали один номер на пересекающиеся даты — БД отклонила второй INSERT/UPDATE.
+  //
+  // Взаимоблокировка (S13-L1, найдено на живом стенде 13.09) — тот же случай глазами
+  // стойки: две транзакции ждут друг друга на том же ограничении `booking_no_overlap`,
+  // Postgres выбирает жертву и отдаёт `40P01 deadlock detected`. Prisma заворачивает это
+  // либо в `P2034`, либо в `PrismaClientUnknownRequestError` вообще без `code` — поэтому
+  // смотрим и на код, и на текст. Клиенту в обоих случаях нужен один ответ: «обновите
+  // сетку и попробуйте снова», а не «внутренняя ошибка сервера».
   const m = String(err && err.message || '')
-  if (err.code === 'P2004' || m.includes('booking_no_overlap') || m.includes('23P01') || m.includes('exclusion constraint')) {
+  const deadlock = err.code === 'P2034'
+    || m.includes('40P01')
+    || m.includes('deadlock detected')
+    || m.includes('взаимоблокировка')
+  if (err.code === 'P2004' || deadlock
+    || m.includes('booking_no_overlap') || m.includes('23P01') || m.includes('exclusion constraint')) {
     return res.status(409).json({ error: 'Номер уже занят на выбранные даты (одновременное бронирование). Обновите сетку и попробуйте снова.' })
   }
 

@@ -6,6 +6,18 @@ import { fetchRooms } from '../../api/rooms'
 import { AllotmentConfirm } from './AllotmentConfirm'
 import type { Room } from '../../types'
 
+/**
+ * 'YYYY-MM-DD' → 'дд.мм.гггг'. Режем строку, а не Date: плановые даты — `@db.Date`,
+ * то есть UTC-полночь, и разбор в местную зону сдвинул бы день назад.
+ * Объявлено ДО компонента намеренно: константа ниже падает при горячей
+ * перезагрузке с «is not defined» (временная мёртвая зона).
+ */
+const fmtDay = (iso?: string) => {
+  if (!iso || iso.length < 10) return iso ?? ''
+  const [y, m, d] = iso.slice(0, 10).split('-')
+  return `${d}.${m}.${y}`
+}
+
 export const MoveBookingModal: React.FC = () => {
   const { modal, closeModal, fetchGrid } = useGridStore()
   const isOpen = modal.open && modal.mode === 'move'
@@ -142,7 +154,7 @@ export const MoveBookingModal: React.FC = () => {
               Переезд гостя
             </div>
             <div style={{ fontSize: '0.92rem', color: 'var(--text-muted)', marginTop: 2 }}>
-              {booking.guestName} · {origCheckIn} → {origCheckOut}
+              {booking.guestName} · {fmtDay(origCheckIn)} → {fmtDay(origCheckOut)}
             </div>
           </div>
           <button
@@ -198,7 +210,7 @@ export const MoveBookingModal: React.FC = () => {
           {/* Move date */}
           <Field
             label="Дата переезда"
-            hint={`Допустимо: ${origCheckIn} … ${format(addDays(parseISO(origCheckOut), -1), 'yyyy-MM-dd')}`}
+            hint={`Допустимо: ${fmtDay(origCheckIn)} … ${fmtDay(format(addDays(parseISO(origCheckOut), -1), 'yyyy-MM-dd'))}`}
           >
             <input
               type="date"
@@ -231,7 +243,7 @@ export const MoveBookingModal: React.FC = () => {
               {sameDay ? (
                 <div style={{ color: 'var(--text)' }}>
                   Гость заехал сегодня — бронь просто переместится в номер{' '}
-                  <strong>№{targetRoom.number}</strong> на даты {origCheckIn} → {origCheckOut}.
+                  <strong>№{targetRoom.number}</strong> на даты {fmtDay(origCheckIn)} → {fmtDay(origCheckOut)}.
                 </div>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -242,7 +254,7 @@ export const MoveBookingModal: React.FC = () => {
                       marginRight: 8, verticalAlign: 'middle',
                     }} />
                     <strong>№{sourceRoom?.number ?? booking.roomId}</strong>
-                    {' '}— закроется датой <strong>{moveDate}</strong>{' '}
+                    {' '}— закроется датой <strong>{fmtDay(moveDate)}</strong>{' '}
                     ({elapsedNights} {pluralNights(elapsedNights)})
                   </div>
                   <div>
@@ -252,7 +264,7 @@ export const MoveBookingModal: React.FC = () => {
                       marginRight: 8, verticalAlign: 'middle',
                     }} />
                     <strong>№{targetRoom.number}</strong>
-                    {' '}— продолжение брони с <strong>{moveDate}</strong> по <strong>{origCheckOut}</strong>{' '}
+                    {' '}— продолжение брони с <strong>{fmtDay(moveDate)}</strong> по <strong>{fmtDay(origCheckOut)}</strong>{' '}
                     ({remainingNights} {pluralNights(remainingNights)})
                   </div>
                   {/* Главный вопрос стойки при переезде — «а деньги?». Раньше

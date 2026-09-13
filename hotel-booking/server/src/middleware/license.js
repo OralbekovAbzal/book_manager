@@ -27,10 +27,21 @@ const logger = require('../utils/logger')
  */
 const ALLOWED = ['/api/health', '/api/license', '/api/auth/login']
 
+/**
+ * Точные пути (без подпутей), открытые под гейтом. `POST /api/system/backup` —
+ * резервная копия: её снимает и Electron при выходе (внутренний токен), и человек
+ * кнопкой. Закрывать копию гейтом значило бы «в тот день, когда кончился пробный
+ * период и данные нужно переносить, последней копии нет» (O13-013). Подпути
+ * `/backup/upload` и `/backup/restore` остаются закрытыми: восстановление под
+ * гейтом не нужно, а загрузка файла — тем более.
+ */
+const ALLOWED_EXACT = ['/api/system/backup']
+
 const MAINTENANCE_EXPIRED = 'MAINTENANCE_EXPIRED'
 const TRIAL_EXPIRED = 'TRIAL_EXPIRED'
 
 function isAllowed(pathname) {
+  if (ALLOWED_EXACT.some((p) => pathname === p || pathname === `${p}/`)) return true
   return ALLOWED.some((p) => pathname === p || pathname === `${p}/` || pathname.startsWith(`${p}/`))
 }
 

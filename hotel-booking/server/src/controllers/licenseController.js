@@ -18,14 +18,30 @@ function countActiveRooms() {
   return prisma.room.count({ where: { isActive: true } })
 }
 
+/** Название объекта из настроек — с ним сверяется «Объект» из ключа (S13-008). */
+async function hotelName() {
+  const row = await prisma.hotelSettings.findUnique({ where: { id: 1 }, select: { name: true } })
+  return row ? row.name : null
+}
+
+/** Текст расхождения для человека: оба названия рядом, без жаргона. */
+function mismatchWarning(info, name) {
+  return `Ключ выписан на «${info.hotel}», а объект называется «${name}»`
+}
+
 async function buildResponse(keyString) {
-  const info = describeLicense(keyString)
+  const name = await hotelName()
+  const info = describeLicense(keyString, undefined, name)
   info.roomsUsed = await countActiveRooms()
   // Пробный период имеет смысл только без действующего ключа: с ключом он
   // не считается вовсе, и клиенту нечего про него показывать.
   info.trial = info.state === 'none' || info.state === 'invalid'
     ? await getTrialState()
     : null
+  // Ключ на чужой объект принимаем (отказ стоил бы работы отелю, который просто
+  // переименовался), но говорим об этом вслух — и при активации, и потом в
+  // разделе «Лицензия»: иначе один купленный ключ молча обслуживает соседей.
+  if (info.hotelMismatch) info.warning = mismatchWarning(info, name)
   return info
 }
 

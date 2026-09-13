@@ -7,8 +7,12 @@ const { passwordRule } = require('../utils/passwordPolicy')
 
 // На ВХОДЕ парольная политика не проверяется — только «поле не пустое».
 // Иначе учётные записи со старыми короткими паролями перестанут входить.
+// Логин приводится к нижнему регистру (S13-007): учётки создаются именно так
+// (`routes/users.js`, `routes/setup.js`), а вход раньше только обрезал пробелы —
+// `Aigerim` с Caps Lock получал «Неверный логин или пароль» при живой учётке
+// `aigerim`, и каждая такая попытка жгла лимит входа.
 const loginRules = [
-  body('username').trim().notEmpty().withMessage('Логин обязателен'),
+  body('username').trim().toLowerCase().notEmpty().withMessage('Логин обязателен'),
   body('password').notEmpty().withMessage('Пароль обязателен'),
 ]
 

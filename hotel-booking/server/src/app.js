@@ -91,7 +91,15 @@ app.use(maintenanceGate)
 // Журнал действий: ДО роутов, чтобы перехватить ответ любого из них (см. middleware/audit.js)
 app.use('/api', auditMiddleware)
 
-app.use('/api/auth', authLimiter, authRoutes)
+// Лимитер входа — точечно на подбор пароля (S13-006). Раньше он висел на всём
+// `/api/auth`, то есть считал и `GET /auth/me` — а его клиент зовёт на каждом
+// старте программы (`useAuthStore.restore`). Двадцать перезапусков за 15 минут
+// запирали вход на стойке: чем настойчивее человек перезапускал программу,
+// пытаясь починить, тем надёжнее себя запирал. Остальное в `/api/auth`
+// (`me`, `logout`) идёт под общим `apiLimiter`, как все прочие роуты.
+app.post('/api/auth/login', authLimiter)
+app.post('/api/auth/change-password', authLimiter)
+app.use('/api/auth', apiLimiter, authRoutes)
 app.use('/api/bookings', apiLimiter, bookingRoutes)
 app.use('/api/rooms', apiLimiter, roomRoutes)
 app.use('/api/categories', apiLimiter, categoryRoutes)

@@ -1,6 +1,7 @@
 import type {
   ReportSpec, DefColumn, DefParam, DefFilter, DatasetField, DatasetMetric, ReportMeta,
 } from '../../../api/reports'
+import { saveFileToUser } from '../../../utils/saveFile'
 
 /**
  * Модель конструктора: чистые функции над определением отчёта.
@@ -205,21 +206,7 @@ export function readJsonFile(file: File): Promise<ReportSpec> {
 
 /** Скачать определение файлом. В Electron на file:// сработает через мост, иначе ссылкой. */
 export async function downloadSpec(spec: ReportSpec): Promise<void> {
-  const name = `${spec.id || 'report'}.report.json`
-  const text = specToJson(spec)
-  const bridge = window.appConfig?.saveReportFile
-  if (bridge) {
-    await bridge({ fileName: name, base64: btoa(unescape(encodeURIComponent(text))) })
-    return
-  }
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }))
-  const a = document.createElement('a')
-  a.href = url
-  a.download = name
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
+  await saveFileToUser(`${spec.id || 'report'}.report.json`, specToJson(spec))
 }
 
 /** Список «значение | подпись» построчно → options. Без «|» подпись = значение. */

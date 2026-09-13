@@ -138,6 +138,10 @@ app.use('/api/users', apiLimiter, userRoutes)
 // (см. `utils/healthBody.js`). Личность берётся из кэша и при лежащей базе
 // отдаётся последняя известная — иначе именно в аварии клиент решил бы, что
 // подключился не туда, и «потерял» хост.
+//
+// Рядом с `instance` — `host: { computer, port }`: имя компьютера хоста. По нему
+// рабочее место находит хост после смены Wi-Fi там, где широковещание не
+// проходит (гостевая сеть, брандмауэр): IP меняет DHCP, имя машины — нет.
 app.get('/api/health', async (req, res) => {
   const db = await checkDb(prisma)
   const identity = await getIdentity(prisma).catch(() => null)

@@ -28,7 +28,7 @@ const requireCjs = createRequire(import.meta.url)
 const here = path.dirname(fileURLToPath(import.meta.url))
 
 const identityMod = loadCjs('src/utils/instanceIdentity.js', { stubs: { './logger': silentLogger } })
-const { buildHealthBody, NONCE_RE } = loadCjs('src/utils/healthBody.js', {
+const { buildHealthBody, hostDescriptor, NONCE_RE } = loadCjs('src/utils/healthBody.js', {
   stubs: { './instanceIdentity': identityMod },
 })
 
@@ -88,7 +88,8 @@ describe('buildHealthBody — блок instance', () => {
     const body = buildHealthBody({ db: 'ok', identity: null })
 
     expect(body).not.toHaveProperty('instance')
-    expect(Object.keys(body).sort()).toEqual(['db', 'status', 'timestamp'])
+    // `host` (имя компьютера и порт) от личности не зависит — он есть всегда.
+    expect(Object.keys(body).sort()).toEqual(['db', 'host', 'status', 'timestamp'])
   })
 
   it('без nonce отдаются только id и публичный ключ — подписывать нечего', () => {
@@ -227,5 +228,59 @@ describe('NONCE_RE — один формат на обе стороны', () => 
       const body = buildHealthBody({ db: 'ok', identity: idn, nonce })
       expect(verifyAsClient(body.instance, { nonce, publicKey: idn.publicKey, id: idn.id }), nonce).toBe(true)
     }
+  })
+})
+
+describe('buildHealthBody — блок host (имя компьютера хоста)', () => {
+  /**
+   * По этому имени рабочее место находит хост после смены Wi-Fi, когда
+   * широковещание не проходит: `http://<computer>:<port>` резолвит сама Windows.
+   * Имя запоминается рядом с личностью (TOFU) при первом удачном подключении.
+   */
+  it('отдаёт имя компьютера и порт сервера', () => {
+    const body = buildHealthBody({ db: 'ok', hostname: 'NB-HOST', port: 4780 })
+
+    expect(body.host).toEqual({ computer: 'NB-HOST', port: 4780 })
+  })
+
+  it('есть даже при лежащей базе — иначе имя терялось бы именно в аварии', () => {
+    const body = buildHealthBody({ db: 'down', hostname: 'NB-HOST', port: 4780 })
+
+    expect(body.status).toBe('degraded')
+    expect(body.host.computer).toBe('NB-HOST')
+  })
+
+  it('порт по умолчанию — тот же 3001, что у server.js', () => {
+    // Разъедутся эти значения — клиент построит по имени адрес с чужим портом
+    // и будет считать, что хоста в сети нет.
+    expect(hostDescriptor({ hostname: 'x', port: undefined, ...{} }).port).toBeTypeOf('number')
+    expect(hostDescriptor({ hostname: 'x', port: '' }).port).toBe(3001)
+    expect(hostDescriptor({ hostname: 'x', port: 'abc' }).port).toBe(3001)
+    expect(hostDescriptor({ hostname: 'x', port: 0 }).port).toBe(3001)
+    expect(hostDescriptor({ hostname: 'x', port: 70000 }).port).toBe(3001)
+    expect(hostDescriptor({ hostname: 'x', port: '4780' }).port).toBe(4780)
+  })
+
+  it('кроме имени и порта в ответе нет ничего: health публичный', () => {
+    const body = buildHealthBody({ db: 'ok', hostname: 'NB-HOST', port: 4780 })
+
+    expect(Object.keys(body.host).sort()).toEqual(['computer', 'port'])
+  })
+
+  it('имени нет — пустая строка, а не падение', () => {
+    expect(() => buildHealthBody({ db: 'ok', hostname: null, port: 4780 })).not.toThrow()
+    expect(buildHealthBody({ db: 'ok', hostname: null, port: 4780 }).host.computer).toBe('')
+  })
+
+  it('имя компьютера, которое отдаёт health, годится в адрес для клиента', () => {
+    // Ровно то, что делает рабочее место: подставляет имя из health в URL.
+    // Пробелы по краям (их роняют в поле «имя компьютера» при настройке Windows)
+    // сделали бы адрес нерабочим.
+    const { hostNameCandidates } = requireCjs(path.resolve(here, '../../electron/lib/hostRebind.js'))
+    const body = buildHealthBody({ db: 'ok', hostname: '  NB-HOST  ', port: 4780 })
+
+    expect(body.host.computer).toBe('NB-HOST')
+    expect(hostNameCandidates({ computer: body.host.computer, serverUrl: 'http://192.168.1.50:4780' }))
+      .toEqual(['http://NB-HOST:4780', 'http://NB-HOST.local:4780'])
   })
 })

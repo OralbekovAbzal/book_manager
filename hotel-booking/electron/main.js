@@ -23,6 +23,9 @@ const {
   describePortOwner, describePortBusy,
 } = require('./lib/ports')
 const { findHosts, makeNonce } = require('./lib/discovery')
+const {
+  hostNameCandidates, localIpv4s, addressSetChanged, decideWhoRebind, rebindMessage,
+} = require('./lib/hostRebind')
 
 // ─── Пути к ресурсам (dev vs упакованное) ────────────────────────────────────
 const isDev = !app.isPackaged
@@ -976,9 +979,17 @@ function waitForHealth(port, timeoutMs) {
 // в двух метрах и работает. Раньше это чинил только звонок тому, кто умеет
 // смотреть ipconfig.
 //
-// Как лечим. Раз в 15 с стучимся в /api/health. Два отказа подряд — спрашиваем
-// сеть, где наш хост (UDP-широковещание, lib/discovery.js), и переезжаем на
-// найденный адрес.
+// Как лечим. Раз в 15 с стучимся в /api/health. Первый же отказ — ищем хост, и
+// ищем его ТРЕМЯ путями подряд:
+//   1) по ИМЕНИ КОМПЬЮТЕРА хоста (`http://<имя>:<порт>` и `<имя>.local`) — его
+//      резолвит сама Windows (NetBIOS/LLMNR/mDNS) без DHCP и без нашего UDP;
+//   2) широковещанием по личности (`find`, lib/discovery.js);
+//   3) если своего хоста в сети нет три поиска подряд — «кто здесь» (`who`) и
+//      перепривязка к хосту с ТЕМ ЖЕ ИМЕНЕМ, но новой личностью (программу на
+//      хосте переустановили или развернули копию на другом ноутбуке).
+// Отдельно ловим смену сети: набор своих IPv4-адресов изменился — искать сразу,
+// не дожидаясь отказов (13.09.2026: рабочее место после смены Wi-Fi не
+// перепривязалось само, и сисадмин искал хост руками, по паролю).
 //
 // ПОЧЕМУ ЭТО БЕЗОПАСНО. Переезд происходит только на хост с ТОЙ ЖЕ личностью:
 // у хоста есть Ed25519-пара в базе, публичный ключ рабочее место запоминает при
@@ -986,15 +997,31 @@ function waitForHealth(port, timeoutMs) {
 // дальше принимается только ответ, подписанный этим ключом, плюс подтверждающий
 // HTTP-запрос с одноразовым nonce. Без этого любой в сети отеля (включая
 // гостевой Wi-Fi) мог бы ответить «хост теперь я» и собирать пароли сотрудников.
+// Единственное послабление — пункт 3, и оно узкое: в сети должен быть ровно ОДИН
+// хост, его ответ обязан быть подписан ключом, который он же и предъявляет, а имя
+// его компьютера — совпасть с запомненным. Не совпало или хостов несколько —
+// остаёмся на месте и пишем в лог, почему.
 const HOST_PROBE_INTERVAL = 15000   // как часто проверяем связь с хостом
 const HOST_SEARCH_INTERVAL = 10000  // как часто спрашиваем сеть, пока хост потерян
 const HOST_PROBE_TIMEOUT = 4000
-const HOST_FAILS_BEFORE_SEARCH = 2
+// Один отказ, а не два: 15 с до начала поиска вместо 30. Ложная тревога стоит
+// одного широковещательного запроса, а лишние 15 секунд «нет связи» человек за
+// стойкой видит перед гостем.
+const HOST_FAILS_BEFORE_SEARCH = 1
+// Сколько поисков по личности должно не найти ничего, прежде чем спрашивать «кто
+// здесь». Три — это ~30 секунд: столько занимает перезагрузка хоста, и устраивать
+// перепривязку каждый раз, когда хост просто перезапускают, незачем.
+const WHO_AFTER_MISSES = 3
 let hostWatchTimer = null
 let hostSearchTimer = null
 let hostWatchFails = 0
 let hostWatchBusy = false
-let hostSearchBusy = false
+/** Текущий поиск (он же замок): ручной ждёт его окончания, фоновый — пропускает тик. */
+let hostSearchPromise = null
+/** Сколько поисков по личности подряд не нашли свой хост. */
+let hostFindMisses = 0
+/** Набор своих IPv4 с прошлого тика; null — ещё не мерили. */
+let lastLocalIps = null
 
 /**
  * Один запрос к /api/health хоста.
@@ -1002,9 +1029,16 @@ let hostSearchBusy = false
  *   reached — ответ получен (пусть и 503): значит хост по этому адресу ЕСТЬ и
  *   искать его по сети не нужно.
  */
+/** Имя компьютера хоста из тела health (`host: { computer, port }`). */
+function healthComputer(body) {
+  const h = body && typeof body.host === 'object' && body.host ? body.host : null
+  const name = h && typeof h.computer === 'string' ? h.computer.trim() : ''
+  return name
+}
+
 async function probeHost(url, { nonce = null } = {}) {
   const base = normalizeServerUrl(url)
-  if (!base) return { reached: false, ok: false, db: null, instance: null, status: null }
+  if (!base) return { reached: false, ok: false, db: null, instance: null, computer: '', status: null }
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), HOST_PROBE_TIMEOUT)
   try {
@@ -1018,10 +1052,13 @@ async function probeHost(url, { nonce = null } = {}) {
       ok: res.ok,
       db: body && typeof body.db === 'string' ? body.db : null,
       instance: inst,
+      // Имя компьютера хоста: сервер прежней сборки его не шлёт, и это нормально —
+      // тогда остаётся только поиск по личности, как было до 13.09.2026.
+      computer: healthComputer(body),
       status: res.status,
     }
   } catch {
-    return { reached: false, ok: false, db: null, instance: null, status: null }
+    return { reached: false, ok: false, db: null, instance: null, computer: '', status: null }
   } finally {
     clearTimeout(timer)
   }
@@ -1055,17 +1092,24 @@ function verifyHealthSignature(instance, { nonce, publicKey, id }) {
 function startHostWatch(cfg) {
   if (!cfg || cfg.mode !== 'client' || hostWatchTimer) return
   hostWatchFails = 0
+  hostFindMisses = 0
+  // Набор адресов запоминаем ЗДЕСЬ, а не на первом тике: иначе первый же тик
+  // объявил бы «сеть изменилась» при каждом запуске программы.
+  lastLocalIps = localIpv4s(os.networkInterfaces())
   hostWatchTimer = setInterval(() => { hostWatchTick() }, HOST_PROBE_INTERVAL)
   // Ноутбук закрыли и унесли в другую сеть — просыпаться там надо сразу, а не
   // через 15 секунд «нет связи».
   try { powerMonitor.on('resume', hostWatchTick) } catch { /* нет powerMonitor — не беда */ }
-  hlog('[watch] сторож адреса хоста запущен:', cfg.serverUrl)
+  hlog('[watch] сторож адреса хоста запущен:', cfg.serverUrl,
+    '| имя хоста:', cfg.hostComputer || '—', '| свои IPv4:', lastLocalIps.join(', ') || '—')
 }
 
 function stopHostWatch() {
   if (hostWatchTimer) { clearInterval(hostWatchTimer); hostWatchTimer = null }
   stopHostSearch()
   hostWatchFails = 0
+  hostFindMisses = 0
+  lastLocalIps = null
   try { powerMonitor.removeListener('resume', hostWatchTick) } catch { /* уже снят */ }
 }
 
@@ -1073,11 +1117,16 @@ function stopHostSearch() {
   if (hostSearchTimer) { clearInterval(hostSearchTimer); hostSearchTimer = null }
 }
 
-function startHostSearch() {
+function startHostSearch(cfg) {
   if (hostSearchTimer) return
-  hlog('[watch] хост не отвечает — ищу его в сети')
-  hostSearchTimer = setInterval(() => { searchForHost() }, HOST_SEARCH_INTERVAL)
-  searchForHost()
+  const ips = lastLocalIps || localIpv4s(os.networkInterfaces())
+  hlog('[watch] хост не отвечает — ищу его в сети; адрес:', (cfg && cfg.serverUrl) || '—',
+    '| имя хоста:', (cfg && cfg.hostComputer) || '—', '| свои IPv4:', ips.join(', ') || '—')
+  // Отклонение здесь означало бы unhandledRejection в main-процессе — сторож не
+  // имеет права ронять программу из-за неудачного поиска.
+  const tick = () => { searchForHost().catch((e) => hlog('[watch] поиск:', String(e && (e.message || e)))) }
+  hostSearchTimer = setInterval(tick, HOST_SEARCH_INTERVAL)
+  tick()
 }
 
 async function hostWatchTick() {
@@ -1086,10 +1135,25 @@ async function hostWatchTick() {
   try {
     const cfg = readConfig()
     if (cfg.mode !== 'client' || !cfg.serverUrl) return
+
+    // Смена сети. Wi-Fi переключили — прежний адрес хоста устарел мгновенно, и
+    // ждать отказов опроса незачем: ищем сразу же, в этом же тике.
+    const ips = localIpv4s(os.networkInterfaces())
+    const netChanged = addressSetChanged(lastLocalIps, ips)
+    if (netChanged) {
+      hlog('[watch] сеть изменилась:', (lastLocalIps || []).join(', ') || '—',
+        '→', ips.join(', ') || '—')
+      // Новая сеть — новая попытка: счётчик промахов прежней сети к ней
+      // отношения не имеет.
+      hostFindMisses = 0
+    }
+    lastLocalIps = ips
+
     const nonce = makeNonce()
     const r = await probeHost(cfg.serverUrl, { nonce })
     if (r.reached) {
       hostWatchFails = 0
+      hostFindMisses = 0
       stopHostSearch()
       // TOFU: личность запоминаем при первом удачном подключении по адресу,
       // который ввёл сисадмин. Перезаписывать её здесь нельзя — иначе подмена
@@ -1097,13 +1161,25 @@ async function hostWatchTick() {
       const identity = instanceIdentity(r.instance)
       if (r.ok && r.db === 'ok' && identity && !cfg.hostInstance) {
         cfg.hostInstance = identity
+        if (r.computer) cfg.hostComputer = r.computer
         writeConfig(cfg)
-        hlog('[watch] личность хоста запомнена:', identity.id)
+        hlog('[watch] личность хоста запомнена:', identity.id, '| компьютер:', r.computer || '—')
+      } else if (r.ok && r.db === 'ok' && identity && cfg.hostInstance
+        && cfg.hostInstance.id === identity.id && r.computer && cfg.hostComputer !== r.computer) {
+        // Имя компьютера пишем и потом: у рабочих мест, настроенных до 13.09.2026,
+        // его просто нет, а хост тот же самый (личность сошлась) — иначе второй
+        // путь поиска у них никогда бы не включился. Переименовали машину —
+        // запоминаем новое имя по той же причине.
+        cfg.hostComputer = r.computer
+        writeConfig(cfg)
+        hlog('[watch] имя компьютера хоста запомнено:', r.computer)
       }
       return
     }
     hostWatchFails++
-    if (hostWatchFails >= HOST_FAILS_BEFORE_SEARCH && cfg.hostInstance) startHostSearch()
+    if (cfg.hostInstance && (netChanged || hostWatchFails >= HOST_FAILS_BEFORE_SEARCH)) {
+      startHostSearch(cfg)
+    }
   } catch (e) {
     hlog('[watch] тик не удался:', String(e && (e.message || e)))
   } finally {
@@ -1111,35 +1187,154 @@ async function hostWatchTick() {
   }
 }
 
-async function searchForHost() {
-  if (isQuitting || hostSearchBusy) return
-  hostSearchBusy = true
+/**
+ * Поиск хоста. Один одновременно: фоновый тик при занятом поиске просто уходит,
+ * ручной (кнопка «Найти хост в сети») дожидается текущего и запускает свой.
+ *
+ * @param {{manual?: boolean}} opts manual — искать до конца, включая «кто здесь»
+ * @returns {Promise<{ok:boolean, url?:string, reason?:string, computer?:string}>}
+ */
+async function searchForHost(opts = {}) {
+  if (isQuitting) return { ok: false, reason: 'quitting' }
+  if (hostSearchPromise) {
+    if (!opts.manual) return hostSearchPromise
+    try { await hostSearchPromise } catch { /* чужая неудача — не наша */ }
+  }
+  if (hostSearchPromise) return hostSearchPromise
+  hostSearchPromise = doSearchForHost(opts)
+  try {
+    return await hostSearchPromise
+  } finally {
+    hostSearchPromise = null
+  }
+}
+
+async function doSearchForHost({ manual = false } = {}) {
   try {
     const cfg = readConfig()
+    if (cfg.mode !== 'client') return { ok: false, reason: 'not-client' }
     const known = cfg.hostInstance
-    if (cfg.mode !== 'client' || !known || !known.id || !known.publicKey) return
-    const hosts = await findHosts({
-      port: DISCOVERY_PORT, t: 'find', id: known.id, publicKey: known.publicKey,
-    })
     const current = normalizeServerUrl(cfg.serverUrl)
-    for (const h of hosts) {
-      if (!h.url || h.url === current) continue
-      // Подтверждающий запрос: UDP-ответ подписан, но подтвердить живой сервер
-      // на новом адресе может только сам сервер.
+
+    // Ручной поиск начинаем с прежнего адреса: кнопку часто жмут в секунду,
+    // когда связь уже вернулась, а полоса ещё висит. Перезапускать программу
+    // ради того же самого адреса — худшее, что можно сделать в ответ.
+    if (manual && current) {
+      const r = await probeHost(current)
+      if (r.reached) {
+        hlog('[watch] ручной поиск: прежний адрес снова отвечает —', current)
+        return { ok: false, reason: 'already-here' }
+      }
+    }
+
+    // ── 1. По имени компьютера хоста ─────────────────────────────────────────
+    // Дешевле и надёжнее широковещания: обычный HTTP-запрос по имени, которое
+    // Windows резолвит сама. Работает там, где UDP-ответ не доходит вовсе.
+    if (known && known.id && known.publicKey) {
+      const byName = hostNameCandidates({ computer: cfg.hostComputer, serverUrl: current })
+      if (byName.length) hlog('[watch] пробую по имени:', byName.join(', '))
+      for (const url of byName) {
+        const nonce = makeNonce()
+        const r = await probeHost(url, { nonce })
+        if (!r.reached || !r.instance) {
+          hlog('[watch] по имени', url, '— не отвечает')
+          continue
+        }
+        if (!verifyHealthSignature(r.instance, { nonce, publicKey: known.publicKey, id: known.id })) {
+          // Имя резолвится, но отвечает не наш хост: чужая машина с тем же
+          // именем или перехват имени в сети. Молча уходим — но в лог пишем.
+          hlog('[watch] по имени', url, '— отвечает чужая личность, пропускаю')
+          continue
+        }
+        hlog('[watch] хост найден по имени компьютера:', url)
+        moveToHost(url, cfg)
+        return { ok: true, url }
+      }
+    }
+
+    // ── 2. Широковещание по личности ─────────────────────────────────────────
+    let found = []
+    if (known && known.id && known.publicKey) {
+      found = await findHosts({
+        port: DISCOVERY_PORT, t: 'find', id: known.id, publicKey: known.publicKey,
+      })
+      hlog('[watch] find: ответов', found.length,
+        found.map((h) => `${h.id} ${h.computer || '—'} ${h.url}`).join('; ') || '')
+      for (const h of found) {
+        if (!h.url) continue
+        if (h.url === current) { hlog('[watch] find: адрес не изменился —', h.url); continue }
+        // Подтверждающий запрос: UDP-ответ подписан, но подтвердить живой сервер
+        // на новом адресе может только сам сервер.
+        const nonce = makeNonce()
+        const r = await probeHost(h.url, { nonce })
+        if (!r.reached || !r.instance) { hlog('[watch] find:', h.url, '— health не ответил'); continue }
+        if (!verifyHealthSignature(r.instance, { nonce, publicKey: known.publicKey, id: known.id })) {
+          hlog('[watch] ответ с', h.url, 'не прошёл проверку подписи — пропускаю')
+          continue
+        }
+        hostFindMisses = 0
+        moveToHost(h.url, cfg)
+        return { ok: true, url: h.url }
+      }
+      if (!found.length) hostFindMisses++
+    }
+
+    // ── 3. «Кто здесь» — хост с тем же именем, но новой личностью ────────────
+    // Программу на хосте переустановили или развернули копию на другом ноутбуке:
+    // пара ключей новая, и по личности этот хост не отзовётся уже никогда.
+    const askWho = manual || hostFindMisses >= WHO_AFTER_MISSES
+    if (!askWho) return { ok: false, reason: 'not-found' }
+
+    const all = await findHosts({ port: DISCOVERY_PORT, t: 'who' })
+    hlog('[watch] who: ответов', all.length,
+      all.map((h) => `${h.id} ${h.computer || '—'} ${h.url}`).join('; ') || '')
+    const decision = decideWhoRebind({ hosts: all, hostComputer: cfg.hostComputer })
+    if (decision.action !== 'move') {
+      // Не переезжаем — но по логу должно быть понятно, почему: это первое,
+      // что спросят при звонке «программа не нашла хост».
+      hlog('[watch] who: перепривязки нет —', decision.reason,
+        '| записанное имя:', cfg.hostComputer || '—')
+      if (decision.action === 'mismatch') {
+        return { ok: false, reason: 'other-install', computer: decision.host.computer || '' }
+      }
+      return { ok: false, reason: 'not-found' }
+    }
+
+    // Сначала — адрес по имени компьютера, и только потом сырые адреса из UDP.
+    // Имя переживёт следующую смену Wi-Fi и не зависит от того, какой из
+    // адаптеров хоста ответил первым (у ноутбука с виртуальной сетью UDP приносит
+    // 192.168.56.1 раньше настоящего адреса — живая проверка 13.09).
+    const byName = hostNameCandidates({ computer: decision.host.computer, serverUrl: decision.candidates[0].url })
+      .map((url) => ({ ...decision.host, url }))
+    for (const h of [...byName, ...decision.candidates]) {
+      // Тот же адрес — переезжать некуда: там только что не ответили, а
+      // перезапуск программы ничего не починит.
+      if (h.url === current) { hlog('[watch] who: адрес не изменился —', h.url); continue }
       const nonce = makeNonce()
       const r = await probeHost(h.url, { nonce })
-      if (!r.reached || !r.instance) continue
-      if (!verifyHealthSignature(r.instance, { nonce, publicKey: known.publicKey, id: known.id })) {
-        hlog('[watch] ответ с', h.url, 'не прошёл проверку подписи — пропускаю')
+      const identity = instanceIdentity(r.instance)
+      if (!identity) { hlog('[watch] who:', h.url, '— health без личности'); continue }
+      // UDP и HTTP обязаны говорить одно и то же: иначе чужой пересказал бы чужой
+      // же UDP-ответ, подставив свой сервер.
+      if (identity.id !== h.id) { hlog('[watch] who:', h.url, '— id из health не совпал с UDP'); continue }
+      // Подпись проверяем ключом, который хост предъявил сам: это доказывает, что
+      // приватный ключ у него есть (а не переписан из чужого ответа). Право на
+      // переезд даёт не она, а совпадение имени компьютера — см. decideWhoRebind.
+      if (!verifyHealthSignature(r.instance, { nonce, publicKey: identity.publicKey, id: identity.id })) {
+        hlog('[watch] who:', h.url, '— подпись health не сошлась')
         continue
       }
-      moveToHost(h.url, cfg)
-      return
+      hlog(`[watch] хост «${h.computer}» с новой личностью — перепривязка`, identity.id, h.url)
+      cfg.hostInstance = identity
+      if (h.computer) cfg.hostComputer = h.computer
+      hostFindMisses = 0
+      moveToHost(h.url, cfg)   // он же и запишет config
+      return { ok: true, url: h.url }
     }
+    return { ok: false, reason: 'not-found' }
   } catch (e) {
     hlog('[watch] поиск хоста не удался:', String(e && (e.message || e)))
-  } finally {
-    hostSearchBusy = false
+    return { ok: false, reason: 'error' }
   }
 }
 
@@ -1450,6 +1645,31 @@ ipcMain.handle('config:discover', async () => {
   }
 })
 
+/**
+ * «Найти хост в сети» с полосы «Нет связи с сервером» — БЕЗ пароля сисадмина.
+ *
+ * Почему без пароля. 13.09.2026 рабочее место после смены Wi-Fi не
+ * перепривязалось само, и человеку за стойкой пришлось искать того, кто знает
+ * пароль сисадмина, чтобы нажать «Найти в сети» в настройках системы. Сама
+ * кнопка ничего не настраивает: она делает ровно то же, что сторож делает сам
+ * каждые 10 секунд, и переехать может только на хост, подтверждённый подписью
+ * (или, при новой личности, на единственный хост с тем же именем компьютера).
+ * Пароль здесь охранял бы не данные, а кнопку «попробовать ещё раз».
+ */
+ipcMain.handle('host:rebind', async () => {
+  const cfg = readConfig()
+  if (cfg.mode !== 'client') return rebindMessage({ ok: false, reason: 'not-client' })
+  hlog('[rebind] ручной поиск хоста; адрес:', cfg.serverUrl || '—',
+    '| имя хоста:', cfg.hostComputer || '—')
+  // Фоновый поиск на время ручного останавливаем: два широковещания навстречу
+  // друг другу только путают лог, а сторож всё равно вернётся на следующем тике.
+  stopHostSearch()
+  const res = await searchForHost({ manual: true })
+  const out = rebindMessage(res)
+  hlog('[rebind] итог:', out.message)
+  return out
+})
+
 // Сохранить настройки системы. Первый запуск — стартуем сразу; на работающей
 // установке — перезапуск приложения, чтобы порт и папки применились чисто.
 // Ответ: { ok: true, relaunch?: true } | { ok: false, error: string }.
@@ -1493,9 +1713,10 @@ ipcMain.handle('config:apply', async (_e, payload) => {
     if (!url) return { ok: false, error: 'Укажите адрес хоста' }
     try { new URL(url) } catch { return { ok: false, error: 'Некорректный адрес хоста' } }
     // Сисадмин указал ДРУГОЙ адрес — значит и хост, возможно, другой. Забываем
-    // прежнюю личность: иначе сторож нашёл бы старый хост в сети и вернул бы
-    // рабочее место туда, откуда его только что увели.
-    if (cfg.serverUrl !== url) delete cfg.hostInstance
+    // прежнюю личность и имя компьютера: иначе сторож нашёл бы старый хост в
+    // сети (по любому из двух путей) и вернул бы рабочее место туда, откуда его
+    // только что увели.
+    if (cfg.serverUrl !== url) { delete cfg.hostInstance; delete cfg.hostComputer }
     cfg.serverUrl = url
   }
 
@@ -1526,8 +1747,10 @@ ipcMain.handle('config:apply', async (_e, payload) => {
     const identity = instanceIdentity(r.instance)
     if (r.ok && r.db === 'ok' && identity) {
       cfg.hostInstance = identity
+      // Имя компьютера хоста — второй путь поиска, кроме широковещания.
+      if (r.computer) cfg.hostComputer = r.computer
       writeConfig(cfg)
-      hlog('config:apply: личность хоста сохранена:', identity.id)
+      hlog('config:apply: личность хоста сохранена:', identity.id, '| компьютер:', r.computer || '—')
     } else {
       hlog('config:apply: личность хоста не получена (reached=', r.reached, 'db=', String(r.db), ')')
     }

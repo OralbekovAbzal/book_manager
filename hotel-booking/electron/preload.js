@@ -21,6 +21,10 @@ contextBridge.exposeInMainWorld('appConfig', {
   isElectron: true,
   appVersion,
   openSystemSettings: (password) => ipcRenderer.invoke('system:openSettings', password),
+  // «Найти хост в сети» с полосы «Нет связи» — БЕЗ пароля сисадмина: кнопка
+  // запускает тот же поиск, что сторож адреса делает сам, и ничего не настраивает.
+  // → { ok, message, url? }; при ok программа сама перезапустится через ~2 с.
+  rebindHost: () => ipcRenderer.invoke('host:rebind'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),

@@ -1,6 +1,8 @@
 const logger = require('../utils/logger')
 const { safeUrl, safeError } = require('../utils/logSafe')
 
+const ROOM_TAKEN = 'Номер уже занят на выбранные даты (одновременное бронирование). Обновите сетку и попробуйте снова.'
+
 function errorHandler(err, req, res, _next) {
   // URL без значений query и ошибка без тела запроса: в error.log ФИО, телефоны
   // и документы гостей попадать не должны ни из строки запроса (D1-004), ни из
@@ -22,21 +24,37 @@ function errorHandler(err, req, res, _next) {
 
   // Exclusion-constraint двойного бронирования (race condition): два админа одновременно
   // забронировали один номер на пересекающиеся даты — БД отклонила второй INSERT/UPDATE.
-  //
-  // Взаимоблокировка (S13-L1, найдено на живом стенде 13.09) — тот же случай глазами
-  // стойки: две транзакции ждут друг друга на том же ограничении `booking_no_overlap`,
-  // Postgres выбирает жертву и отдаёт `40P01 deadlock detected`. Prisma заворачивает это
-  // либо в `P2034`, либо в `PrismaClientUnknownRequestError` вообще без `code` — поэтому
-  // смотрим и на код, и на текст. Клиенту в обоих случаях нужен один ответ: «обновите
-  // сетку и попробуйте снова», а не «внутренняя ошибка сервера».
+  // Этот отказ говорит о номере и датах сам по себе, на каком бы роуте ни случился.
   const m = String(err && err.message || '')
+  if (err.code === 'P2004'
+    || m.includes('booking_no_overlap') || m.includes('23P01') || m.includes('exclusion constraint')) {
+    return res.status(409).json({ error: ROOM_TAKEN })
+  }
+
+  // Взаимоблокировка (S13-L1, найдено на живом стенде 13.09). Prisma заворачивает её
+  // либо в `P2034`, либо в `PrismaClientUnknownRequestError` вообще без `code` —
+  // поэтому смотрим и на код, и на текст. Общий смысл один: «повторите», а не
+  // «внутренняя ошибка сервера».
+  //
+  // Текст про занятый номер — только там, где речь о размещении (R13-S-003).
+  // Взаимоблокировка бывает и при возврате платежа, и при восстановлении копии:
+  // две транзакции ждут друг друга на чём угодно, и «Номер уже занят на выбранные
+  // даты» в ответ на возврат денег — это не подсказка, а дезинформация.
   const deadlock = err.code === 'P2034'
     || m.includes('40P01')
     || m.includes('deadlock detected')
     || m.includes('взаимоблокировка')
-  if (err.code === 'P2004' || deadlock
-    || m.includes('booking_no_overlap') || m.includes('23P01') || m.includes('exclusion constraint')) {
-    return res.status(409).json({ error: 'Номер уже занят на выбранные даты (одновременное бронирование). Обновите сетку и попробуйте снова.' })
+  if (deadlock) {
+    // `originalUrl` первым: внутри роутера `req.url` обрезан до пути без префикса
+    // монтирования, и `/api/bookings` в нём уже не видно.
+    const path = String(req.originalUrl || req.url || req.path || '').split('?')[0]
+    if (path.startsWith('/api/bookings') || path.startsWith('/api/occupancy')) {
+      return res.status(409).json({ error: ROOM_TAKEN })
+    }
+    return res.status(409).json({
+      error: 'Операция не удалась из-за одновременного изменения данных. Повторите ещё раз.',
+      code: 'CONCURRENT_UPDATE',
+    })
   }
 
   // Нарушение внешнего ключа: несуществующий roomId / categoryId / partnerId / shiftId.

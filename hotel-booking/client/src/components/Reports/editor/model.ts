@@ -205,8 +205,8 @@ export function readJsonFile(file: File): Promise<ReportSpec> {
 }
 
 /** Скачать определение файлом. В Electron на file:// сработает через мост, иначе ссылкой. */
-export async function downloadSpec(spec: ReportSpec): Promise<void> {
-  await saveFileToUser(`${spec.id || 'report'}.report.json`, specToJson(spec))
+export async function downloadSpec(spec: ReportSpec): Promise<{ canceled?: boolean; path?: string }> {
+  return saveFileToUser(`${spec.id || 'report'}.report.json`, specToJson(spec))
 }
 
 /** Список «значение | подпись» построчно → options. Без «|» подпись = значение. */

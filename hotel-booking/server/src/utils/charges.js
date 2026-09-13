@@ -601,18 +601,35 @@ async function rebuildChainCharges(headId, { adminId = null, client = prisma, fr
   const priced = segmentsToPrice(segments, manual)
 
   const cut = frozenBefore ? toUTCDate(frozenBefore).getTime() : null
-  const keptAuto = cut === null ? [] : all.filter((c) => (
-    c.source === 'auto' && c.kind === 'stay' && c.date && toUTCDate(c.date).getTime() < cut
+
+  // Ночь считается прожитой, только если она ЕСТЬ в новом периоде брони.
+  // Иначе сокращение дат оставляло бы в счёте ночи снятого периода: они лежат
+  // раньше границы, и заморозка их берегла (R13-S-001). Полуоткрытый отрезок
+  // `[checkIn, checkOut)` — как везде в проекте.
+  const inChain = (t) => segments.some((seg) => (
+    t >= toUTCDate(seg.booking.checkIn).getTime() && t < toUTCDate(seg.booking.checkOut).getTime()
   ))
+  const keptAuto = cut === null ? [] : all.filter((c) => {
+    if (c.source !== 'auto' || c.kind !== 'stay' || !c.date) return false
+    const t = toUTCDate(c.date).getTime()
+    return t < cut && inChain(t)
+  })
   const keptIds = new Set(keptAuto.map((c) => c.id))
   const dropIds = all.filter((c) => c.source === 'auto' && !keptIds.has(c.id)).map((c) => c.id)
 
   // «Уже посчитанные» строки для генератора: ручные + сохранённые прожитые ночи.
-  // Ночь без строки (цены на неё не было) закрываем заглушкой на 0 — иначе
-  // генератор выдумает ей сегодняшнюю цену.
+  // `covered` — даты ночей, которые уже чем-то закрыты; генератор их пропустит.
   const frozen = [...manual, ...keptAuto]
-  if (cut !== null) {
-    const covered = new Set(frozen.filter((c) => c.kind === 'stay' && c.date).map((c) => dateKey(c.date)))
+  const covered = new Set(frozen.filter((c) => c.kind === 'stay' && c.date).map((c) => dateKey(c.date)))
+
+  // Прежний итог (`pinLegacyTotal`) — ОДНА строка без даты на весь срок до первого
+  // переезда. Сопоставить её с конкретной ночью нечем, поэтому ночи до границы
+  // закрываем заглушками: иначе генератор начислил бы их ВТОРОЙ раз поверх той же
+  // суммы. Ночь до границы, у которой строки нет и прежнего итога тоже нет,
+  // наоборот, отдаётся генератору — её просто не посчитали (цены на неё не было,
+  // когда бронь заводили), и заглушка на 0 оставляла её неначисленной навсегда
+  // (R13-S-002).
+  if (cut !== null && manual.some((c) => c.label === LEGACY_TOTAL_LABEL)) {
     for (const seg of priced) {
       for (const night of nightsOf(seg.booking.checkIn, seg.booking.checkOut)) {
         if (night.getTime() >= cut) continue
@@ -631,10 +648,14 @@ async function rebuildChainCharges(headId, { adminId = null, client = prisma, fr
     manualCharges: frozen,
     segments: priced,
   })
-  // Подстраховка: прожитые ночи не переоцениваем даже если генератор их выдал
+  // Подстраховка: уже закрытую ночь не начисляем второй раз, даже если генератор
+  // её выдал. Именно «закрытую» — ночь до границы БЕЗ своей строки не трогаем,
+  // иначе она так и осталась бы неначисленной (R13-S-002).
   const rows = cut === null
     ? built.rows
-    : built.rows.filter((r) => !(r.kind === 'stay' && r.date && r.date.getTime() < cut))
+    : built.rows.filter((r) => !(
+      r.kind === 'stay' && r.date && r.date.getTime() < cut && covered.has(dateKey(r.date))
+    ))
 
   if (dropIds.length > 0) {
     await client.bookingCharge.deleteMany({ where: { id: { in: dropIds } } })

@@ -394,8 +394,10 @@ export const ReportsScreen: React.FC<Props> = ({ onBack }) => {
             <span style={{
               fontSize: '0.79rem', color: 'var(--text-muted)', background: 'var(--surface-2)',
               border: '1px solid var(--border-subtle)', borderRadius: 7, padding: '4px 10px',
-              maxWidth: 360, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            }}>{toast}</span>
+              // Текст сервера бывает длинным («В Word можно выгрузить до 5 000 строк… выгрузите в
+              // Excel/CSV») — переносим, а не режем: обрезанная половина прятала совет (R13-C-001).
+              maxWidth: 560, whiteSpace: 'normal', lineHeight: 1.35,
+            }} title={toast}>{toast}</span>
           )}
           {canEdit && active && (
             <div style={{ display: 'flex', gap: 6 }}>

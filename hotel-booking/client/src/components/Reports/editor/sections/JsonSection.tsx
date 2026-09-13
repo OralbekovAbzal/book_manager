@@ -75,7 +75,13 @@ export const JsonSection: React.FC<Props> = ({ spec, onApply }) => {
       <Row align="center">
         <button type="button" onClick={apply} disabled={!dirty} style={{ ...btn, opacity: dirty ? 1 : 0.5, borderColor: dirty ? 'var(--accent)' : undefined, color: dirty ? 'var(--accent-text)' : undefined, fontWeight: 600 }}>Применить</button>
         <button type="button" onClick={copy} style={btn}>Скопировать</button>
-        <button type="button" onClick={() => downloadSpec(spec)} style={btn}>Скачать файл</button>
+        <button
+          type="button"
+          // `downloadSpec` теперь бросает при отказе сохранения (диск полон, папка только
+          // на чтение) — без ловца ошибка уходила в консоль, а человек не видел ничего (R13-C-002).
+          onClick={() => { setError(''); setNote(''); downloadSpec(spec).then((r) => { if (r && !r.canceled) setNote('Файл сохранён') }).catch((e: unknown) => setError(e instanceof Error ? e.message : 'Не удалось сохранить файл')) }}
+          style={btn}
+        >Скачать файл</button>
         <button type="button" onClick={() => fileRef.current?.click()} style={btn}>Загрузить из файла</button>
         <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => load(e.target.files?.[0])} />
         {note && <span style={{ fontSize: '0.78rem', color: 'var(--text-faint)' }}>{note}</span>}

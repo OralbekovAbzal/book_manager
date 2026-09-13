@@ -1003,6 +1003,10 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
     const restored = {}
     let deferredLinks = 0
     let keptInstall = []
+    // Что в итоге осталось в строке настроек: 'own' — своё, 'backup' — из файла копии.
+    // Значение по умолчанию — 'backup': строки настроек в файле может не быть вовсе,
+    // и тогда «своё» не сохранилось (личность выпишется заново при следующем старте).
+    const kept = { identity: 'backup', trialStartedAt: 'backup' }
     let keptSnapshotAuthors = 0
     let orphanedSnapshotAuthors = 0
     await prisma.$transaction(async (tx) => {
@@ -1100,6 +1104,8 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
         const installAfter = await tx.hotelSettings.findFirst({ where: { id: 1 }, select: INSTALL_FIELDS })
         if (installAfter) {
           const keep = keepInstallFields(installBefore, installAfter)
+          if (keep.instanceId) kept.identity = 'own'
+          if (keep.trialStartedAt) kept.trialStartedAt = 'own'
           if (Object.keys(keep).length > 0) {
             keptInstall = Object.keys(keep)
             // `updatedAt` передаём явно: у поля @updatedAt Prisma иначе поставит
@@ -1145,10 +1151,20 @@ async function restoreBackup(fileName, adminId = null, options = {}) {
       `Backup ${name} (v${impact.version}) restored: ${JSON.stringify(restored)}, links ${deferredLinks}, `
       + `snapshot authors kept ${keptSnapshotAuthors}, orphaned ${orphanedSnapshotAuthors}`,
     )
+    // Отдельной строкой и по-русски: разбор обращения «рабочие места не находят
+    // хост» начинается именно с этого вопроса (O13-005/007, R13-S-005). Раньше
+    // решение было видно только в самой базе.
+    logger.info(
+      'Backup restore: личность установки: ' + (kept.identity === 'own' ? 'своя' : 'из копии')
+      + ', trialStartedAt: ' + (kept.trialStartedAt === 'own' ? 'свой' : 'из копии')
+      + (keptInstall.length > 0 ? ` (свои поля: ${keptInstall.join(', ')})` : ''),
+    )
     return {
       restored,
       safetyBackup: safety.filename,
       version: impact.version,
+      // Что из свойств УСТАНОВКИ пережило восстановление (см. keepInstallFields)
+      kept,
       // Что снесли осознанно — чтобы это было видно и в журнале действий, и в ответе
       lostPayments: impact.payments?.lost || 0,
       lostPaymentsAmount: impact.payments?.lostAmount || 0,

@@ -690,6 +690,17 @@ async function update(req, res, next) {
         return tx.booking.findUnique({ where: { id }, select: BOOKING_SELECT })
       }
 
+      // Старая бронь без строк начислений: её сумма живёт только в кэше
+      // `totalAmount`, и пересборка счёта списком стёрла бы прожитую часть.
+      // Фиксируем прежний итог строкой — ровно то же делает `move()` перед
+      // переездом (R13-S-002). Только когда часть срока уже прожита: если
+      // замораживать нечего, пересчёт по календарю и есть ответ, а строка
+      // прежнего итога легла бы поверх него вторым счётом. Для брони, у которой
+      // строки есть, вызов — пустышка (см. `pinLegacyTotal`).
+      if (frozenBefore) {
+        await pinLegacyTotal(accountId, { client: tx, adminId: req.admin.id })
+      }
+
       // Прожитые ночи не переоцениваем (граница посчитана выше).
       await rebuildChainCharges(accountId, {
         adminId: req.admin.id,
@@ -758,6 +769,16 @@ function bookingDayUTC(date) {
  * граница не опускается — у продолжения цепочки его ночи начинаются с переезда,
  * а у одиночной брони до заезда замораживать нечего.
  *
+ * Рабочая дата замораживает ночи ТОЛЬКО у заселённой брони (R13-S-001). У
+ * `CHECKED_IN` заезд менять нельзя, а выезд двигается только вперёд от рабочей
+ * даты, поэтому набор ночей ниже границы у неё сократиться не может. У всех
+ * остальных может — и тогда «прожитые» ночи, которых в брони больше нет,
+ * оставались в счёте: бронь 05→15.07 переписали на 12→15 («гость приедет
+ * позже»), а в счёте продолжали висеть ночи 05–09.
+ *
+ * Продолжение цепочки остаётся под защитой волны 5a при любом статусе: его ночи
+ * начинаются с переезда, и переоценивать голову правкой хвоста нельзя.
+ *
  * Единственное исключение — заезд подвинули НАЗАД (это разрешено только броням
  * «ремонт»): у появившихся ночей в прошлом строк ещё нет, и заморозка закрыла бы
  * их нулём вместо цены. Такую правку считаем целиком.
@@ -768,9 +789,12 @@ function bookingDayUTC(date) {
  */
 async function resolveFrozenBefore(existing, newCheckIn) {
   const checkIn = bookingDayUTC(existing.checkIn)
+  // Граница волны 5a: у продолжения цепочки — дата его переезда, у остальных её нет.
+  const chainCut = existing.accountBookingId ? existing.checkIn : null
   if (newCheckIn && bookingDayUTC(newCheckIn).getTime() < checkIn.getTime()) {
-    return existing.accountBookingId ? existing.checkIn : null
+    return chainCut
   }
+  if (existing.status !== 'CHECKED_IN') return chainCut
   const businessDate = await getCurrentBusinessDate()
   const cut = businessDate.getTime() > checkIn.getTime() ? bookingDayUTC(businessDate) : checkIn
   // У головы/одиночной брони граница на дате заезда эквивалентна «ничего не заморожено»

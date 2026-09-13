@@ -478,6 +478,8 @@ describe('O13-005/006/007 · что теряется при восстановл
   let licenseStub = null
   let trialStub = null
   let identityStub = null
+  /** Строки журнала: по ним разбирают обращение «рабочие места не находят хост» (R13-S-005). */
+  let logLines = null
   function loadBackup(prisma) {
     process.env.BACKUP_PATH = dir
     process.env.BACKUP_FALLBACK_PATH = dir
@@ -485,10 +487,12 @@ describe('O13-005/006/007 · что теряется при восстановл
     licenseStub = { calls: 0, resetLicenseCache() { this.calls++ } }
     trialStub = { calls: 0, resetTrialCache() { this.calls++ } }
     identityStub = { calls: 0, resetIdentityCache() { this.calls++ } }
+    logLines = []
+    const logger = { ...silentLogger, info: (msg) => logLines.push(String(msg)) }
     return loadCjs('src/utils/backup.js', {
       stubs: {
         './prisma': { prisma },
-        './logger': silentLogger,
+        './logger': logger,
         './license': licenseStub,
         './trial': trialStub,
         './instanceIdentity': identityStub,
@@ -542,7 +546,15 @@ describe('O13-005/006/007 · что теряется при восстановл
     const backup = loadBackup(prisma)
     const name = writeOldDump()
 
-    await backup.restoreBackup(name, 1, { allowDataLoss: true })
+    const res = await backup.restoreBackup(name, 1, { allowDataLoss: true })
+
+    // Что сохранили — видно и в ответе, и в журнале (R13-S-005): раньше решение
+    // было записано только в самой базе.
+    expect(res.kept).toEqual({ identity: 'own', trialStartedAt: 'own' })
+    const line = logLines.find((l) => l.includes('личность установки'))
+    expect(line).toBeTruthy()
+    expect(line).toContain('личность установки: своя')
+    expect(line).toContain('trialStartedAt: свой')
 
     // Сегодня instanceId/instancePublicKey/instancePrivateKey становятся null:
     // колонок в файле нет, все три nullable. Сервер на следующем старте выпишет
@@ -578,7 +590,14 @@ describe('O13-005/006/007 · что теряется при восстановл
       },
     }), 'utf8')
 
-    await backup.restoreBackup(name, 1, { allowDataLoss: true })
+    const res = await backup.restoreBackup(name, 1, { allowDataLoss: true })
+
+    // Личность из копии, срок — свой (в копии он позже). Ровно это и пишется
+    // в журнал: по одной строке видно, что произошло с обеими вещами.
+    expect(res.kept).toEqual({ identity: 'backup', trialStartedAt: 'backup' })
+    const line = logLines.find((l) => l.includes('личность установки'))
+    expect(line).toContain('личность установки: из копии')
+    expect(line).toContain('trialStartedAt: из копии')
 
     // Свою личность здесь возвращать НЕЛЬЗЯ: хост на новом ноутбуке обязан
     // стать тем же, что был на старом, иначе рабочие места его не найдут.

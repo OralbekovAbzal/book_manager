@@ -14,6 +14,35 @@ function signToken(admin) {
   )
 }
 
+// Разрешённая форма логина — ровно та же, что при создании учётки
+// (`routes/users.js`, `routes/setup.js`). Ничего другого в базе появиться не может,
+// значит на входе всё остальное можно отвергать не глядя.
+const USERNAME_RE = /^[a-z0-9._-]+$/
+
+/**
+ * Запасной поиск учётки БЕЗ учёта регистра — для старых баз, где логин мог
+ * сохраниться как `Admin` или `Aigerim` (сегодня все источники учёток пишут
+ * нижний регистр).
+ *
+ * Почему перебором, а не фильтром Prisma. Раньше здесь стоял
+ * `findFirst({ username: { equals, mode: 'insensitive' } })`, а Prisma
+ * компилирует такой фильтр в `ILIKE` — и `%`, введённый в поле «Логин»,
+ * находил ПЕРВУЮ учётку отеля (R13-S-004, подтверждено на демо-базе). Проверка
+ * по `USERNAME_RE` убирает `%`, но `_` в логине разрешён, а в `ILIKE` он значит
+ * «любой один символ»: `admin_2` нашёл бы и `admin12`. Экранировать его через
+ * Prisma нечем (у `equals` нет `ESCAPE`), поэтому регистр складываем сами.
+ * Таблица учёток отеля — это единицы строк, и лишний SELECT здесь дешевле
+ * любого шаблона в SQL.
+ */
+async function findAdminIgnoringCase(normalized) {
+  const rows = await prisma.admin.findMany({
+    select: { id: true, username: true },
+    orderBy: { id: 'asc' },
+  })
+  const hit = rows.find((r) => String(r.username || '').toLowerCase() === normalized)
+  return hit ? prisma.admin.findUnique({ where: { id: hit.id } }) : null
+}
+
 async function login(req, res, next) {
   try {
     const { username, password } = req.body
@@ -23,11 +52,14 @@ async function login(req, res, next) {
     // поиск без учёта регистра нужен старым базам, где логин мог сохраниться
     // как `Admin` или `Aigerim`, — иначе починка входа сломала бы вход им.
     const normalized = (typeof username === 'string' ? username : '').trim().toLowerCase()
+    // Вторая проверка формы логина (первая — в `loginRules`): в базу уходит
+    // только то, что могло там оказаться. Отказ выглядит как обычный неверный
+    // вход — по тому, чем именно не понравился логин, гадать не о чем.
+    if (!USERNAME_RE.test(normalized)) {
+      return res.status(401).json({ error: 'Неверный логин или пароль' })
+    }
     const admin = await prisma.admin.findUnique({ where: { username: normalized } })
-      || await prisma.admin.findFirst({
-        where: { username: { equals: normalized, mode: 'insensitive' } },
-        orderBy: { id: 'asc' },
-      })
+      || await findAdminIgnoringCase(normalized)
     if (!admin || !admin.isActive) {
       return res.status(401).json({ error: 'Неверный логин или пароль' })
     }
@@ -85,4 +117,4 @@ async function changePassword(req, res, next) {
   }
 }
 
-module.exports = { login, logout, me, changePassword }
+module.exports = { login, logout, me, changePassword, USERNAME_RE }

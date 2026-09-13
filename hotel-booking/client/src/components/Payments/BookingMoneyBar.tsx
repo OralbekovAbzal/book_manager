@@ -60,8 +60,16 @@ interface Props {
 }
 
 /** Чтобы «Оплачено» в форме брони могло открыть приём оплаты, не дублируя диалог. */
+/** Как открыть диалог оплаты извне: с пояснением сверху и с действием после закрытия. */
+export interface OpenPaymentOptions {
+  /** Строка над формой — например, «Заезд оформлен. Примите оплату сейчас…». */
+  note?: string
+  /** Зовётся при закрытии диалога любым способом (×, Esc, клик мимо). */
+  onClose?: () => void
+}
+
 export interface BookingMoneyBarHandle {
-  openPayment: () => void
+  openPayment: (opts?: OpenPaymentOptions) => void
 }
 
 export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function BookingMoneyBar(
@@ -87,7 +95,18 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
   const bookingChangedRef = useRef(onBookingChanged)
   bookingChangedRef.current = onBookingChanged
 
-  useImperativeHandle(ref, () => ({ openPayment: () => setDialog(true) }), [])
+  // Параметры внешнего открытия (пояснение и действие после закрытия) — на время
+  // жизни диалога. Открыли кнопкой «Принять оплату» — их нет.
+  const [dialogOpts, setDialogOpts] = useState<OpenPaymentOptions | null>(null)
+  useImperativeHandle(ref, () => ({
+    openPayment: (opts) => { setDialogOpts(opts ?? null); setDialog(true) },
+  }), [])
+  const closeDialog = () => {
+    setDialog(false)
+    const after = dialogOpts?.onClose
+    setDialogOpts(null)
+    after?.()
+  }
 
   const load = () => {
     const my = ++reqId.current
@@ -234,7 +253,8 @@ export const BookingMoneyBar = forwardRef<BookingMoneyBarHandle, Props>(function
           bookingId={bookingId}
           guestName={guestName}
           subtitle={subtitle}
-          onClose={() => setDialog(false)}
+          note={dialogOpts?.note}
+          onClose={closeDialog}
           onChanged={handleChanged}
         />
       )}
@@ -268,9 +288,11 @@ const PaymentDialog: React.FC<{
   bookingId: number
   guestName: string
   subtitle?: string
+  /** Пояснение над формой — когда диалог открыли не кнопкой, а по событию (заезд). */
+  note?: string
   onClose: () => void
   onChanged: (s: BookingMoney) => void
-}> = ({ bookingId, guestName, subtitle, onClose, onChanged }) => {
+}> = ({ bookingId, guestName, subtitle, note, onClose, onChanged }) => {
   const [toast, setToast] = useState('')
   const toastTimer = useRef<number | undefined>(undefined)
   useEffect(() => () => window.clearTimeout(toastTimer.current), [])
@@ -331,6 +353,15 @@ const PaymentDialog: React.FC<{
           >×</button>
         </div>
 
+        {note && (
+          <div style={{
+            margin: '10px 18px 0', padding: '9px 12px', borderRadius: 8,
+            background: 'var(--surface-2)', border: '1px solid var(--s-in)',
+            color: 'var(--text)', fontSize: '0.86rem', lineHeight: 1.4,
+          }}>
+            <span style={{ color: 'var(--s-in)', fontWeight: 700, marginRight: 6 }}>✓</span>{note}
+          </div>
+        )}
         {toast && (
           <div style={{
             margin: '10px 18px 0', padding: '8px 12px', borderRadius: 8,

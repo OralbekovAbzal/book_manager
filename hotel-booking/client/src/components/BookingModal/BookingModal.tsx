@@ -925,6 +925,23 @@ export const BookingModal: React.FC = () => {
   // отправить устаревшее значение на сервер (аудит D5-011, D6-012).
   const [moneySummary, setMoneySummary] = useState<BookingMoney | null>(null)
   const moneyBarRef = useRef<BookingMoneyBarHandle>(null)
+  /**
+   * Оплата сразу после заезда (просьба владельца 13.09.2026): раньше «Заезд»
+   * закрывал форму, и за деньгами приходилось идти отдельно — открывать бронь
+   * заново или искать её в «Кассе». Теперь после заезда (и после «с улицы» с
+   * заездом) форма остаётся открытой и поверх неё сразу диалог оплаты этой
+   * брони; закрыл диалог — закрылась и форма. Id здесь, а не флаг: полоса денег
+   * монтируется только в режиме правки, и открыть диалог можно лишь после того,
+   * как форма переключилась на созданную/заселённую бронь.
+   */
+  const [payAfterCheckInFor, setPayAfterCheckInFor] = useState<number | null>(null)
+  const PAY_AFTER_CHECKIN_NOTE = 'Заезд оформлен. Примите оплату сейчас — или закройте это окно, оплату можно принять позже в «Кассе».'
+  useEffect(() => {
+    if (payAfterCheckInFor == null) return
+    if (modal.mode !== 'edit' || modal.booking?.id !== payAfterCheckInFor || !moneyBarRef.current) return
+    setPayAfterCheckInFor(null)
+    moneyBarRef.current.openPayment({ note: PAY_AFTER_CHECKIN_NOTE, onClose: () => closeModal() })
+  }, [payAfterCheckInFor, modal.mode, modal.booking?.id, closeModal])
   // Подставили ли в НОВУЮ бронь услуги «включено в тариф». Отметка нужна, потому что
   // справочник услуг грузится асинхронно: без неё повторная загрузка вернула бы
   // снятые галочки обратно.
@@ -1721,7 +1738,15 @@ export const BookingModal: React.FC = () => {
           ...(versionAt ? { expectedUpdatedAt: versionAt } : {}),
         })
       } else {
-        await createBooking(payload)
+        const created = await createBooking(payload)
+        // Гость «с улицы» уже стоит у стойки: бронь создана с заездом — сразу
+        // предлагаем принять оплату, не закрывая окно (та же логика, что у «Заезд»).
+        if (values.immediateCheckIn && created?.id) {
+          await Promise.all([fetchGrid(), fetchToday()])
+          openEditModal(created as unknown as GridBooking)
+          setPayAfterCheckInFor(created.id)
+          return
+        }
       }
 
       closeModal()
@@ -1813,9 +1838,29 @@ export const BookingModal: React.FC = () => {
     if (!booking) return
     setSubmitting(true)
     try {
-      await checkInBooking(booking.id)
-      closeModal()
+      const updated = await checkInBooking(booking.id)
       await Promise.all([fetchGrid(), fetchToday()])
+      // Долг известен из полосы денег; если её нет или долга нет — как раньше,
+      // просто закрываем. Иначе остаёмся в форме уже заселённой брони и открываем
+      // оплату поверх неё (см. payAfterCheckInFor).
+      const due = moneySummary?.due ?? ((updated.totalAmount ?? 0) - (updated.paidAmount ?? 0))
+      if (due > 0) {
+        // Та же бронь остаётся открытой, поэтому перезагрузки формы не будет:
+        // версию, снимок для тихой сверки и полную бронь берём из ответа заезда.
+        // Событие `booking:checkin` от нашего же действия уже запустило сверку
+        // со старым снимком — отменяем её номером, иначе всплывёт «Изменена на
+        // другом рабочем месте», а «Сохранить» упёрлось бы в 409 по старой версии.
+        syncReq.current += 1
+        baseline.current = updated
+        setServerBooking(updated)
+        if (updated.updatedAt) setVersionAt(updated.updatedAt)
+        setChangedElsewhere(false)
+        seenTick.current = useRealtimeStore.getState().tick
+        openEditModal({ ...booking, ...updated } as GridBooking)
+        setPayAfterCheckInFor(booking.id)
+      } else {
+        closeModal()
+      }
     } catch (e) {
       // Сервер отвечает содержательно: «раньше даты заезда», «дата выезда уже
       // прошла», «не тот статус». Своё «Ошибка отметки заезда» это скрывало.
